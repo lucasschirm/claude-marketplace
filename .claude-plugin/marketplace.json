@@ -1,0 +1,18 @@
+{
+    "name": "LSC Marketplace",
+    "metadata": {
+        "description": "A claude plugins marketplace with my custom plugins",
+        "version": "1.0.0"
+    },
+    "owner": {
+        "name": "Lucas Caixeta",
+        "email": "lucas@ogenial.com.br"
+    },
+    "plugins": [
+        {
+            "name": "claude-basics",
+            "source": "./plugins/claude-basics",
+            "description": "A collection of agents and skills for everyproject."
+        }
+    ]
+}
