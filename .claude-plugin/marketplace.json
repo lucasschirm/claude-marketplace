@@ -2,7 +2,7 @@
     "name": "lsc-marketplace",
     "metadata": {
         "description": "A claude plugins marketplace with my custom plugins",
-        "version": "1.0.0"
+        "version": "1.0.1"
     },
     "owner": {
         "name": "Lucas Caixeta",
