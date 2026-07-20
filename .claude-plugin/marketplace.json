@@ -2,7 +2,7 @@
     "name": "lsc-marketplace",
     "metadata": {
         "description": "A claude plugins marketplace with my custom plugins",
-        "version": "1.0.2"
+        "version": "1.0.3"
     },
     "owner": {
         "name": "Lucas Caixeta",
@@ -13,6 +13,11 @@
             "name": "lsc-claude-basics",
             "source": "./plugins/claude-basics",
             "description": "A collection of agents and skills for everyproject."
+        },
+        {
+            "name": "lsc-frontend-development",
+            "source": "./plugins/frontend-development",
+            "description": "A collection of agents and skills for frontend development."
         }
     ]
 }
