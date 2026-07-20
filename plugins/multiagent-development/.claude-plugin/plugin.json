@@ -1,0 +1,9 @@
+{
+    "name": "lsc-multiagent-development",
+    "description": "A collection of agents and skills for multi-agent development.",
+    "version": "1.0.0",
+    "author": {
+        "name": "Lucas Caixeta",
+        "email": "lucas@ogenial.com.br"
+    }
+}
