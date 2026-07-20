@@ -4,9 +4,10 @@ A Cowork/Claude Code plugin that converts Figma designs into code with high
 fidelity to variants, component inputs, design tokens, spacing, font sizes, and
 assets. A lead agent extracts the design truth over the **Figma Dev Mode MCP**,
 runs a complete **componentization interview** to decide what becomes a reusable
-component versus what stays embedded, then dispatches specialized subagents to
-extract tokens, export assets, and generate stack-agnostic code with rigid token
-binding.
+component versus what stays embedded, dispatches specialized subagents to extract
+tokens, export assets, and generate stack-agnostic code with rigid token binding,
+then runs a **visual-validation loop** (Playwright MCP + uimatch) that measures the
+rendered output against Figma and auto-fixes — without ever hardcoding behavioral CSS.
 
 ## How it works
 
@@ -21,8 +22,13 @@ figma-to-code-orchestrator  (lead — opus)
 ├─ Phase 3  Build (dispatch per plan)
 │   ├─ component-builder        → one reusable component per dispatch
 │   └─ layout-assembler         → one layout per dispatch (composes components)
-└─ Phase 4  Enforce
-    └─ figma-token-enforcer-qa  → fails build on raw values / prop drift
+├─ Phase 4  Enforce (static gate)
+│   └─ figma-token-enforcer-qa  → fails build on raw values / prop drift
+└─ Phase 5  Visual validation & auto-fix (bounded loop)
+    ├─ visual-validator         → Playwright DOM deltas (primary) + uimatch pixel/ΔE
+    │                             + Design Fidelity Score → discrepancy report
+    ├─ component-builder / layout-assembler → apply token-only fixes
+    └─ figma-token-enforcer-qa  → final gate
 ```
 
 ## Components
@@ -35,9 +41,10 @@ figma-to-code-orchestrator  (lead — opus)
 | `figma-variant-mapper` | sonnet | Variants, derived inputs, instance inventory |
 | `figma-token-extractor` | sonnet | Tokens + raw-value flags |
 | `figma-asset-exporter` | sonnet | SVG/PNG export + manifest |
-| `component-builder` | sonnet | One stack-agnostic component per dispatch |
-| `layout-assembler` | sonnet | Composes layouts from built components |
+| `component-builder` | sonnet | One stack-agnostic component per dispatch (+ token-only fixes) |
+| `layout-assembler` | sonnet | Composes layouts from built components (+ token-only fixes) |
 | `figma-token-enforcer-qa` | sonnet | Strict token/prop fidelity gate |
+| `visual-validator` | sonnet | Playwright DOM deltas + uimatch pixel/ΔE + fidelity score |
 
 **Skills** (`skills/`)
 
@@ -48,10 +55,16 @@ figma-to-code-orchestrator  (lead — opus)
   formats, and the rigid "every value is a token or a confirmed one-off" rule.
 - `figma-dev-mode-extraction` — how to connect to the Dev Mode MCP and what each
   consumer extracts.
+- `visual-validation` — the Phase 5 measurement-first loop, tolerance/stop
+  conditions, and the strict **token-forcing policy** (force values only at the top
+  of the cascade, with comments, after confirming the value belongs at that level).
+  Tooling details for Playwright MCP + uimatch live in `references/`.
 
 **MCP** (`.mcp.json`)
 
 - `figma-dev-mode` — Figma Dev Mode MCP server at `http://127.0.0.1:3845/mcp`.
+- `playwright` — Playwright MCP (`npx @playwright/mcp@latest`) for Phase 5 rendering
+  and DOM measurement.
 
 ## Setup
 
@@ -66,6 +79,20 @@ The MCP tool names in the agent frontmatter (`get_code`, `get_variable_defs`,
 `get_image`, `get_screenshot`, `get_metadata`, `get_code_connect_map`) follow the
 current Dev Mode MCP server. If your version exposes different names, adjust the
 `tools:` lists in `agents/*.md` accordingly — unknown names are simply ignored.
+
+### Phase 5 (visual validation) setup
+
+4. The **Playwright MCP** is preconfigured (`npx @playwright/mcp@latest`); the first
+   run downloads it. Chromium must be installed for Playwright.
+5. Phase 5 reuses **[uimatch](https://github.com/kosaki08/uimatch)** for the pixel/ΔE
+   Design Fidelity Score. It runs via `npx` from the project; set a `FIGMA_TOKEN`
+   env var if you let uimatch fetch the Figma reference over the REST API (otherwise
+   the validator passes it an already-exported reference PNG). If uimatch is
+   unavailable, the loop falls back to DOM-measurement only and says so — it never
+   silently reports a pass.
+6. Phase 5 needs the generated UI running: the orchestrator starts your dev/preview
+   server and validates what is served. Validation is optional — skip it and Phases
+   1–4 still run fully.
 
 ## Usage
 
@@ -88,6 +115,16 @@ builds to that.
 - **The user decides boundaries.** The interview is mandatory — component vs
   embedded, input vs hardcoded, and token sources are the user's call, not the
   agent's guess.
+- **Validation is measurement-first.** DOM deltas (`getComputedStyle` /
+  `getBoundingClientRect`) are the primary signal; the pixel/ΔE score is a coarse
+  second gate. Numbers drive fixes, not eyeballed screenshots.
+- **Auto-fix never breaks the token rule.** A forced value is only ever a commented
+  token assignment at the top of the cascade (`:root` / component root scope, or the
+  theme layer for non-CSS stacks) — never a literal in a behavioral rule, never deep
+  in the CSS. Before forcing, the agent confirms the value belongs at that element's
+  level (not its parent/child) and asks when unsure. Responsive differences are
+  top-level media-query token overrides; section-specific behavior is a more
+  specific scoped token override.
 
 ## Prior art / attribution
 

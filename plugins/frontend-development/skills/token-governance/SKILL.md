@@ -98,12 +98,34 @@ interchange format for Style Dictionary v4+ and design-token tooling.
 - Layout spacing (container gap/padding) is governed too; tokenize it like component
   spacing.
 
+## Forced token overrides (the only permitted hard value)
+
+Visual validation (Phase 5) sometimes needs to pin a value that has no shared token.
+The one and only permitted form of a hard value is a **commented token assignment at
+the top of the cascade** — never a literal on a behavioral property, never deep in a
+rule. See the `visual-validation` skill for the full policy. In brief:
+
+- Plain CSS / CSS variables: assign the forced value in `:root { }` or the
+  component's root-scope custom-property block. Responsive: override the token inside
+  a top-level media-query block. Section-specific: a more specific scoped token
+  override. Behavioral rules keep referencing `var(--token)`.
+- Tailwind / CSS-in-JS / styled-components: force only at the theme/token definition
+  layer (root or component-scoped theme override); usage sites keep referencing the
+  token key.
+- Every forced assignment carries a comment naming the Figma node, the measured
+  value, and why no shared token applied. A forced assignment without that comment is
+  a violation.
+- Only force after confirming the value belongs at that element's level (not its
+  parent/child), and never to close a delta already within tolerance.
+
 ## Enforcement rules (QA gate)
 
 A finding (build-failing) is any of:
 
 - A governed literal (hex/rgb/hsl/named color, raw px/rem type size, raw spacing,
-  raw radius/shadow) not on the one-off allowlist.
+  raw radius/shadow) that is NOT on the one-off allowlist AND is NOT a commented
+  top-of-cascade forced token assignment. A hard literal on a behavioral property or
+  deep in a rule is always a finding.
 - A token reference that does not resolve to a token in the map.
 - A "near miss" substitution the code made on its own (e.g., mapping a 15px value to
   a 16px token without interview approval).

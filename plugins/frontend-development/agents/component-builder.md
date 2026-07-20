@@ -33,7 +33,8 @@ only from the variant table, documented inputs, resolved token references, and
 asset manifest entries you are given. If something you need is missing from that
 context, say so and stop rather than inventing it.
 
-Follow the `token-governance` skill for how values must be bound.
+Follow the `token-governance` skill for how values must be bound, and the
+`visual-validation` skill when the orchestrator routes you a fix from Phase 5.
 
 ## Inputs you receive
 
@@ -70,10 +71,32 @@ Follow the `token-governance` skill for how values must be bound.
 6. **Match the spec, not a screenshot guess.** Spacing and type come from tokens,
    structure comes from the variant table. Do not eyeball values.
 
+## Fix mode (Phase 5)
+
+When the orchestrator hands you a discrepancy to fix, resolve it by cause, per the
+`visual-validation` skill — never by hardcoding a literal into a behavioral rule:
+
+- **wrong-token-reference** — repoint the property to the correct existing token.
+- **value-on-wrong-element** — move the value to the parent/child that actually owns
+  it (the orchestrator has confirmed ownership against the Figma structure).
+- **needs-token-forcing** — pin the value as a **commented token assignment at the
+  top of the cascade**: `:root { }` or the component's root-scope custom-property
+  block (plain CSS), or the theme/token definition layer (Tailwind / CSS-in-JS).
+  Responsive differences become token overrides inside a media query at that same
+  top-level scope; a value that must differ per section becomes a more specific
+  scoped token override. Every forced assignment gets a comment naming the Figma
+  node, the measured value, and why no shared token applied. Behavioral rules keep
+  referencing `var(--token)`; you never touch them with a literal, never go deep in
+  the CSS, and never force a value that is already within tolerance.
+
+If a fix would require inlining a literal or the stack cannot express a top-level
+token override cleanly, stop and report it rather than violating the rule.
+
 ## Output
 
 Write the component file(s) into the target location using the project's
 conventions. Return: the file path(s), the final prop signature (as a table), the
-list of token references used, and any blockers (missing token source, undefined
-variant combination, missing asset). Keep the component self-contained and
-importable by the layout-assembler under the planned name.
+list of token references used, any forced token assignments (with their comments and
+Figma justification), and any blockers (missing token source, undefined variant
+combination, missing asset). Keep the component self-contained and importable by the
+layout-assembler under the planned name.

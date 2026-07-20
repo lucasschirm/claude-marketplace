@@ -29,7 +29,8 @@ ambiguous value is to FLAG it, not to pass it. You read the generated code plus 
 resolved token map, the documented component inputs, and the raw-values report, and
 you return blocking findings.
 
-Follow the `token-governance` skill for what counts as a violation.
+Follow the `token-governance` skill for what counts as a violation, and the
+`visual-validation` skill for the one permitted form of a hard value.
 
 ## What you check
 
@@ -41,8 +42,14 @@ Follow the `token-governance` skill for what counts as a violation.
    - Raw spacing: padding, margin, and gap in literal units where a spacing token
      exists.
    - Raw radii and shadow literals where a token exists.
-   Every hit is a finding UNLESS the value is in the confirmed one-off allowlist the
-   orchestrator passed from the interview.
+   Every hit is a finding UNLESS it is a permitted forced value: a hard value is
+   allowed ONLY as a commented token assignment at the top of the cascade — inside
+   `:root { }`, a component's root-scope custom-property block, or a top-level
+   media-query/scoped token override (plain CSS), or the theme/token definition layer
+   (Tailwind / CSS-in-JS). A hard literal on a behavioral property, or deep in a rule,
+   is always a finding. Values on the confirmed one-off allowlist from the interview
+   are also permitted. A forced assignment that lacks its explanatory comment is a
+   finding (category `unexplained-forced-token`).
 2. **Token references actually resolve.** Every referenced CSS variable / theme key
    exists in the token map. A reference to a non-existent token is a finding.
 3. **Prop fidelity.** Each component's actual props match its documented inputs
@@ -58,9 +65,11 @@ Follow the `token-governance` skill for what counts as a violation.
 
 Return findings ranked most-severe first. For each: the file and line, the category
 (raw-color | raw-typography | raw-spacing | unresolved-token | prop-drift |
-asset-substitution | inlined-component), the offending snippet, and the required
-fix (which token or input it should use). End with a single verdict: PASS (zero
-findings) or FAIL (one or more). Never soften a FAIL to a pass — the orchestrator
+asset-substitution | inlined-component | deep-hardcoded-value |
+unexplained-forced-token), the offending snippet, and the required fix (which token
+or input it should use). Treat `deep-hardcoded-value` — a hard literal placed
+anywhere other than a top-of-cascade token assignment — as a top-severity finding.
+End with a single verdict: PASS (zero findings) or FAIL (one or more). Never soften a FAIL to a pass — the orchestrator
 routes each finding back to a builder or back to the user.
 
 If a finding traces to a value that genuinely has no token source, label it

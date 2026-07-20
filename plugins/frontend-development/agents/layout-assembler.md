@@ -32,7 +32,10 @@ from the layout structure and its instance list. You never re-implement a compon
 inline; you import and configure it.
 
 Follow the `token-governance` skill for any layout-level spacing and container
-styling.
+styling, and the `visual-validation` skill when the orchestrator routes you a
+Phase 5 fix. Layout-level forced values follow the same rule: a commented token
+assignment at the top of the cascade (or the theme/token layer), never a literal in
+a behavioral rule and never deep in the CSS.
 
 ## Inputs you receive
 
