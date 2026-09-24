@@ -24,43 +24,53 @@ devin -p "<prompt>" \
 
 Those two permission modes are the only ones that work in `-p`. `accept-edits` looks like the right choice for coding and is not — see below.
 
+## Finding the free model
+To find models that are available for free use the command below. If you have the "devinp" installed you can use `devinp` to know the cost/performance trade-offs of each model. If any session return out of usage available you should use the free model if any available.
+
+```bash
+devin models list | grep Free
+```
+
 ## Routing table
 
-| Task class                                | Model            | Context | Cost        |
-| :---------------------------------------- | :--------------- | :------ | :---------- |
-| Research, planning, implementation review | `glm-5-2`        | 200K    | Free        |
-| Investigation and debugging complex tasks | `glm-5-2`        | 200K    | Free        |
-| Complex coding                            | `swe-1-7`        | 262K    | Free (beta) |
-| Simple coding / configuration             | `swe-1-7-medium` | 262K    | Free (beta) |
-
-All three are free. Cost is never a reason to pick a smaller model — routing is about fit, not budget.
+| Task class                                | Model       | 
+| :---------------------------------------- | :---------- | 
+| Research, planning | `glm-5-3-flash-max`  | 
+| implementation review | `swe-2-max`  | 
+| Investigation and debugging complex tasks | `glm-5-3-flash-max`  | 
+| Complex coding                            | `swe-2-max`  | 
+| Simple coding / configuration             | `swe-2-high` | 
 
 ## Classifying the task
 
 ```dot
 digraph classify {
     "Will a successful run change the working tree?" [shape=diamond];
-    "Fully specified AND <=2 files AND no new interface?" [shape=diamond];
-    "glm-5-2" [shape=box];
-    "swe-1-7-medium" [shape=box];
-    "swe-1-7" [shape=box];
+    "Fully specified AND <=3 files AND no new interface?" [shape=diamond];
+    "glm-5-3-flash-max" [shape=box];
+    "swe-2-high" [shape=box];
+    "swe-2-max" [shape=box];
 
-    "Will a successful run change the working tree?" -> "glm-5-2" [label="no"];
-    "Will a successful run change the working tree?" -> "Fully specified AND <=2 files AND no new interface?" [label="yes"];
-    "Fully specified AND <=2 files AND no new interface?" -> "swe-1-7-medium" [label="all three yes"];
-    "Fully specified AND <=2 files AND no new interface?" -> "swe-1-7" [label="any no"];
+    "Will a successful run change the working tree?" -> "glm-5-3-flash-max" [label="no"];
+    "Will a successful run change the working tree?" -> "Fully specified AND <=3 files AND no new interface?" [label="yes"];
+    "Fully specified AND <=3 files AND no new interface?" -> "swe-2-high" [label="all three yes"];
+    "Fully specified AND <=3 files AND no new interface?" -> "swe-2-max" [label="any no"];
 }
 ```
 
-### Research, planning, implementation review → `glm-5-2`
+### Research and planning → `glm-5-3-flash-max`
 
 The deliverable is prose — an answer, a plan, or a judgment. A successful run leaves the working tree unchanged.
 
 - **Research** — how does X work, where is Y implemented, what calls Z, mapping dependencies or data flow, comparing libraries or approaches, reading specs and docs, reproducing and diagnosing a bug _without_ fixing it.
 - **Planning** — designs, task breakdowns, migration strategies, ADR drafts, estimating blast radius, deciding an approach before code exists.
-- **Implementation review** — reading an existing diff, branch, or module and judging it: correctness, spec compliance, security, test coverage, quality.
 
-### Complex coding → `swe-1-7`
+
+### Implementation review → `swe-2-max`
+
+Is the task to review an existing implementation (diff, branch, module) and judge it based on correctness, spec compliance, security, test coverage, quality?
+
+### Complex coding → `swe-2-max`
 
 Changes code, and **any one** of these holds:
 
@@ -71,7 +81,7 @@ Changes code, and **any one** of these holds:
 - Involves concurrency, state machines, data migrations, snapshot/lifecycle logic, or security-relevant code.
 - Cannot be fully specified up front — the agent must explore the codebase to learn what to write.
 
-### Simple coding / configuration → `swe-1-7-medium`
+### Simple coding / configuration → `swe-2-high`
 
 Changes code or config, and **all** of these hold:
 
@@ -84,12 +94,12 @@ Changes code or config, and **all** of these hold:
 
 | Situation                                                                                          | Rule                                                                                                                                                                                       |
 | :------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A coding task sits between simple and complex                                                      | Use `swe-1-7`. Under-powering costs a wasted run; over-powering costs nothing.                                                                                                             |
+| A coding task sits between simple and complex                                                      | Use the more powerful model. Under-powering costs a wasted run; over-powering costs nothing.                                                                                                               |
 | Task mixes classes ("review this, then fix it")                                                    | Split into separate invocations, each with its own model. Do not pick one model for both halves.                                                                                           |
-| "Fix this bug" with unknown cause                                                                  | Diagnosis is research (`glm-5-2`); the fix is a separate run classed on its own.                                                                                                           |
-| Task looks simple but the file is unfamiliar                                                       | Not fully specified → `swe-1-7`.                                                                                                                                                           |
-| Writing or updating tests only                                                                     | Complex (`swe-1-7`) unless it is a mechanical assertion tweak in one file.                                                                                                                 |
-| An empirical spike — deliverable is a report, but the run must install, execute, or measure things | Coding class (`swe-1-7`). Classify by what the run must _do_, not by what it hands back. "Research" in the routing table means reading; a spike that runs things needs an engine that can. |
+| "Fix this bug" with unknown cause                                                                  | Diagnosis is research; the fix is a separate run classed on its own.                                                                                                           |
+| Task looks simple but the file is unfamiliar                                                       | Not fully specified → use the more powerful model.                                                                                                                                           |
+| Writing or updating tests only                                                                     | Complex unless it is a mechanical assertion tweak in one file.                                                                                                                             |
+| An empirical spike — deliverable is a report, but the run must install, execute, or measure things | Coding class. Classify by what the run must _do_, not by what it hands back. "Research" in the routing table means reading; a spike that runs things needs an engine that can.                 |
 
 ## Flags that matter
 
@@ -135,7 +145,7 @@ Practical consequence: when a coding delegation needs approval, the real choice 
   echo; echo "## FILE: path/to/thing.ts"; echo '```'
   cat path/to/thing.ts; echo '```'
 } > /tmp/prompt.md
-devin -p --prompt-file /tmp/prompt.md --model glm-5-2 --permission-mode auto --respect-workspace-trust false
+devin -p --prompt-file /tmp/prompt.md --model glm-5-3-flash-max --permission-mode auto --respect-workspace-trust false
 ````
 
 Cost: devin plans blind to anything you did not inline. It cannot see the working tree, so it will invent state — proposing to create directories that already exist, or flagging a decision as open when an ADR already settled it. **Reconcile its output against the real tree before acting on it.**
@@ -173,7 +183,7 @@ One cross-cutting check parallel runs need and single runs do not: **if one sess
 
 - **Omitting `--model`.** The run silently inherits `agent.model` from config and quietly uses the wrong engine. The template exists so this cannot happen.
 - **Classifying by prompt length.** A one-line prompt can describe a cross-cutting refactor. Classify by the change, not the sentence.
-- **Using `glm-5-2` for coding because it is the config default.** The default is set for research; it is not a fallback.
+- **Using `glm-5-3-flash-max` for coding because it is the config default.** The default is set for research; it is not a fallback.
 - **Forgetting `--respect-workspace-trust false`** in a scripted run, then reading the trust failure as a model or prompt problem.
 - **Expecting machine-readable output.** There is no JSON output format — `-p` prints prose. Parse accordingly, or have devin write results to a file.
 - **Expecting progressive output.** `-p` buffers everything until exit — a redirected log stays empty for the whole run, however long it is. Do not poll it for progress and do not read the silence as a hang. Watch side effects instead: `git status` in the worktree, or files the run is expected to create.
@@ -190,7 +200,7 @@ One cross-cutting check parallel runs need and single runs do not: **if one sess
 
 ```bash
 devin models list          # all families, IDs, context windows, prices
-devin -p "Reply with exactly the name of the model you are running as, nothing else." --model glm-5-2
+devin -p "Reply with exactly the name of the model you are running as, nothing else." --model swe-2-max
 ```
 
 Model IDs change between CLI versions. If an ID in the routing table is rejected, re-check `devin models list` before substituting a different family.
