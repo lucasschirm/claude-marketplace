@@ -76,32 +76,59 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
 
 #### How to Install
 
-##### Option 1: Global Installation (Available across all projects)
+Install the extension directly from GitHub using Pi's built-in package manager:
 
-Copy [`extensions/observe-pr.ts`](file:///home/lucas/orca/workspaces/claude-marketplace/Pi-Plugin/extensions/observe-pr.ts) into your personal Pi extensions directory:
+##### Option 1: Global Installation (Recommended)
+
+Install the package globally to make `observe_pr` available across all your Pi sessions:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions
-cp extensions/observe-pr.ts ~/.pi/agent/extensions/observe-pr.ts
+pi install git:github.com/lucasschirm/claude-marketplace
 ```
 
-Pi automatically discovers and loads extensions from `~/.pi/agent/extensions/` on startup.
-
-##### Option 2: Project-Level Installation
-
-Place the extension inside the project's `.pi/extensions/` folder:
+Or using HTTPS:
 
 ```bash
-mkdir -p .pi/extensions
-cp extensions/observe-pr.ts .pi/extensions/observe-pr.ts
+pi install https://github.com/lucasschirm/claude-marketplace
 ```
 
-When running `pi` inside the project, ensure project files are trusted (e.g., `pi --approve` or approving on prompt).
-
-##### Option 3: Direct Load During a Session
-
-Load the extension for a single session without copying:
+To install from a specific branch or tag:
 
 ```bash
-pi --extension ./extensions/observe-pr.ts
+pi install git:github.com/lucasschirm/claude-marketplace@main
+```
+
+##### Option 2: Project-Local Installation
+
+To enable the extension only for the current project, add `-l` (or `--local`):
+
+```bash
+pi install git:github.com/lucasschirm/claude-marketplace -l
+```
+
+This writes the package configuration into the local `.pi/settings.json`.
+
+##### Managing the Package
+
+- **Update**: Pull the latest changes for your installed extensions:
+  ```bash
+  pi update --extensions
+  ```
+- **List installed packages**:
+  ```bash
+  pi list
+  ```
+- **Remove**:
+  ```bash
+  pi remove git:github.com/lucasschirm/claude-marketplace
+  ```
+
+##### One-Off Trial
+
+Try the extension for a single session without installing it into settings:
+
+```bash
+pi -e git:github.com/lucasschirm/claude-marketplace
+# or locally:
+pi -e ./extensions/observe-pr.ts
 ```

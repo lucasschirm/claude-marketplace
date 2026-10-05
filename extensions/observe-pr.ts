@@ -114,11 +114,13 @@ class PRObserverDashboardComponent {
 
 export default function (pi: ExtensionAPI) {
 	// Register configurable CLI flag for watch/poll intervals
-	pi.registerFlag("pr-observer-interval", {
-		description: "Watch and poll interval in seconds for PR observer (default: 60)",
-		type: "string",
-		default: "60",
-	});
+	try {
+		pi.registerFlag("pr-observer-interval", {
+			description: "Watch and poll interval in seconds for PR observer (default: 60)",
+			type: "string",
+			default: "60",
+		});
+	} catch {}
 
 	// Prevent duplicate instance registration if loaded from multiple paths
 	if ((globalThis as any)[GLOBAL_GUARD_KEY]) {
