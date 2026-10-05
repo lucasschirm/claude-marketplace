@@ -1,0 +1,681 @@
+import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
+
+interface CommentInfo {
+	id: string;
+	number: string;
+	updatedAt?: string;
+	body?: string;
+}
+
+interface ObservedPR {
+	prNumber: number;
+	cwd: string;
+	checksProcess?: ChildProcess;
+	activeRuns: Set<string>;
+	seenRuns: Set<string>;
+	failedRuns: Set<string>;
+	completedRuns: Set<string>;
+	runProcesses: Map<string, ChildProcess>;
+	pollTimer?: NodeJS.Timeout;
+	restartTimer?: NodeJS.Timeout;
+	knownComments: Map<string, CommentInfo>;
+	allPassedReported?: boolean;
+}
+
+interface PRObserverStats {
+	isEnabled: boolean;
+	interval: number;
+	prs: Array<{
+		prNumber: number;
+		activeRuns: string[];
+		completedCount: number;
+		failedCount: number;
+		commentsCount: number;
+	}>;
+}
+
+class PRObserverDashboardComponent {
+	private theme: any;
+	private getStats: () => PRObserverStats;
+	private onClose: () => void;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
+	constructor(theme: any, getStats: () => PRObserverStats, onClose: () => void) {
+		this.theme = theme;
+		this.getStats = getStats;
+		this.onClose = onClose;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+			this.onClose();
+		}
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+
+		const lines: string[] = [];
+		const th = this.theme;
+		const stats = this.getStats();
+
+		lines.push("");
+		const title = th.fg("accent", " PR Observer Dashboard ");
+		const headerLine =
+			th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 28)));
+		lines.push(truncateToWidth(headerLine, width));
+		lines.push("");
+
+		const toolStatus = stats.isEnabled ? th.fg("success", "● Enabled") : th.fg("error", "○ Disabled");
+		lines.push(truncateToWidth(`  Tool status: ${toolStatus}  (Interval: ${stats.interval}s)`, width));
+		lines.push("");
+
+		if (stats.prs.length === 0) {
+			lines.push(truncateToWidth(`  ${th.fg("dim", "No PRs currently being observed.")}`, width));
+			lines.push(truncateToWidth(`  ${th.fg("dim", "Use the observe_pr tool to start observing a PR.")}`, width));
+		} else {
+			lines.push(truncateToWidth(`  ${th.fg("muted", `Observing ${stats.prs.length} PR(s):`)}`, width));
+			lines.push("");
+
+			for (const pr of stats.prs) {
+				const prHeader = `  ${th.fg("accent", `#${pr.prNumber}`)}: ${pr.activeRuns.length} active run(s), ${pr.completedCount} passed, ${pr.failedCount} failed, ${pr.commentsCount} comments tracked`;
+				lines.push(truncateToWidth(prHeader, width));
+
+				if (pr.activeRuns.length > 0) {
+					lines.push(truncateToWidth(`    Active run IDs: ${th.fg("warning", pr.activeRuns.join(", "))}`, width));
+				}
+			}
+		}
+
+		lines.push("");
+		lines.push(truncateToWidth(`  ${th.fg("dim", "Press Escape or 'q' to close")}`, width));
+		lines.push("");
+
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+}
+
+export default function (pi: ExtensionAPI) {
+	// Register configurable CLI flag for watch/poll intervals
+	pi.registerFlag("pr-observer-interval", {
+		description: "Watch and poll interval in seconds for PR observer (default: 60)",
+		type: "string",
+		default: "60",
+	});
+
+	// Prevent duplicate instance registration if loaded from multiple paths
+	if ((globalThis as any)[GLOBAL_GUARD_KEY]) {
+		return;
+	}
+	(globalThis as any)[GLOBAL_GUARD_KEY] = true;
+
+	const observedPRs = new Map<number, ObservedPR>();
+	let lastUIContext: ExtensionUIContext | undefined;
+
+	function getObserverInterval(): number {
+		const flagVal = pi.getFlag("pr-observer-interval");
+		const parsed = parseInt(String(flagVal || "60"), 10);
+		return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
+	}
+
+	function updateStatusUI(ui?: ExtensionUIContext) {
+		const targetUI = ui || lastUIContext;
+		if (!targetUI) return;
+
+		const totalPrs = observedPRs.size;
+		let totalRuns = 0;
+		for (const pr of observedPRs.values()) {
+			totalRuns += pr.activeRuns.size;
+		}
+
+		if (totalPrs > 0) {
+			targetUI.setStatus("pr_observer", `${totalPrs}/${totalRuns} observed`);
+		} else {
+			targetUI.setStatus("pr_observer", undefined);
+		}
+	}
+
+	function sendAgentMessage(content: string) {
+		try {
+			pi.sendUserMessage(content, { deliverAs: "followUp" });
+		} catch (err) {
+			console.error("[observe_pr] Failed to send message to agent:", err);
+		}
+	}
+
+	function getStats(): PRObserverStats {
+		const activeTools = pi.getActiveTools();
+		const isEnabled = activeTools.includes("observe_pr");
+		const prs = Array.from(observedPRs.values()).map((p) => ({
+			prNumber: p.prNumber,
+			activeRuns: Array.from(p.activeRuns),
+			completedCount: p.completedRuns.size,
+			failedCount: p.failedRuns.size,
+			commentsCount: p.knownComments.size,
+		}));
+
+		return {
+			isEnabled,
+			interval: getObserverInterval(),
+			prs,
+		};
+	}
+
+	async function getRunErrorSummary(runId: string, cwd: string): Promise<string> {
+		try {
+			const { stdout, stderr } = await execFileAsync("gh", ["run", "view", runId, "--log-failed"], {
+				cwd,
+				maxBuffer: 2 * 1024 * 1024,
+			});
+			const output = (stdout || stderr || "").trim();
+			if (output && !output.includes("log not found")) {
+				const lines = output.split("\n").filter((l) => l.trim().length > 0);
+				return lines.slice(-20).join("\n");
+			}
+		} catch {
+			// Fallback to standard run view if log-failed is not available
+		}
+
+		try {
+			const { stdout, stderr } = await execFileAsync("gh", ["run", "view", runId], {
+				cwd,
+				maxBuffer: 1024 * 1024,
+			});
+			const output = (stdout || stderr || "").trim();
+			if (output) {
+				return output;
+			}
+		} catch (err: any) {
+			return err.message || "Failed to retrieve CI run error summary";
+		}
+
+		return "No failure summary available.";
+	}
+
+	async function checkAllCIPassed(prNumber: number, pr: ObservedPR) {
+		if (pr.activeRuns.size !== 0) return;
+		if (pr.allPassedReported) return;
+
+		try {
+			const { stdout } = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
+				cwd: pr.cwd,
+			});
+			const checks = JSON.parse(stdout);
+			if (Array.isArray(checks) && checks.length > 0) {
+				const hasPending = checks.some((c: any) => c.bucket === "pending" || c.state === "PENDING");
+				const hasFailed = checks.some((c: any) => c.bucket === "fail" || c.state === "FAILURE" || c.state === "ERROR");
+
+				if (!hasPending && !hasFailed) {
+					pr.allPassedReported = true;
+					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+				}
+			} else if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
+				pr.allPassedReported = true;
+				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+			}
+		} catch {
+			if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
+				pr.allPassedReported = true;
+				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+			}
+		}
+	}
+
+	async function watchRun(prNumber: number, runId: string, cwd: string) {
+		const pr = observedPRs.get(prNumber);
+		if (!pr) return;
+
+		pr.allPassedReported = false;
+		const intervalStr = String(getObserverInterval());
+
+		let output = "";
+		let child: ChildProcess;
+		try {
+			child = spawn("gh", ["run", "watch", runId, "--compact", "--interval", intervalStr], {
+				cwd,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (err) {
+			console.error(`[observe_pr] Error spawning gh run watch ${runId}:`, err);
+			return;
+		}
+
+		child.on("error", (err) => {
+			console.error(`[observe_pr] Error in gh run watch process for run ${runId}:`, err);
+		});
+
+		pr.runProcesses.set(runId, child);
+
+		child.stdout?.on("data", (chunk) => {
+			output += chunk.toString();
+		});
+		child.stderr?.on("data", (chunk) => {
+			output += chunk.toString();
+		});
+
+		child.on("close", async (exitCode) => {
+			const currentPr = observedPRs.get(prNumber);
+			if (!currentPr) return;
+
+			currentPr.runProcesses.delete(runId);
+
+			let conclusion = "unknown";
+			try {
+				const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status"], {
+					cwd,
+				});
+				const parsed = JSON.parse(stdout);
+				conclusion = parsed.conclusion || "unknown";
+			} catch {
+				if (exitCode !== 0 || output.includes("failure") || output.includes("cancelled")) {
+					conclusion = "failure";
+				} else if (output.includes("success") || exitCode === 0) {
+					conclusion = "success";
+				}
+			}
+
+			if (conclusion === "failure" || (exitCode !== 0 && conclusion !== "success")) {
+				currentPr.failedRuns.add(runId);
+				currentPr.activeRuns.delete(runId);
+				updateStatusUI();
+
+				const errorSummary = await getRunErrorSummary(runId, cwd);
+				sendAgentMessage(
+					`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`,
+				);
+			} else {
+				currentPr.completedRuns.add(runId);
+				currentPr.activeRuns.delete(runId);
+				updateStatusUI();
+
+				await checkAllCIPassed(prNumber, currentPr);
+			}
+		});
+	}
+
+	function parseCommentInfo(rawComment: any, index: number): CommentInfo {
+		const url = rawComment.url || "";
+		const match = url.match(/#(?:issuecomment|discussion_r|r|pullrequestreviewcomment-)(\d+)/);
+		const dbId = rawComment.databaseId ? String(rawComment.databaseId) : undefined;
+		const id = String(rawComment.id || dbId || index + 1);
+		const commentNumber = match ? match[1] : (dbId || id);
+
+		return {
+			id,
+			number: commentNumber,
+			updatedAt: rawComment.updatedAt || rawComment.updated_at || rawComment.createdAt,
+			body: rawComment.body,
+		};
+	}
+
+	async function pollPR(prNumber: number) {
+		const pr = observedPRs.get(prNumber);
+		if (!pr) return;
+
+		try {
+			const { stdout } = await execFileAsync(
+				"gh",
+				["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup"],
+				{ cwd: pr.cwd },
+			);
+			const data = JSON.parse(stdout);
+
+			const state = String(data.state || "").toUpperCase();
+			if (state === "MERGED" || state === "CLOSED") {
+				const status = state === "MERGED" ? "merged" : "canceled";
+				sendAgentMessage(
+					`Stoping observing the pr ${prNumber}. The PR was ${status}. You will no longer receive updates about this PR.`,
+				);
+				stopObserving(prNumber);
+				return;
+			}
+
+			// Check for newly triggered runs via statusCheckRollup
+			if (Array.isArray(data.statusCheckRollup)) {
+				for (const check of data.statusCheckRollup) {
+					const url = check.detailsUrl || "";
+					const match = url.match(/\/actions\/runs\/(\d+)/);
+					if (match) {
+						const runId = match[1];
+						if (!pr.seenRuns.has(runId)) {
+							pr.seenRuns.add(runId);
+							pr.activeRuns.add(runId);
+							updateStatusUI();
+							watchRun(prNumber, runId, pr.cwd);
+						}
+					}
+				}
+			}
+
+			// Check comments
+			if (Array.isArray(data.comments)) {
+				const changedNumbers: string[] = [];
+
+				for (let i = 0; i < data.comments.length; i++) {
+					const info = parseCommentInfo(data.comments[i], i);
+					const existing = pr.knownComments.get(info.id);
+
+					if (!existing) {
+						changedNumbers.push(info.number);
+						pr.knownComments.set(info.id, info);
+					} else if (
+						(info.updatedAt && existing.updatedAt && info.updatedAt !== existing.updatedAt) ||
+						(info.body && existing.body && info.body !== existing.body)
+					) {
+						changedNumbers.push(info.number);
+						pr.knownComments.set(info.id, info);
+					}
+				}
+
+				if (changedNumbers.length > 0) {
+					sendAgentMessage(`Comment ${changedNumbers.join(", ")} added or updated to the PR ${prNumber}.`);
+				}
+			}
+
+			// Verify if all runs and checks passed
+			await checkAllCIPassed(prNumber, pr);
+		} catch (err) {
+			console.error(`[observe_pr] Error polling PR ${prNumber}:`, err);
+		}
+	}
+
+	function startObserving(prNumber: number, initialComments: any[], cwd: string, ui?: ExtensionUIContext) {
+		if (ui) {
+			lastUIContext = ui;
+		}
+
+		const pr: ObservedPR = {
+			prNumber,
+			cwd,
+			activeRuns: new Set(),
+			seenRuns: new Set(),
+			failedRuns: new Set(),
+			completedRuns: new Set(),
+			runProcesses: new Map(),
+			knownComments: new Map(),
+			allPassedReported: false,
+		};
+
+		if (Array.isArray(initialComments)) {
+			initialComments.forEach((c, idx) => {
+				const info = parseCommentInfo(c, idx);
+				pr.knownComments.set(info.id, info);
+			});
+		}
+
+		observedPRs.set(prNumber, pr);
+		updateStatusUI(ui);
+
+		const interval = getObserverInterval();
+		const intervalStr = String(interval);
+
+		function startChecksProcess() {
+			if (!observedPRs.has(prNumber)) return;
+
+			let checksProc: ChildProcess;
+			try {
+				checksProc = spawn("gh", ["pr", "checks", String(prNumber), "--watch", "--interval", intervalStr], {
+					cwd,
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+			} catch (err) {
+				console.error(`[observe_pr] Error spawning gh pr checks for PR ${prNumber}:`, err);
+				return;
+			}
+
+			checksProc.on("error", (err) => {
+				console.error(`[observe_pr] Error in gh pr checks process for PR ${prNumber}:`, err);
+			});
+
+			pr.checksProcess = checksProc;
+
+			let lineBuffer = "";
+			const handleData = (chunk: Buffer) => {
+				lineBuffer += chunk.toString();
+				const lines = lineBuffer.split("\n");
+				lineBuffer = lines.pop() || "";
+
+				for (const line of lines) {
+					const runRegex = /\/actions\/runs\/(\d+)/g;
+					let match: RegExpExecArray | null;
+					while ((match = runRegex.exec(line)) !== null) {
+						const runId = match[1];
+						if (!pr.seenRuns.has(runId)) {
+							pr.seenRuns.add(runId);
+							pr.activeRuns.add(runId);
+							updateStatusUI();
+							watchRun(prNumber, runId, cwd);
+						}
+					}
+				}
+			};
+
+			checksProc.stdout?.on("data", handleData);
+			checksProc.stderr?.on("data", handleData);
+
+			checksProc.on("close", () => {
+				if (!observedPRs.has(prNumber)) return;
+				// Restart after interval if PR is still observed
+				pr.restartTimer = setTimeout(() => {
+					if (observedPRs.has(prNumber)) {
+						startChecksProcess();
+					}
+				}, interval * 1000);
+			});
+		}
+
+		startChecksProcess();
+
+		pr.pollTimer = setInterval(() => {
+			pollPR(prNumber);
+		}, interval * 1000);
+	}
+
+	function stopObserving(prNumber: number) {
+		const pr = observedPRs.get(prNumber);
+		if (!pr) return;
+
+		if (pr.pollTimer) {
+			clearInterval(pr.pollTimer);
+		}
+
+		if (pr.restartTimer) {
+			clearTimeout(pr.restartTimer);
+		}
+
+		if (pr.checksProcess) {
+			try {
+				pr.checksProcess.kill("SIGTERM");
+			} catch {}
+		}
+
+		for (const proc of pr.runProcesses.values()) {
+			try {
+				proc.kill("SIGTERM");
+			} catch {}
+		}
+
+		pr.runProcesses.clear();
+		observedPRs.delete(prNumber);
+		updateStatusUI();
+	}
+
+	function cleanupAll() {
+		for (const prNumber of Array.from(observedPRs.keys())) {
+			stopObserving(prNumber);
+		}
+	}
+
+	pi.on("session_start", (_evt, ctx) => {
+		lastUIContext = ctx.ui;
+		updateStatusUI(ctx.ui);
+	});
+
+	pi.on("session_shutdown", () => {
+		delete (globalThis as any)[GLOBAL_GUARD_KEY];
+		cleanupAll();
+	});
+
+	pi.registerTool({
+		name: "observe_pr",
+		label: "Observe PR",
+		description:
+			"Observe CI checks, runs, and comments for a pull request. Automatically watches runs and notifies when CI fails or finishes. Calling again on the same PR stops observation.",
+		parameters: Type.Object({
+			pr_number: Type.Union([Type.Number(), Type.String()], {
+				description: "The pull request number to observe",
+			}),
+		}),
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
+			lastUIContext = ctx.ui;
+			const rawPr = (params as any)?.pr_number ?? (params as any)?.prNumber ?? (params as any)?.pr;
+			const cleanStr = String(rawPr ?? "").replace(/^#/, "").trim();
+			const prNumber = parseInt(cleanStr, 10);
+
+			if (isNaN(prNumber) || prNumber <= 0) {
+				return {
+					content: [{ type: "text", text: `Invalid PR number: ${rawPr}` }],
+				};
+			}
+
+			// If the agent calls the same tool for the same PR, stop observing
+			if (observedPRs.has(prNumber)) {
+				stopObserving(prNumber);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Stoping observing the PR ${prNumber}. You will no longer receive updates about the CI on this PR.`,
+						},
+					],
+				};
+			}
+
+			// Check PR state and draft status using gh
+			let prData: any;
+			try {
+				const { stdout } = await execFileAsync(
+					"gh",
+					["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments,statusCheckRollup"],
+					{ cwd: ctx.cwd },
+				);
+				prData = JSON.parse(stdout);
+			} catch (err: any) {
+				const stderr = err?.stderr || err?.message || "";
+				if (
+					stderr.includes("Could not resolve") ||
+					stderr.includes("not found") ||
+					stderr.includes("no pull requests") ||
+					err?.code !== 0
+				) {
+					return {
+						content: [{ type: "text", text: `PR ${prNumber} don't exist. Not possible to observe` }],
+					};
+				}
+				return {
+					content: [{ type: "text", text: `Error inspecting PR ${prNumber}: ${stderr}` }],
+				};
+			}
+
+			const state = String(prData.state || "").toUpperCase();
+			const isDraft = Boolean(prData.isDraft);
+
+			if (state !== "OPEN" || isDraft) {
+				const reason = isDraft ? "is a draft" : `is not open (state: ${state.toLowerCase()})`;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `PR ${prNumber} ${reason}. Only open and non-draft PRs can be observed.`,
+						},
+					],
+				};
+			}
+
+			startObserving(prNumber, prData.comments || [], ctx.cwd, ctx.ui);
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
+					},
+				],
+			};
+		},
+	});
+
+	pi.registerCommand("pr_observer", {
+		description: "PR observer controls and dashboard (subcommands: list, enable, disable, stop <pr>)",
+		handler: async (args, ctx) => {
+			lastUIContext = ctx.ui;
+			const trimmed = (args || "").trim();
+			const parts = trimmed.split(/\s+/);
+			const sub = parts[0]?.toLowerCase();
+
+			if (sub === "stop") {
+				const targetPr = parseInt(parts[1]?.replace(/^#/, "") || "", 10);
+				if (isNaN(targetPr) || targetPr <= 0) {
+					ctx.ui.notify("Please specify a valid PR number to stop: /pr_observer stop <prNumber>", "warning");
+					return;
+				}
+				if (observedPRs.has(targetPr)) {
+					stopObserving(targetPr);
+					ctx.ui.notify(`Stopped observing PR #${targetPr}.`, "info");
+				} else {
+					ctx.ui.notify(`PR #${targetPr} is not currently being observed.`, "warning");
+				}
+				updateStatusUI(ctx.ui);
+				return;
+			}
+
+			if (sub === "list" || sub === "status" || sub === "dashboard") {
+				if (ctx.mode === "tui" && ctx.hasUI) {
+					await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
+						return new PRObserverDashboardComponent(theme, getStats, () => done());
+					});
+				} else {
+					const stats = getStats();
+					const statusText = `PR Observer: ${stats.isEnabled ? "Enabled" : "Disabled"} | ${stats.prs.length} PR(s) observed (Interval: ${stats.interval}s)`;
+					ctx.ui.notify(statusText, "info");
+				}
+				return;
+			}
+
+			const activeTools = pi.getActiveTools();
+			const isEnabled = activeTools.includes("observe_pr");
+
+			if (sub === "enable" || sub === "on") {
+				if (!isEnabled) {
+					pi.setActiveTools([...activeTools, "observe_pr"]);
+				}
+				ctx.ui.notify("observe_pr tool enabled.", "info");
+			} else if (sub === "disable" || sub === "off" || isEnabled) {
+				pi.setActiveTools(activeTools.filter((t) => t !== "observe_pr"));
+				ctx.ui.notify("observe_pr tool disabled.", "info");
+			} else {
+				pi.setActiveTools([...activeTools, "observe_pr"]);
+				ctx.ui.notify("observe_pr tool enabled.", "info");
+			}
+			updateStatusUI(ctx.ui);
+		},
+	});
+}
