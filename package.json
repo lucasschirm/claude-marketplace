@@ -1,0 +1,13 @@
+{
+  "name": "claude-marketplace",
+  "version": "1.0.0",
+  "description": "Collection of Claude Code plugins and Pi extensions",
+  "keywords": [
+    "pi-package"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}
