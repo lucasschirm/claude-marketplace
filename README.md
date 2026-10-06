@@ -58,11 +58,18 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     `Stoping observing the pr <pr-number>. The PR was <merged/canceled/etc...>. You will no longer receive updates about this PR.`.
   - Notifies the agent whenever new comments are posted or existing comments are edited:
     `Comment <comment-numbers> added or updated to the PR <pr-number>.`.
+- **Branch Watching & Automatic PR Detection**:
+  - Automatically monitors current and visited Git branches. If the agent changes the active branch, all branches continue to be tracked for pull request creation.
+  - When a PR is created for any tracked branch (and is open and non-draft), observation begins automatically.
+  - The agent is notified:
+    `The PR <pr-number> recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`.
+  - If the agent calls `observe_pr` before this automatic message is delivered, the announcement is cancelled, the observation continues seamlessly, and the agent receives the standard start confirmation (`Starting observing <pr-number>...`).
+  - Calling `observe_pr` after delivery or on an active PR stops observation as usual.
 - **Interface & Controls**:
   - **Status bar**: Displays live observed metrics in the footer: `<totalPrs>/<runs> observed`.
   - **Slash command `/pr_observer`**: Comprehensive user controls:
     - `/pr_observer` (or `disable` / `enable`): Toggles or explicitly enables/disables the `observe_pr` tool for the agent.
-    - `/pr_observer list` (or `status`): Opens an interactive terminal dashboard modal displaying all observed PRs, active run IDs, pass/fail counts, and comment counters.
+    - `/pr_observer list` (or `status`): Opens an interactive terminal dashboard displaying tracked branches, observed PRs, active run IDs, pass/fail counts, and comment counters.
     - `/pr_observer stop <prNumber>`: Stops observing a specific PR directly from the command line.
   - **Configurable CLI Flag `--pr-observer-interval`**: Customizes the check and polling interval (defaults to 60 seconds):
     ```bash

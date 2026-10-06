@@ -37,4 +37,7 @@ EOF
 pi -ne -e test/test-temp-runner.ts -p "hi" --offline --model local-llama/Qwen3.8
 rm -f test/test-temp-runner.ts
 
+echo "Running branch observer and PR auto-detection tests..."
+pi -ne -e test/test-branch-observer.ts --offline --model local-llama/Qwen3.8 -p "test"
+
 echo "✓ All extension tests passed"

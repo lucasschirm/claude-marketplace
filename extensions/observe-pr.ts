@@ -49,6 +49,7 @@ interface PRObserverStats {
 		failedCount: number;
 		commentsCount: number;
 	}>;
+	trackedBranches: string[];
 }
 
 class PRObserverDashboardComponent {
@@ -89,6 +90,11 @@ class PRObserverDashboardComponent {
 		const toolStatus = stats.isEnabled ? th.fg("success", "● Enabled") : th.fg("error", "○ Disabled");
 		lines.push(truncateToWidth(`  Tool status: ${toolStatus}  (Interval: ${stats.interval}s)`, width));
 		lines.push("");
+
+		if (stats.trackedBranches && stats.trackedBranches.length > 0) {
+			lines.push(truncateToWidth(`  Tracked branch(es): ${th.fg("accent", stats.trackedBranches.join(", "))}`, width));
+			lines.push("");
+		}
 
 		if (stats.prs.length === 0) {
 			lines.push(truncateToWidth(`  ${th.fg("dim", "No PRs currently being observed.")}`, width));
@@ -139,7 +145,13 @@ export default function (pi: ExtensionAPI) {
 	(globalThis as any)[GLOBAL_GUARD_KEY] = true;
 
 	const observedPRs = new Map<number, ObservedPR>();
+	const trackedBranches = new Set<string>();
+	const autoDetectedPRs = new Set<number>();
+	const pendingAnnouncements = new Map<number, { timer: NodeJS.Timeout; delivered: boolean; prNumber: number }>();
+	let branchPollTimer: NodeJS.Timeout | undefined;
 	let lastUIContext: ExtensionUIContext | undefined;
+	let lastCwd: string = process.cwd();
+	let isCheckingBranches = false;
 
 	function getObserverInterval(): number {
 		const flagVal = pi.getFlag("pr-observer-interval");
@@ -187,6 +199,7 @@ export default function (pi: ExtensionAPI) {
 			isEnabled,
 			interval: getObserverInterval(),
 			prs,
+			trackedBranches: Array.from(trackedBranches),
 		};
 	}
 
@@ -501,6 +514,14 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function stopObserving(prNumber: number) {
+		const pending = pendingAnnouncements.get(prNumber);
+		if (pending) {
+			clearTimeout(pending.timer);
+			pendingAnnouncements.delete(prNumber);
+		}
+
+		autoDetectedPRs.add(prNumber);
+
 		const pr = observedPRs.get(prNumber);
 		if (!pr) return;
 
@@ -530,14 +551,112 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function cleanupAll() {
+		if (branchPollTimer) {
+			clearInterval(branchPollTimer);
+			branchPollTimer = undefined;
+		}
+
+		for (const pending of pendingAnnouncements.values()) {
+			clearTimeout(pending.timer);
+		}
+		pendingAnnouncements.clear();
+
 		for (const prNumber of Array.from(observedPRs.keys())) {
 			stopObserving(prNumber);
 		}
 	}
 
+	async function recordCurrentBranch(cwd: string) {
+		try {
+			const { stdout } = await execFileAsync("git", ["branch", "--show-current"], { cwd });
+			const branch = stdout.trim();
+			if (branch) {
+				trackedBranches.add(branch);
+			}
+		} catch {
+			// Ignore if not a git repository or detached HEAD
+		}
+	}
+
+	async function checkTrackedBranches(cwd: string) {
+		await recordCurrentBranch(cwd);
+		if (isCheckingBranches) return;
+		isCheckingBranches = true;
+		try {
+
+			for (const branch of Array.from(trackedBranches)) {
+				try {
+					const { stdout } = await execFileAsync(
+						"gh",
+						["pr", "view", branch, "--json", "number,state,isDraft,comments,statusCheckRollup"],
+						{ cwd },
+					);
+					const data = JSON.parse(stdout);
+					const prNumber = data.number;
+					const state = String(data.state || "").toUpperCase();
+					const isDraft = Boolean(data.isDraft);
+
+					if (
+						state === "OPEN" &&
+						!isDraft &&
+						prNumber &&
+						!observedPRs.has(prNumber) &&
+						!autoDetectedPRs.has(prNumber)
+					) {
+						autoDetectedPRs.add(prNumber);
+						startObserving(prNumber, data.comments || [], cwd, lastUIContext);
+
+						const delay = process.env.PI_OBSERVE_PR_DELIVERY_DELAY
+							? parseInt(process.env.PI_OBSERVE_PR_DELIVERY_DELAY, 10)
+							: 3500;
+
+						const announcementTimer = setTimeout(() => {
+							const pending = pendingAnnouncements.get(prNumber);
+							if (pending && !pending.delivered) {
+								pending.delivered = true;
+								sendAgentMessage(
+									`The PR ${prNumber} recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`,
+								);
+							}
+						}, delay);
+
+						pendingAnnouncements.set(prNumber, {
+							prNumber,
+							timer: announcementTimer,
+							delivered: false,
+						});
+					}
+				} catch {
+					// No PR found for branch or gh error, ignore
+				}
+			}
+		} catch (err) {
+			console.error("[observe_pr] Error checking tracked branches:", err);
+		} finally {
+			isCheckingBranches = false;
+		}
+	}
+
+	function startBranchPollTimer() {
+		if (branchPollTimer) clearInterval(branchPollTimer);
+		const interval = getObserverInterval();
+		branchPollTimer = setInterval(() => {
+			checkTrackedBranches(lastCwd);
+		}, interval * 1000);
+	}
+
 	pi.on("session_start", (_evt, ctx) => {
 		lastUIContext = ctx.ui;
+		lastCwd = ctx.cwd || process.cwd();
 		updateStatusUI(ctx.ui);
+		checkTrackedBranches(lastCwd);
+		startBranchPollTimer();
+	});
+
+	pi.on("turn_end", (_evt, ctx) => {
+		if (ctx?.cwd) lastCwd = ctx.cwd;
+		if (ctx?.ui) lastUIContext = ctx.ui;
+		checkTrackedBranches(lastCwd);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -558,6 +677,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			lastCwd = ctx.cwd || lastCwd;
 			const rawPr = (params as any)?.pr_number ?? (params as any)?.prNumber ?? (params as any)?.pr;
 			const cleanStr = String(rawPr ?? "").replace(/^#/, "").trim();
 			const prNumber = parseInt(cleanStr, 10);
@@ -565,6 +685,22 @@ export default function (pi: ExtensionAPI) {
 			if (isNaN(prNumber) || prNumber <= 0) {
 				return {
 					content: [{ type: "text", text: `Invalid PR number: ${rawPr}` }],
+				};
+			}
+
+			// If the PR was auto-detected and announcement is still pending delivery,
+			// cancel the announcement and return the usual start message without stopping observation
+			const pending = pendingAnnouncements.get(prNumber);
+			if (pending && !pending.delivered) {
+				clearTimeout(pending.timer);
+				pendingAnnouncements.delete(prNumber);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
+						},
+					],
 				};
 			}
 
@@ -666,7 +802,9 @@ export default function (pi: ExtensionAPI) {
 					});
 				} else {
 					const stats = getStats();
-					const statusText = `PR Observer: ${stats.isEnabled ? "Enabled" : "Disabled"} | ${stats.prs.length} PR(s) observed (Interval: ${stats.interval}s)`;
+					const branchesStr =
+						stats.trackedBranches.length > 0 ? ` | Branches: ${stats.trackedBranches.join(", ")}` : "";
+					const statusText = `PR Observer: ${stats.isEnabled ? "Enabled" : "Disabled"} | ${stats.prs.length} PR(s) observed${branchesStr} (Interval: ${stats.interval}s)`;
 					ctx.ui.notify(statusText, "info");
 				}
 				return;
