@@ -69,6 +69,18 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     pi --pr-observer-interval 30
     ```
 
+### Test Database Tools (`requestdb` & `destroydb`)
+
+When the system commands `requestdb` and/or `destroydb` are present in the environment (`PATH`), the extension dynamically registers them as agent tools and passes their stdout/stderr output directly to the agent:
+
+- **`requestdb`**:
+  - Creates or retrieves an isolated MariaDB/MySQL test database and user tailored deterministically to the current folder.
+  - Returns credentials in `.env` format (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`).
+  - Optional parameter: `new` (boolean) to tear down any existing database for the directory and create a fresh one.
+- **`destroydb`**:
+  - Tears down the isolated test database and user for the current folder (or prunes deleted directories).
+  - Optional parameters: `all` (boolean) to destroy all registered test databases, or `folder` (string) for a target directory.
+
 #### Prerequisites
 
 - [GitHub CLI (`gh`)](https://cli.github.com/) installed and authenticated (`gh auth login`).

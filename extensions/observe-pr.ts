@@ -1,11 +1,21 @@
 import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
+
+function isCommandAvailable(cmd: string): boolean {
+	try {
+		const checkTool = process.platform === "win32" ? "where" : "which";
+		execFileSync(checkTool, [cmd], { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 interface CommentInfo {
 	id: string;
@@ -680,4 +690,84 @@ export default function (pi: ExtensionAPI) {
 			updateStatusUI(ctx.ui);
 		},
 	});
+
+	if (isCommandAvailable("requestdb")) {
+		pi.registerTool({
+			name: "requestdb",
+			label: "Request DB",
+			description:
+				"Creates or retrieves an isolated test database and user credentials for the current folder. Returns connection credentials (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD) in .env format.",
+			parameters: Type.Object({
+				new: Type.Optional(
+					Type.Boolean({
+						description:
+							"If true, destroys the existing database/user for this folder and creates a fresh one (-new)",
+					}),
+				),
+			}),
+
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
+				try {
+					const args: string[] = [];
+					if (params?.new) {
+						args.push("-new");
+					}
+					const { stdout, stderr } = await execFileAsync("requestdb", args, { cwd: ctx.cwd });
+					const output = (stdout || stderr || "").trim();
+					return {
+						content: [{ type: "text", text: output || "Database credentials generated successfully." }],
+					};
+				} catch (err: any) {
+					const errorMsg = (err?.stdout || "") + "\n" + (err?.stderr || err?.message || String(err));
+					return {
+						content: [{ type: "text", text: `Error running requestdb:\n${errorMsg.trim()}` }],
+						isError: true,
+					};
+				}
+			},
+		});
+	}
+
+	if (isCommandAvailable("destroydb")) {
+		pi.registerTool({
+			name: "destroydb",
+			label: "Destroy DB",
+			description:
+				"Tears down the isolated test database and user for the current folder or all registered test databases.",
+			parameters: Type.Object({
+				all: Type.Optional(
+					Type.Boolean({
+						description: "If true, destroys all registered test databases (--all)",
+					}),
+				),
+				folder: Type.Optional(
+					Type.String({
+						description: "Optional target folder path to destroy database for (defaults to current folder)",
+					}),
+				),
+			}),
+
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
+				try {
+					const args: string[] = [];
+					if (params?.all) {
+						args.push("--all");
+					} else if (params?.folder) {
+						args.push(params.folder);
+					}
+					const { stdout, stderr } = await execFileAsync("destroydb", args, { cwd: ctx.cwd });
+					const output = (stdout || stderr || "").trim();
+					return {
+						content: [{ type: "text", text: output || "Database destroyed successfully." }],
+					};
+				} catch (err: any) {
+					const errorMsg = (err?.stdout || "") + "\n" + (err?.stderr || err?.message || String(err));
+					return {
+						content: [{ type: "text", text: `Error running destroydb:\n${errorMsg.trim()}` }],
+						isError: true,
+					};
+				}
+			},
+		});
+	}
 }
