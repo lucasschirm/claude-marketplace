@@ -66,6 +66,12 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   elif [ "$branch_or_pr" = "branch-beta" ] || [ "$branch_or_pr" = "202" ]; then
     echo '{"number": 202, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": []}'
     exit 0
+  elif [ "$branch_or_pr" = "999" ]; then
+    echo "Could not resolve to a PullRequest with the number 999" >&2
+    exit 1
+  elif [ "$branch_or_pr" = "888" ]; then
+    echo "graphql error: token expired or unauthorized" >&2
+    exit 1
   else
     echo "no pull requests found for branch $branch_or_pr" >&2
     exit 1
@@ -182,7 +188,38 @@ exit 0
       if (!text3.includes("Stoping observing the PR 202.")) {
         throw new Error(`Expected stop message for 202, got: ${text3}`);
       }
-      console.log("✓ Test 4 Passed: Calling observe_pr after delivered announcement stopped observation.");
+      // Test 5: Error discrimination in observe_pr (non-existent vs auth error)
+      console.log("Test 5: Testing error handling discrimination in observe_pr...");
+      const res404 = await observeTool.execute("call-4", { pr_number: 999 }, undefined, undefined, mockCtx);
+      const text404 = res404.content[0].text;
+      console.log("observe_pr 404 result:", text404);
+      if (!text404.includes("PR 999 don't exist. Not possible to observe")) {
+        throw new Error(`Expected 404 message for PR 999, got: ${text404}`);
+      }
+
+      const resAuth = await observeTool.execute("call-5", { pr_number: 888 }, undefined, undefined, mockCtx);
+      const textAuth = resAuth.content[0].text;
+      console.log("observe_pr auth error result:", textAuth);
+      if (!textAuth.includes("Error inspecting PR 888:") || !textAuth.includes("unauthorized")) {
+        throw new Error(`Expected auth error message for PR 888, got: ${textAuth}`);
+      }
+      console.log("✓ Test 5 Passed: Error handling correctly distinguishes PR existence from auth/system errors.");
+
+      // Test 6: Unknown subcommand warning in /pr_observer
+      console.log("Test 6: Testing unknown subcommand in /pr_observer...");
+      let warnMessage = "";
+      await prCmd.handler("unknown_cmd", {
+        ...mockCtx,
+        ui: {
+          ...mockUI,
+          notify(msg: string, type?: string) { warnMessage = msg; }
+        }
+      });
+      console.log("Unknown subcommand notification:", warnMessage);
+      if (!warnMessage.includes("Unknown subcommand 'unknown_cmd'")) {
+        throw new Error(`Expected warning for unknown subcommand, got: ${warnMessage}`);
+      }
+      console.log("✓ Test 6 Passed: Unrecognized subcommand reported warning without accidental toggle.");
 
       console.log("✓ All branch observer tests passed successfully!");
       // Clean up tmpDir

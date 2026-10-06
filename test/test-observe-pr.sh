@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
+trap 'rm -f test/test-temp-runner.ts' EXIT INT TERM
+
 echo "Testing observe-pr Pi extension..."
 
 # Verify that Pi loads the extension without error
@@ -34,10 +36,10 @@ export default function(pi) {
 }
 EOF
 
-pi -ne -e test/test-temp-runner.ts -p "hi" --offline --model local-llama/Qwen3.8
+pi -ne -e test/test-temp-runner.ts -p "hi" --offline
 rm -f test/test-temp-runner.ts
 
 echo "Running branch observer and PR auto-detection tests..."
-pi -ne -e test/test-branch-observer.ts --offline --model local-llama/Qwen3.8 -p "test"
+pi -ne -e test/test-branch-observer.ts --offline -p "test"
 
 echo "✓ All extension tests passed"

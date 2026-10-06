@@ -56,8 +56,6 @@ class PRObserverDashboardComponent {
 	private theme: any;
 	private getStats: () => PRObserverStats;
 	private onClose: () => void;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
 
 	constructor(theme: any, getStats: () => PRObserverStats, onClose: () => void) {
 		this.theme = theme;
@@ -72,10 +70,6 @@ class PRObserverDashboardComponent {
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines && this.cachedWidth === width) {
-			return this.cachedLines;
-		}
-
 		const lines: string[] = [];
 		const th = this.theme;
 		const stats = this.getStats();
@@ -117,14 +111,7 @@ class PRObserverDashboardComponent {
 		lines.push(truncateToWidth(`  ${th.fg("dim", "Press Escape or 'q' to close")}`, width));
 		lines.push("");
 
-		this.cachedWidth = width;
-		this.cachedLines = lines;
 		return lines;
-	}
-
-	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
 	}
 }
 
@@ -145,7 +132,8 @@ export default function (pi: ExtensionAPI) {
 	(globalThis as any)[GLOBAL_GUARD_KEY] = true;
 
 	const observedPRs = new Map<number, ObservedPR>();
-	const trackedBranches = new Set<string>();
+	const trackedBranchesByRepo = new Map<string, Set<string>>();
+	const branchToPR = new Map<string, number>();
 	const autoDetectedPRs = new Set<number>();
 	const pendingAnnouncements = new Map<number, { timer: NodeJS.Timeout; delivered: boolean; prNumber: number }>();
 	let branchPollTimer: NodeJS.Timeout | undefined;
@@ -195,11 +183,18 @@ export default function (pi: ExtensionAPI) {
 			commentsCount: p.knownComments.size,
 		}));
 
+		const allBranches = new Set<string>();
+		for (const branches of trackedBranchesByRepo.values()) {
+			for (const b of branches) {
+				allBranches.add(b);
+			}
+		}
+
 		return {
 			isEnabled,
 			interval: getObserverInterval(),
 			prs,
-			trackedBranches: Array.from(trackedBranches),
+			trackedBranches: Array.from(allBranches),
 		};
 	}
 
@@ -244,10 +239,25 @@ export default function (pi: ExtensionAPI) {
 			});
 			const checks = JSON.parse(stdout);
 			if (Array.isArray(checks) && checks.length > 0) {
-				const hasPending = checks.some((c: any) => c.bucket === "pending" || c.state === "PENDING");
-				const hasFailed = checks.some((c: any) => c.bucket === "fail" || c.state === "FAILURE" || c.state === "ERROR");
+				const hasPending = checks.some(
+					(c: any) =>
+						c.bucket === "pending" ||
+						["PENDING", "IN_PROGRESS", "QUEUED"].includes(String(c.state || c.status || "").toUpperCase()),
+				);
+				const hasFailed = checks.some(
+					(c: any) =>
+						["fail", "cancel"].includes(c.bucket) ||
+						["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(
+							String(c.state || c.conclusion || "").toUpperCase(),
+						),
+				);
+				const hasPassed = checks.every(
+					(c: any) =>
+						["pass", "skipping"].includes(c.bucket) ||
+						["SUCCESS", "SKIPPED", "NEUTRAL"].includes(String(c.state || c.conclusion || "").toUpperCase()),
+				);
 
-				if (!hasPending && !hasFailed) {
+				if (!hasPending && !hasFailed && hasPassed) {
 					pr.allPassedReported = true;
 					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
 				}
@@ -273,7 +283,7 @@ export default function (pi: ExtensionAPI) {
 		let output = "";
 		let child: ChildProcess;
 		try {
-			child = spawn("gh", ["run", "watch", runId, "--compact", "--interval", intervalStr], {
+			child = spawn("gh", ["run", "watch", runId, "--compact", "--interval", intervalStr, "--exit-status"], {
 				cwd,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
@@ -307,7 +317,7 @@ export default function (pi: ExtensionAPI) {
 					cwd,
 				});
 				const parsed = JSON.parse(stdout);
-				conclusion = parsed.conclusion || "unknown";
+				conclusion = String(parsed.conclusion || "").toLowerCase();
 			} catch {
 				if (exitCode !== 0 || output.includes("failure") || output.includes("cancelled")) {
 					conclusion = "failure";
@@ -316,7 +326,15 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			if (conclusion === "failure" || (exitCode !== 0 && conclusion !== "success")) {
+			const isFailure =
+				conclusion === "failure" ||
+				conclusion === "cancelled" ||
+				conclusion === "timed_out" ||
+				conclusion === "action_required" ||
+				conclusion === "startup_failure" ||
+				(exitCode !== 0 && conclusion !== "success" && conclusion !== "neutral" && conclusion !== "skipped");
+
+			if (isFailure) {
 				currentPr.failedRuns.add(runId);
 				currentPr.activeRuns.delete(runId);
 				updateStatusUI();
@@ -566,12 +584,28 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function getRepoRoot(cwd: string): Promise<string | undefined> {
+		try {
+			const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd });
+			const root = stdout.trim();
+			return root || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	async function recordCurrentBranch(cwd: string) {
 		try {
+			const repoRoot = (await getRepoRoot(cwd)) || cwd;
 			const { stdout } = await execFileAsync("git", ["branch", "--show-current"], { cwd });
 			const branch = stdout.trim();
 			if (branch) {
-				trackedBranches.add(branch);
+				let branches = trackedBranchesByRepo.get(repoRoot);
+				if (!branches) {
+					branches = new Set();
+					trackedBranchesByRepo.set(repoRoot, branches);
+				}
+				branches.add(branch);
 			}
 		} catch {
 			// Ignore if not a git repository or detached HEAD
@@ -579,22 +613,38 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function checkTrackedBranches(cwd: string) {
+		const isEnabled = pi.getActiveTools().includes("observe_pr");
+		if (!isEnabled) return;
+
 		await recordCurrentBranch(cwd);
 		if (isCheckingBranches) return;
 		isCheckingBranches = true;
 		try {
+			const repoRoot = (await getRepoRoot(cwd)) || cwd;
+			const branches = trackedBranchesByRepo.get(repoRoot);
+			if (!branches) return;
 
-			for (const branch of Array.from(trackedBranches)) {
+			for (const branch of Array.from(branches)) {
+				const cacheKey = `${repoRoot}:${branch}`;
+				const knownPr = branchToPR.get(cacheKey);
+				if (knownPr && (observedPRs.has(knownPr) || autoDetectedPRs.has(knownPr))) {
+					continue;
+				}
+
 				try {
 					const { stdout } = await execFileAsync(
 						"gh",
 						["pr", "view", branch, "--json", "number,state,isDraft,comments,statusCheckRollup"],
-						{ cwd },
+						{ cwd: repoRoot },
 					);
 					const data = JSON.parse(stdout);
 					const prNumber = data.number;
 					const state = String(data.state || "").toUpperCase();
 					const isDraft = Boolean(data.isDraft);
+
+					if (prNumber) {
+						branchToPR.set(cacheKey, prNumber);
+					}
 
 					if (
 						state === "OPEN" &&
@@ -604,7 +654,7 @@ export default function (pi: ExtensionAPI) {
 						!autoDetectedPRs.has(prNumber)
 					) {
 						autoDetectedPRs.add(prNumber);
-						startObserving(prNumber, data.comments || [], cwd, lastUIContext);
+						startObserving(prNumber, data.comments || [], repoRoot, lastUIContext);
 
 						const delay = process.env.PI_OBSERVE_PR_DELIVERY_DELAY
 							? parseInt(process.env.PI_OBSERVE_PR_DELIVERY_DELAY, 10)
@@ -614,6 +664,7 @@ export default function (pi: ExtensionAPI) {
 							const pending = pendingAnnouncements.get(prNumber);
 							if (pending && !pending.delivered) {
 								pending.delivered = true;
+								pendingAnnouncements.delete(prNumber);
 								sendAgentMessage(
 									`The PR ${prNumber} recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`,
 								);
@@ -732,7 +783,7 @@ export default function (pi: ExtensionAPI) {
 					stderr.includes("Could not resolve") ||
 					stderr.includes("not found") ||
 					stderr.includes("no pull requests") ||
-					err?.code !== 0
+					stderr.includes("404")
 				) {
 					return {
 						content: [{ type: "text", text: `PR ${prNumber} don't exist. Not possible to observe` }],
@@ -785,6 +836,11 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("Please specify a valid PR number to stop: /pr_observer stop <prNumber>", "warning");
 					return;
 				}
+				const pending = pendingAnnouncements.get(targetPr);
+				if (pending) {
+					clearTimeout(pending.timer);
+					pendingAnnouncements.delete(targetPr);
+				}
 				if (observedPRs.has(targetPr)) {
 					stopObserving(targetPr);
 					ctx.ui.notify(`Stopped observing PR #${targetPr}.`, "info");
@@ -813,17 +869,29 @@ export default function (pi: ExtensionAPI) {
 			const activeTools = pi.getActiveTools();
 			const isEnabled = activeTools.includes("observe_pr");
 
-			if (sub === "enable" || sub === "on") {
+			if (!sub || sub === "toggle") {
+				if (isEnabled) {
+					pi.setActiveTools(activeTools.filter((t) => t !== "observe_pr"));
+					ctx.ui.notify("observe_pr tool disabled.", "info");
+				} else {
+					pi.setActiveTools([...activeTools, "observe_pr"]);
+					ctx.ui.notify("observe_pr tool enabled.", "info");
+				}
+			} else if (sub === "enable" || sub === "on") {
 				if (!isEnabled) {
 					pi.setActiveTools([...activeTools, "observe_pr"]);
 				}
 				ctx.ui.notify("observe_pr tool enabled.", "info");
-			} else if (sub === "disable" || sub === "off" || isEnabled) {
-				pi.setActiveTools(activeTools.filter((t) => t !== "observe_pr"));
+			} else if (sub === "disable" || sub === "off") {
+				if (isEnabled) {
+					pi.setActiveTools(activeTools.filter((t) => t !== "observe_pr"));
+				}
 				ctx.ui.notify("observe_pr tool disabled.", "info");
 			} else {
-				pi.setActiveTools([...activeTools, "observe_pr"]);
-				ctx.ui.notify("observe_pr tool enabled.", "info");
+				ctx.ui.notify(
+					`Unknown subcommand '${sub}'. Available subcommands: list, enable, disable, stop <prNumber>`,
+					"warning",
+				);
 			}
 			updateStatusUI(ctx.ui);
 		},
