@@ -65,6 +65,7 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     `The PR <pr-number> recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`.
   - If the agent calls `observe_pr` before this automatic message is delivered, the announcement is cancelled, the observation continues seamlessly, and the agent receives the standard start confirmation (`Starting observing <pr-number>...`).
   - Calling `observe_pr` after delivery or on an active PR stops observation as usual.
+  - **Initial Prompt Notice**: Whenever automatic tracking is enabled, the agent's initial prompt and system guidelines automatically inform the agent that any pull request created for tracked branches will be automatically tracked and all updates will be sent.
 - **Interface & Controls**:
   - **Status bar**: Displays live observed metrics in the footer: `<totalPrs>/<runs> observed`.
   - **Slash command `/pr_observer`**: Comprehensive user controls:

@@ -513,7 +513,9 @@ export default function (pi: ExtensionAPI) {
 			checksProc.stdout?.on("data", handleData);
 			checksProc.stderr?.on("data", handleData);
 
-			checksProc.on("close", () => {
+			checksProc.on("close", async () => {
+				if (!observedPRs.has(prNumber)) return;
+				await pollPR(prNumber);
 				if (!observedPRs.has(prNumber)) return;
 				// Restart after interval if PR is still observed
 				pr.restartTimer = setTimeout(() => {
@@ -704,10 +706,46 @@ export default function (pi: ExtensionAPI) {
 		startBranchPollTimer();
 	});
 
-	pi.on("turn_end", (_evt, ctx) => {
+	async function pollAllObservedPRs() {
+		for (const prNumber of Array.from(observedPRs.keys())) {
+			await pollPR(prNumber);
+		}
+	}
+
+	pi.on("turn_end", async (_evt, ctx) => {
 		if (ctx?.cwd) lastCwd = ctx.cwd;
 		if (ctx?.ui) lastUIContext = ctx.ui;
-		checkTrackedBranches(lastCwd);
+		await pollAllObservedPRs();
+		await checkTrackedBranches(lastCwd);
+	});
+
+	const AUTO_TRACKING_PROMPT_MESSAGE =
+		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you.";
+
+	pi.on("before_agent_start", (event) => {
+		const isEnabled = pi.getActiveTools().includes("observe_pr");
+		if (!isEnabled) {
+			if (event.systemPromptOptions?.sections?.pr_auto_tracking) {
+				delete event.systemPromptOptions.sections.pr_auto_tracking;
+			}
+			return;
+		}
+
+		if (event.systemPromptOptions?.sections) {
+			event.systemPromptOptions.sections.pr_auto_tracking = AUTO_TRACKING_PROMPT_MESSAGE;
+		}
+
+		if (event.systemPromptOptions?.promptGuidelines) {
+			if (!event.systemPromptOptions.promptGuidelines.includes(AUTO_TRACKING_PROMPT_MESSAGE)) {
+				event.systemPromptOptions.promptGuidelines.push(AUTO_TRACKING_PROMPT_MESSAGE);
+			}
+		}
+
+		return {
+			systemPrompt: event.systemPrompt
+				? `${event.systemPrompt}\n\n${AUTO_TRACKING_PROMPT_MESSAGE}`
+				: AUTO_TRACKING_PROMPT_MESSAGE,
+		};
 	});
 
 	pi.on("session_shutdown", () => {

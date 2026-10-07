@@ -11,6 +11,8 @@ export default function(pi: any) {
   const sentMessages: string[] = [];
   const eventHandlers: Record<string, Function[]> = {};
 
+  let activeToolList: string[] = [];
+
   const mockPi = {
     ...pi,
     on(event: string, handler: any) {
@@ -20,6 +22,7 @@ export default function(pi: any) {
     },
     registerTool(t: any) {
       tools[t.name] = t;
+      if (!activeToolList.includes(t.name)) activeToolList.push(t.name);
       return pi.registerTool(t);
     },
     registerCommand(name: string, opts: any) {
@@ -34,9 +37,11 @@ export default function(pi: any) {
       return flags[name]?.default || pi.getFlag(name);
     },
     getActiveTools() {
-      return Object.keys(tools);
+      return [...activeToolList];
     },
-    setActiveTools(t: string[]) {},
+    setActiveTools(t: string[]) {
+      activeToolList = [...t];
+    },
     sendUserMessage(msg: string, opts: any) {
       sentMessages.push(msg);
       return pi.sendUserMessage?.(msg, opts);
@@ -48,6 +53,7 @@ export default function(pi: any) {
 
   // Create temporary test environment
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-branch-test-"));
+  process.env.GH_STATE_DIR = tmpDir;
   const binDir = path.join(tmpDir, "bin");
   fs.mkdirSync(binDir);
 
@@ -65,6 +71,13 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     exit 0
   elif [ "$branch_or_pr" = "branch-beta" ] || [ "$branch_or_pr" = "202" ]; then
     echo '{"number": 202, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": []}'
+    exit 0
+  elif [ "$branch_or_pr" = "303" ]; then
+    if [ -f "$GH_STATE_DIR/303_merged" ]; then
+      echo '{"number": 303, "state": "MERGED", "isDraft": false, "comments": [], "statusCheckRollup": []}'
+    else
+      echo '{"number": 303, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": []}'
+    fi
     exit 0
   elif [ "$branch_or_pr" = "999" ]; then
     echo "Could not resolve to a PullRequest with the number 999" >&2
@@ -221,10 +234,109 @@ exit 0
       }
       console.log("✓ Test 6 Passed: Unrecognized subcommand reported warning without accidental toggle.");
 
+      // Test 7: Initial prompt augmentation when automatic tracking is enabled
+      console.log("Test 7: Testing initial prompt augmentation in before_agent_start...");
+      const startHandlers = eventHandlers["before_agent_start"] || [];
+      const testEvent1: any = {
+        type: "before_agent_start",
+        prompt: "Start task",
+        systemPrompt: "Base system prompt.",
+        systemPromptOptions: {
+          sections: {},
+          promptGuidelines: [],
+        },
+      };
+      let resPrompt1: any;
+      for (const h of startHandlers) {
+        resPrompt1 = await h(testEvent1, mockCtx);
+      }
+      console.log("Section content:", testEvent1.systemPromptOptions.sections.pr_auto_tracking);
+      console.log("Result systemPrompt:", resPrompt1?.systemPrompt);
+      if (!testEvent1.systemPromptOptions.sections.pr_auto_tracking?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected pr_auto_tracking section in systemPromptOptions");
+      }
+      if (!resPrompt1?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected auto-tracking message in returned systemPrompt");
+      }
+      console.log("✓ Test 7 Passed: Initial prompt receives automatic PR tracking notice when enabled.");
+
+      // Test 8: Prompt augmentation when automatic tracking is disabled
+      console.log("Test 8: Testing prompt behavior when disabled via /pr_observer disable...");
+      await prCmd.handler("disable", mockCtx);
+      const testEvent2: any = {
+        type: "before_agent_start",
+        prompt: "Start task",
+        systemPrompt: "Base system prompt.",
+        systemPromptOptions: {
+          sections: { pr_auto_tracking: "existing" },
+          promptGuidelines: [],
+        },
+      };
+      let resPrompt2: any;
+      for (const h of startHandlers) {
+        resPrompt2 = await h(testEvent2, mockCtx);
+      }
+      if (testEvent2.systemPromptOptions.sections.pr_auto_tracking) {
+        throw new Error("Expected pr_auto_tracking section to be removed when disabled");
+      }
+      if (resPrompt2?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected no auto-tracking message in systemPrompt when disabled");
+      }
+      console.log("✓ Test 8 Passed: Auto-tracking notice not injected when tool is disabled.");
+
+      // Test 9: Re-enabling restores prompt augmentation
+      console.log("Test 9: Testing prompt behavior when re-enabled via /pr_observer enable...");
+      await prCmd.handler("enable", mockCtx);
+      const testEvent3: any = {
+        type: "before_agent_start",
+        prompt: "Start task",
+        systemPrompt: "Base system prompt.",
+        systemPromptOptions: {
+          sections: {},
+          promptGuidelines: [],
+        },
+      };
+      let resPrompt3: any;
+      for (const h of startHandlers) {
+        resPrompt3 = await h(testEvent3, mockCtx);
+      }
+      if (!testEvent3.systemPromptOptions.sections.pr_auto_tracking?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected pr_auto_tracking section after re-enabling");
+      }
+      if (!resPrompt3?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected auto-tracking message in returned systemPrompt after re-enabling");
+      }
+      console.log("✓ Test 9 Passed: Auto-tracking notice restored after re-enabling.");
+
+      // Test 10: Merged PR tracking & notification
+      console.log("Test 10: Testing merged PR tracking & notification...");
+      const resStart303 = await observeTool.execute("call-6", { pr_number: 303 }, undefined, undefined, mockCtx);
+      const textStart303 = resStart303.content[0].text;
+      console.log("observe_pr start 303:", textStart303);
+      if (!textStart303.includes("Starting observing 303.")) {
+        throw new Error(`Expected start observing 303, got: ${textStart303}`);
+      }
+
+      // Simulate PR 303 being merged on GitHub
+      fs.writeFileSync(path.join(tmpDir, "303_merged"), "merged");
+
+      // Trigger turn_end event
+      for (const h of eventHandlers["turn_end"] || []) {
+        await h({ type: "turn_end" }, mockCtx);
+      }
+      await new Promise((r) => setTimeout(r, 200));
+
+      const expectedMergeMsg = "Stoping observing the pr 303. The PR was merged. You will no longer receive updates about this PR.";
+      if (!sentMessages.includes(expectedMergeMsg)) {
+        throw new Error(`Expected merge message "${expectedMergeMsg}", sent: ${JSON.stringify(sentMessages)}`);
+      }
+      console.log("✓ Test 10 Passed: PR merge detected, agent received notification, and observation stopped.");
+
       console.log("✓ All branch observer tests passed successfully!");
       // Clean up tmpDir
       fs.rmSync(tmpDir, { recursive: true, force: true });
       process.env.PATH = originalPath;
+      delete process.env.GH_STATE_DIR;
       process.exit(0);
     } catch (err: any) {
       console.error("Test failed:", err);
