@@ -5,6 +5,12 @@
   "keywords": [
     "pi-package"
   ],
+  "pi": {
+    "extensions": [
+      "./extensions/observe-pr.ts",
+      "./extensions/devin-delegate.ts"
+    ]
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
