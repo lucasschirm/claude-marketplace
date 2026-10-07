@@ -43,7 +43,7 @@ If ANY of these is missing or ambiguous, STOP immediately. Do not write code. Re
 
 This is a **NestJS + CommonJS + TypeScript** CLI (`@lucasschirm/aify`), tested with **vitest**, linted/formatted with **biome**, managed with **pnpm**; it builds via `nest build` to `dist/`. Do not assume ES modules or a plain `index.js`.
 
-Before editing in any directory, **read that directory's `AGENTS.md`**, and for tests read `src/test/README.md` + `src/test/AGENTS.md`. Trust those local docs over any higher-level or older description. Match the conventions of the surrounding code (naming, module style, import patterns, the `/** @file … */` header on every file).
+Before editing, **read the nearest enclosing architectural boundary `AGENTS.md`** (package root, major domain, or workspace root), and for tests read `src/test/README.md` + relevant boundary guide. Trust those boundary docs over any higher-level or older description. Match the conventions of the surrounding code (naming, module style, import patterns, the `/** @file … */` header on every file).
 
 ## Reuse before writing
 

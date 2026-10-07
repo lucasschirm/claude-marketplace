@@ -77,7 +77,7 @@ include:
 - **Scope and ownership boundary** — the exact paths it owns and the paths it must not
   touch. Where parallel sessions exist, name the files another session owns.
 - **Acceptance criteria** — concrete, checkable gate outcomes, not adjectives.
-- **Documentation duty** — update the docs, per-directory maps, and changelog entries the
+- **Documentation duty** — update the docs, boundary guides (`AGENTS.md`), and changelog entries the
   change makes stale, and summarize the change in the PR body.
 - **An honesty clause** — a negative result is a valid deliverable; unverified claims must
   be marked unverified rather than dressed up.
@@ -115,9 +115,9 @@ dispatched on the review model, in a session independent of the author.
 
 The review covers four things, all four required:
 
-1. **Code quality against the repo's own rules** — read `CLAUDE.md`, `AGENTS.md`, contributing
-   guides, lint/format config, and the conventions of the surrounding code, and judge the
-   diff against those rather than against generic taste.
+1. **Code quality against the repo's own rules** — read `CLAUDE.md`, boundary `AGENTS.md`
+   guides, contributing guides, lint/format config, and the conventions of the surrounding code,
+   and judge the diff against those rather than against generic taste.
 2. **Optimization opportunities** — correctness-preserving simplifications, redundant work,
    avoidable allocations or queries, dead paths.
 3. **Test coverage** — are the new paths, error paths, and boundaries actually tested, and
