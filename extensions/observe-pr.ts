@@ -513,7 +513,9 @@ export default function (pi: ExtensionAPI) {
 			checksProc.stdout?.on("data", handleData);
 			checksProc.stderr?.on("data", handleData);
 
-			checksProc.on("close", () => {
+			checksProc.on("close", async () => {
+				if (!observedPRs.has(prNumber)) return;
+				await pollPR(prNumber);
 				if (!observedPRs.has(prNumber)) return;
 				// Restart after interval if PR is still observed
 				pr.restartTimer = setTimeout(() => {
@@ -704,10 +706,17 @@ export default function (pi: ExtensionAPI) {
 		startBranchPollTimer();
 	});
 
-	pi.on("turn_end", (_evt, ctx) => {
+	async function pollAllObservedPRs() {
+		for (const prNumber of Array.from(observedPRs.keys())) {
+			await pollPR(prNumber);
+		}
+	}
+
+	pi.on("turn_end", async (_evt, ctx) => {
 		if (ctx?.cwd) lastCwd = ctx.cwd;
 		if (ctx?.ui) lastUIContext = ctx.ui;
-		checkTrackedBranches(lastCwd);
+		await pollAllObservedPRs();
+		await checkTrackedBranches(lastCwd);
 	});
 
 	const AUTO_TRACKING_PROMPT_MESSAGE =

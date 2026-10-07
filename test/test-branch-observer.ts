@@ -53,6 +53,7 @@ export default function(pi: any) {
 
   // Create temporary test environment
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-branch-test-"));
+  process.env.GH_STATE_DIR = tmpDir;
   const binDir = path.join(tmpDir, "bin");
   fs.mkdirSync(binDir);
 
@@ -70,6 +71,13 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     exit 0
   elif [ "$branch_or_pr" = "branch-beta" ] || [ "$branch_or_pr" = "202" ]; then
     echo '{"number": 202, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": []}'
+    exit 0
+  elif [ "$branch_or_pr" = "303" ]; then
+    if [ -f "$GH_STATE_DIR/303_merged" ]; then
+      echo '{"number": 303, "state": "MERGED", "isDraft": false, "comments": [], "statusCheckRollup": []}'
+    else
+      echo '{"number": 303, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": []}'
+    fi
     exit 0
   elif [ "$branch_or_pr" = "999" ]; then
     echo "Could not resolve to a PullRequest with the number 999" >&2
@@ -300,10 +308,35 @@ exit 0
       }
       console.log("✓ Test 9 Passed: Auto-tracking notice restored after re-enabling.");
 
+      // Test 10: Merged PR tracking & notification
+      console.log("Test 10: Testing merged PR tracking & notification...");
+      const resStart303 = await observeTool.execute("call-6", { pr_number: 303 }, undefined, undefined, mockCtx);
+      const textStart303 = resStart303.content[0].text;
+      console.log("observe_pr start 303:", textStart303);
+      if (!textStart303.includes("Starting observing 303.")) {
+        throw new Error(`Expected start observing 303, got: ${textStart303}`);
+      }
+
+      // Simulate PR 303 being merged on GitHub
+      fs.writeFileSync(path.join(tmpDir, "303_merged"), "merged");
+
+      // Trigger turn_end event
+      for (const h of eventHandlers["turn_end"] || []) {
+        await h({ type: "turn_end" }, mockCtx);
+      }
+      await new Promise((r) => setTimeout(r, 200));
+
+      const expectedMergeMsg = "Stoping observing the pr 303. The PR was merged. You will no longer receive updates about this PR.";
+      if (!sentMessages.includes(expectedMergeMsg)) {
+        throw new Error(`Expected merge message "${expectedMergeMsg}", sent: ${JSON.stringify(sentMessages)}`);
+      }
+      console.log("✓ Test 10 Passed: PR merge detected, agent received notification, and observation stopped.");
+
       console.log("✓ All branch observer tests passed successfully!");
       // Clean up tmpDir
       fs.rmSync(tmpDir, { recursive: true, force: true });
       process.env.PATH = originalPath;
+      delete process.env.GH_STATE_DIR;
       process.exit(0);
     } catch (err: any) {
       console.error("Test failed:", err);
