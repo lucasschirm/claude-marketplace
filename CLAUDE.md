@@ -20,6 +20,7 @@ plugins/<plugin-name>/
 
 - `.claude-plugin/marketplace.json` is the root manifest. Each entry in its `plugins` array has `name`, `source` (relative path to the plugin directory), and `description`, and must match a real plugin under `plugins/`.
 - Each plugin is self-contained under `plugins/<plugin-name>/` with its own `.claude-plugin/plugin.json` manifest.
+- Pi (not Claude Code) resources live outside `plugins/`: `extensions/*.ts` are Pi extensions and `skills/<skill-name>/SKILL.md` are Pi skills, both declared in the `pi` manifest of the root `package.json`. Skills there may reference Pi-only tools (e.g. `devin_delegate`), so do not move them under `plugins/`.
 - Currently one plugin exists: `plugins/claude-basics`, intended to hold agents/skills useful across every project. It has a `skills/claude-rule-creator/` directory scaffolded but not yet populated with a `SKILL.md`.
 
 ## Adding to a plugin

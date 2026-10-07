@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
+import { DEVIN_BASH_BLOCK_REASON, findBlockedDevinCommand } from "./lib/devin-bash-guard.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
@@ -432,6 +433,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	const activeClients = new Map<string, AcpClient>();
 	let lastUIContext: ExtensionUIContext | undefined;
 	let baseDir = process.cwd();
+	// When false (default), shell calls to the `devin` CLI are blocked so work goes through the devin_* tools.
+	let allowBash = false;
 
 	// Binary availability cache
 	const binaryAvailableCache = new Map<string, boolean>();
@@ -984,6 +987,16 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", cleanupAllClients);
 
+	// Block the agent from driving the devin CLI through bash/powershell (read-only subcommands stay allowed).
+	// Covers codemode scripts too, since their nested tool calls pass through this handler.
+	pi.on("tool_call", async (event) => {
+		if (allowBash) return;
+		if (event.toolName !== "bash" && event.toolName !== "powershell") return;
+		const command = (event.input as { command?: unknown }).command;
+		if (typeof command !== "string" || !findBlockedDevinCommand(command)) return;
+		return { block: true, reason: DEVIN_BASH_BLOCK_REASON };
+	});
+
 	// Register OS process exit hooks to prevent orphaned Devin processes
 	const onProcessExit = () => cleanupAllClients();
 	process.once("exit", onProcessExit);
@@ -1472,7 +1485,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// --- Slash Command /devin ---
 
 	pi.registerCommand("devin", {
-		description: "Devin delegation controls and dashboard (subcommands: list, sessions, limit [n], cancel <id>)",
+		description: "Devin delegation controls and dashboard (subcommands: list, sessions, limit [n], cancel <id>, allow_bash [on|off|status])",
 		handler: async (args, ctx) => {
 			lastUIContext = ctx.ui;
 			const trimmed = (args || "").trim();
@@ -1494,6 +1507,26 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				updateStatusUI(ctx.ui);
 				ctx.ui.notify(`Devin concurrency limit updated to ${maxRuns}.`, "info");
 				drainQueue();
+				return;
+			}
+
+			if (sub === "allow_bash") {
+				const arg = parts[1]?.toLowerCase();
+				if (arg === "status") {
+					ctx.ui.notify(`Direct \`devin\` bash calls are currently ${allowBash ? "ALLOWED" : "BLOCKED"}.`, "info");
+					return;
+				}
+				if (arg && !["on", "allow", "off", "block"].includes(arg)) {
+					ctx.ui.notify("Usage: /devin allow_bash [on|off|status] (no argument toggles)", "warning");
+					return;
+				}
+				allowBash = arg ? arg === "on" || arg === "allow" : !allowBash;
+				ctx.ui.notify(
+					allowBash
+						? "Direct `devin` bash calls are now ALLOWED for this session. Run /devin allow_bash again to block them."
+						: "Direct `devin` bash calls are now BLOCKED. The agent must use the devin_* tools.",
+					"info",
+				);
 				return;
 			}
 
@@ -1560,7 +1593,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 
 			ctx.ui.notify(
-				`Unknown subcommand '${sub}'. Available subcommands: list, sessions, limit [n], cancel <id>`,
+				`Unknown subcommand '${sub}'. Available subcommands: list, sessions, limit [n], cancel <id>, allow_bash [on|off|status]`,
 				"warning",
 			);
 		},

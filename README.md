@@ -100,6 +100,12 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     - `session_id` (mandatory): Cancels an active or queued session and automatically advances the queue.
   - **`devin_restart`**:
     - `session_id` (mandatory), `prompt` (optional): Resumes or restarts a failed, interrupted, or stopped session in its existing worktree.
+- **Bash Guard**:
+  - Blocks the agent from running the `devin` CLI through the `bash`/`powershell` tools (including nested calls from codemode scripts), so all delegation goes through the tracked, queued `devin_*` tools. The block message points the agent to `devin_delegate`.
+  - Detects direct calls, pipelines and lists, `$(...)`/backtick substitutions, `bash -c`/`eval` strings, wrappers (`sudo`, `env`, `timeout`, `xargs`, ...) and `find -exec`.
+  - Read-only commands stay allowed: `devin models list`, `devin ls`/`list`, `devin version`, `devin help`, and `--help`/`--version`.
+  - Static analysis has limits: variable expansion (`$CMD -p x`), scripts run from a file and heredocs fed to a shell are not inspected.
+  - **Slash command `/devin allow_bash [on|off|status]`** lifts or restores the block for the current session (no argument toggles). The block is on by default and resets when pi restarts.
 - **Concurrency & FIFO Queueing**:
   - Default limit of 2 concurrent running sessions.
   - Automatically queues additional requests in FIFO order and dequeues them as runs finish.
@@ -119,6 +125,14 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     - Use `Up` / `Down` arrow keys to browse sessions.
     - Use `Right` / `Enter` to view message details streamed directly from disk.
     - Use `Left` to return to the session list and `q` / `Esc` to close.
+
+#### Tests
+
+The bash guard has standalone unit tests: `node --test test/test-devin-bash-guard.ts`. `test/test-devin-delegate.ts` runs inside Pi and starts real Devin sessions, so run it only deliberately.
+
+#### Skill: `delegate-to-devin`
+
+The package ships a Pi skill (`skills/delegate-to-devin/SKILL.md`) that teaches the agent how to use the `devin_*` tools: which Devin model to pick per task class, how to write the delegation prompt, when to use `create_worktree`, and how to verify the result. It is loaded on demand when a task matches, or explicitly with `/skill:delegate-to-devin`. It is installed together with the extension, so no extra setup is needed; run `pi update` and `/reload` to pick up changes.
 
 ### Test Database Tools (`requestdb` & `destroydb`)
 
