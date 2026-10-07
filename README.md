@@ -120,6 +120,10 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     - Use `Right` / `Enter` to view message details streamed directly from disk.
     - Use `Left` to return to the session list and `q` / `Esc` to close.
 
+#### Skill: `delegate-to-devin`
+
+The package ships a Pi skill (`skills/delegate-to-devin/SKILL.md`) that teaches the agent how to use the `devin_*` tools: which Devin model to pick per task class, how to write the delegation prompt, when to use `create_worktree`, and how to verify the result. It is loaded on demand when a task matches, or explicitly with `/skill:delegate-to-devin`. It is installed together with the extension, so no extra setup is needed; run `pi update` and `/reload` to pick up changes.
+
 ### Test Database Tools (`requestdb` & `destroydb`)
 
 When the system commands `requestdb` and/or `destroydb` are present in the environment (`PATH`), the extension dynamically registers them as agent tools and passes their stdout/stderr output directly to the agent:

@@ -1,6 +1,6 @@
 {
   "name": "claude-marketplace",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Collection of Claude Code plugins and Pi extensions",
   "keywords": [
     "pi-package"
@@ -9,6 +9,9 @@
     "extensions": [
       "./extensions/observe-pr.ts",
       "./extensions/devin-delegate.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {
