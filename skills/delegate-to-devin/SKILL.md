@@ -21,6 +21,8 @@ The `devin_*` tools run Devin sessions in the background over its Agent Client P
 | `devin_cancel` | Cancel a running or queued session (session id or queue id). |
 | `devin_restart` | Resume a failed, interrupted or stopped session in its original worktree. Optional new `prompt`. |
 
+Do not run the `devin` CLI through bash. The extension blocks it and the call fails with a message pointing back to these tools. Only read-only commands are allowed (`devin models list`, `devin ls`, `devin version`, `devin --help`). If a direct CLI run is truly needed, ask the user to run `/devin allow_bash`.
+
 ## Routing table
 
 Pick the model by what a *successful run must do*, not by prompt length.
