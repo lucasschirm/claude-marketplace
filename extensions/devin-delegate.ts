@@ -552,7 +552,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	function sendAgentMessage(content: string): void {
 		try {
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
+			// "steer" lands after the current turn's tool calls; "followUp" would wait until the agent stops calling tools.
+			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
 			console.error("[devin-delegate] Failed to send message to agent:", err);
 		}

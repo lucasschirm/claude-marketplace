@@ -178,7 +178,8 @@ export default function (pi: ExtensionAPI) {
 	function sendAgentMessage(content: string) {
 		if (suppressUpdates) return;
 		try {
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
+			// "steer" lands after the current turn's tool calls; "followUp" would wait until the agent stops calling tools.
+			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
 			console.error("[observe_pr] Failed to send message to agent:", err);
 		}
