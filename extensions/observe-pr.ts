@@ -140,6 +140,17 @@ export default function (pi: ExtensionAPI) {
 	let lastUIContext: ExtensionUIContext | undefined;
 	let lastCwd: string = process.cwd();
 	let isCheckingBranches = false;
+	// Announcements found by the session_start check; appended to the user's next message instead of
+	// being sent as a standalone follow-up that would trigger an agent turn on startup/resume.
+	const deferredAnnouncements = new Map<number, string>();
+	// While a startup notice is undelivered, PR updates are discarded: the agent only hears about
+	// updates that happen after it knows the PR is tracked. Released once the notice's turn starts.
+	let suppressUpdates = false;
+	let noticeAttached = false;
+	let disposed = false;
+	// The session_start branch check; the first plain user message waits briefly for it so the notice isn't missed.
+	let startupCheck: Promise<void> | undefined;
+	const STARTUP_CHECK_WAIT_MS = 5000;
 
 	function getObserverInterval(): number {
 		const flagVal = pi.getFlag("pr-observer-interval");
@@ -165,11 +176,25 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function sendAgentMessage(content: string) {
+		if (suppressUpdates) return;
 		try {
 			pi.sendUserMessage(content, { deliverAs: "followUp" });
 		} catch (err) {
 			console.error("[observe_pr] Failed to send message to agent:", err);
 		}
+	}
+
+	// Announce a newly tracked PR; while the startup notice is still pending it joins that notice instead.
+	function announceTracking(prNumber: number) {
+		if (suppressUpdates) {
+			deferredAnnouncements.set(prNumber, getTrackingAnnouncement(prNumber));
+			return;
+		}
+		sendAgentMessage(getTrackingAnnouncement(prNumber));
+	}
+
+	function getTrackingAnnouncement(prNumber: number): string {
+		return `The PR ${prNumber} recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`;
 	}
 
 	function getStats(): PRObserverStats {
@@ -534,6 +559,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function stopObserving(prNumber: number) {
+		// A PR that is no longer tracked must not be announced; stop suppressing once nothing is pending.
+		deferredAnnouncements.delete(prNumber);
+		if (deferredAnnouncements.size === 0 && !noticeAttached) suppressUpdates = false;
+
 		const pending = pendingAnnouncements.get(prNumber);
 		if (pending) {
 			clearTimeout(pending.timer);
@@ -614,7 +643,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function checkTrackedBranches(cwd: string) {
+	async function checkTrackedBranches(cwd: string, deferAnnouncements = false) {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
 		if (!isEnabled) return;
 
@@ -639,6 +668,7 @@ export default function (pi: ExtensionAPI) {
 						["pr", "view", branch, "--json", "number,state,isDraft,comments,statusCheckRollup"],
 						{ cwd: repoRoot },
 					);
+					if (disposed) return;
 					const data = JSON.parse(stdout);
 					const prNumber = data.number;
 					const state = String(data.state || "").toUpperCase();
@@ -658,6 +688,12 @@ export default function (pi: ExtensionAPI) {
 						autoDetectedPRs.add(prNumber);
 						startObserving(prNumber, data.comments || [], repoRoot, lastUIContext);
 
+						if (deferAnnouncements) {
+							deferredAnnouncements.set(prNumber, getTrackingAnnouncement(prNumber));
+							suppressUpdates = true;
+							continue;
+						}
+
 						const delay = process.env.PI_OBSERVE_PR_DELIVERY_DELAY
 							? parseInt(process.env.PI_OBSERVE_PR_DELIVERY_DELAY, 10)
 							: 3500;
@@ -667,9 +703,7 @@ export default function (pi: ExtensionAPI) {
 							if (pending && !pending.delivered) {
 								pending.delivered = true;
 								pendingAnnouncements.delete(prNumber);
-								sendAgentMessage(
-									`The PR ${prNumber} recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`,
-								);
+								announceTracking(prNumber);
 							}
 						}, delay);
 
@@ -702,8 +736,43 @@ export default function (pi: ExtensionAPI) {
 		lastUIContext = ctx.ui;
 		lastCwd = ctx.cwd || process.cwd();
 		updateStatusUI(ctx.ui);
-		checkTrackedBranches(lastCwd);
+		disposed = false;
+		startupCheck = checkTrackedBranches(lastCwd, true);
 		startBranchPollTimer();
+	});
+
+	pi.on("input", async (event) => {
+		// Skill/template commands are expanded after this event, so appending text would corrupt them.
+		if (event.source === "extension" || event.text.startsWith("/")) {
+			return { action: "continue" };
+		}
+		if (startupCheck) {
+			const check = startupCheck;
+			startupCheck = undefined;
+			let timer: NodeJS.Timeout | undefined;
+			await Promise.race([
+				check,
+				new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, STARTUP_CHECK_WAIT_MS);
+				}),
+			]);
+			if (timer) clearTimeout(timer);
+		}
+		// A message queued while the agent is streaming starts no new turn, so keep the notice for an idle one.
+		if (event.streamingBehavior !== undefined || deferredAnnouncements.size === 0) {
+			return { action: "continue" };
+		}
+		const notices = Array.from(deferredAnnouncements.values()).join("\n\n");
+		deferredAnnouncements.clear();
+		noticeAttached = true;
+		return { action: "transform", text: `${event.text}\n\n${notices}`, images: event.images };
+	});
+
+	// The user's message (with the notice) is now running, so follow-ups queue behind it.
+	pi.on("agent_start", () => {
+		if (!noticeAttached) return;
+		noticeAttached = false;
+		suppressUpdates = false;
 	});
 
 	async function pollAllObservedPRs() {
@@ -749,6 +818,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		disposed = true;
+		deferredAnnouncements.clear();
+		suppressUpdates = false;
+		noticeAttached = false;
+		startupCheck = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		cleanupAll();
 	});

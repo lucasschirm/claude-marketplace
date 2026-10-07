@@ -376,7 +376,7 @@ class DevinDashboardComponent {
 				const prBadge = s.detectedPrNumber ? th.fg("accent", ` PR #${s.detectedPrNumber}`) : "";
 				const timeStr = s.lastMessageTime ? new Date(s.lastMessageTime).toLocaleTimeString() : "N/A";
 
-				const lineText = `${pointer}${th.fg("bold", s.sessionId)} ${statusBadge}${prBadge} (${timeStr}) - ${s.prompt.slice(0, 40)}`;
+				const lineText = `${pointer}${th.bold(s.sessionId)} ${statusBadge}${prBadge} (${timeStr}) - ${s.prompt.slice(0, 40)}`;
 				lines.push(truncateToWidth(lineText, width));
 			}
 
@@ -390,7 +390,7 @@ class DevinDashboardComponent {
 					const isSelected = itemIndex === this.selectedIndex;
 					const pointer = isSelected ? th.fg("accent", "▶ ") : "  ";
 					const badge = th.fg("warning", `[QUEUED #${j + 1}]`);
-					const lineText = `${pointer}${th.fg("bold", q.queueId)} ${badge} - ${q.prompt.slice(0, 45)}`;
+					const lineText = `${pointer}${th.bold(q.queueId)} ${badge} - ${q.prompt.slice(0, 45)}`;
 					lines.push(truncateToWidth(lineText, width));
 				}
 			}
@@ -985,7 +985,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		activeClients.clear();
 	}
 
-	pi.on("session_shutdown", cleanupAllClients);
+	// Release the load guard so a session switch (/resume, /new, /reload) re-registers the tools.
+	pi.on("session_shutdown", () => {
+		delete (globalThis as any)[GLOBAL_GUARD_KEY];
+		cleanupAllClients();
+	});
 
 	// Block the agent from driving the devin CLI through bash/powershell (read-only subcommands stay allowed).
 	// Covers codemode scripts too, since their nested tool calls pass through this handler.
