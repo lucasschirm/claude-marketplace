@@ -11,6 +11,8 @@ export default function(pi: any) {
   const sentMessages: string[] = [];
   const eventHandlers: Record<string, Function[]> = {};
 
+  let activeToolList: string[] = [];
+
   const mockPi = {
     ...pi,
     on(event: string, handler: any) {
@@ -20,6 +22,7 @@ export default function(pi: any) {
     },
     registerTool(t: any) {
       tools[t.name] = t;
+      if (!activeToolList.includes(t.name)) activeToolList.push(t.name);
       return pi.registerTool(t);
     },
     registerCommand(name: string, opts: any) {
@@ -34,9 +37,11 @@ export default function(pi: any) {
       return flags[name]?.default || pi.getFlag(name);
     },
     getActiveTools() {
-      return Object.keys(tools);
+      return [...activeToolList];
     },
-    setActiveTools(t: string[]) {},
+    setActiveTools(t: string[]) {
+      activeToolList = [...t];
+    },
     sendUserMessage(msg: string, opts: any) {
       sentMessages.push(msg);
       return pi.sendUserMessage?.(msg, opts);
@@ -220,6 +225,80 @@ exit 0
         throw new Error(`Expected warning for unknown subcommand, got: ${warnMessage}`);
       }
       console.log("✓ Test 6 Passed: Unrecognized subcommand reported warning without accidental toggle.");
+
+      // Test 7: Initial prompt augmentation when automatic tracking is enabled
+      console.log("Test 7: Testing initial prompt augmentation in before_agent_start...");
+      const startHandlers = eventHandlers["before_agent_start"] || [];
+      const testEvent1: any = {
+        type: "before_agent_start",
+        prompt: "Start task",
+        systemPrompt: "Base system prompt.",
+        systemPromptOptions: {
+          sections: {},
+          promptGuidelines: [],
+        },
+      };
+      let resPrompt1: any;
+      for (const h of startHandlers) {
+        resPrompt1 = await h(testEvent1, mockCtx);
+      }
+      console.log("Section content:", testEvent1.systemPromptOptions.sections.pr_auto_tracking);
+      console.log("Result systemPrompt:", resPrompt1?.systemPrompt);
+      if (!testEvent1.systemPromptOptions.sections.pr_auto_tracking?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected pr_auto_tracking section in systemPromptOptions");
+      }
+      if (!resPrompt1?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected auto-tracking message in returned systemPrompt");
+      }
+      console.log("✓ Test 7 Passed: Initial prompt receives automatic PR tracking notice when enabled.");
+
+      // Test 8: Prompt augmentation when automatic tracking is disabled
+      console.log("Test 8: Testing prompt behavior when disabled via /pr_observer disable...");
+      await prCmd.handler("disable", mockCtx);
+      const testEvent2: any = {
+        type: "before_agent_start",
+        prompt: "Start task",
+        systemPrompt: "Base system prompt.",
+        systemPromptOptions: {
+          sections: { pr_auto_tracking: "existing" },
+          promptGuidelines: [],
+        },
+      };
+      let resPrompt2: any;
+      for (const h of startHandlers) {
+        resPrompt2 = await h(testEvent2, mockCtx);
+      }
+      if (testEvent2.systemPromptOptions.sections.pr_auto_tracking) {
+        throw new Error("Expected pr_auto_tracking section to be removed when disabled");
+      }
+      if (resPrompt2?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected no auto-tracking message in systemPrompt when disabled");
+      }
+      console.log("✓ Test 8 Passed: Auto-tracking notice not injected when tool is disabled.");
+
+      // Test 9: Re-enabling restores prompt augmentation
+      console.log("Test 9: Testing prompt behavior when re-enabled via /pr_observer enable...");
+      await prCmd.handler("enable", mockCtx);
+      const testEvent3: any = {
+        type: "before_agent_start",
+        prompt: "Start task",
+        systemPrompt: "Base system prompt.",
+        systemPromptOptions: {
+          sections: {},
+          promptGuidelines: [],
+        },
+      };
+      let resPrompt3: any;
+      for (const h of startHandlers) {
+        resPrompt3 = await h(testEvent3, mockCtx);
+      }
+      if (!testEvent3.systemPromptOptions.sections.pr_auto_tracking?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected pr_auto_tracking section after re-enabling");
+      }
+      if (!resPrompt3?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
+        throw new Error("Expected auto-tracking message in returned systemPrompt after re-enabling");
+      }
+      console.log("✓ Test 9 Passed: Auto-tracking notice restored after re-enabling.");
 
       console.log("✓ All branch observer tests passed successfully!");
       // Clean up tmpDir

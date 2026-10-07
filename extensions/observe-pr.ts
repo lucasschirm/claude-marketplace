@@ -710,6 +710,35 @@ export default function (pi: ExtensionAPI) {
 		checkTrackedBranches(lastCwd);
 	});
 
+	const AUTO_TRACKING_PROMPT_MESSAGE =
+		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you.";
+
+	pi.on("before_agent_start", (event) => {
+		const isEnabled = pi.getActiveTools().includes("observe_pr");
+		if (!isEnabled) {
+			if (event.systemPromptOptions?.sections?.pr_auto_tracking) {
+				delete event.systemPromptOptions.sections.pr_auto_tracking;
+			}
+			return;
+		}
+
+		if (event.systemPromptOptions?.sections) {
+			event.systemPromptOptions.sections.pr_auto_tracking = AUTO_TRACKING_PROMPT_MESSAGE;
+		}
+
+		if (event.systemPromptOptions?.promptGuidelines) {
+			if (!event.systemPromptOptions.promptGuidelines.includes(AUTO_TRACKING_PROMPT_MESSAGE)) {
+				event.systemPromptOptions.promptGuidelines.push(AUTO_TRACKING_PROMPT_MESSAGE);
+			}
+		}
+
+		return {
+			systemPrompt: event.systemPrompt
+				? `${event.systemPrompt}\n\n${AUTO_TRACKING_PROMPT_MESSAGE}`
+				: AUTO_TRACKING_PROMPT_MESSAGE,
+		};
+	});
+
 	pi.on("session_shutdown", () => {
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		cleanupAll();
