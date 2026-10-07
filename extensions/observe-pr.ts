@@ -147,6 +147,10 @@ export default function (pi: ExtensionAPI) {
 	// updates that happen after it knows the PR is tracked. Released once the notice's turn starts.
 	let suppressUpdates = false;
 	let noticeAttached = false;
+	// An idle user message has been received; the next agent run is that turn, even if no notice could be attached (e.g. a slash command).
+	let userTurnPending = false;
+	// Any agent run has started. A startup check finishing later than that falls back to the normal delayed announcement.
+	let sessionHasRun = false;
 	let disposed = false;
 	// The session_start branch check; the first plain user message waits briefly for it so the notice isn't missed.
 	let startupCheck: Promise<void> | undefined;
@@ -178,7 +182,8 @@ export default function (pi: ExtensionAPI) {
 	function sendAgentMessage(content: string) {
 		if (suppressUpdates) return;
 		try {
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
+			// "steer" lands after the current turn's tool calls; "followUp" would wait until the agent stops calling tools.
+			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
 			console.error("[observe_pr] Failed to send message to agent:", err);
 		}
@@ -688,7 +693,7 @@ export default function (pi: ExtensionAPI) {
 						autoDetectedPRs.add(prNumber);
 						startObserving(prNumber, data.comments || [], repoRoot, lastUIContext);
 
-						if (deferAnnouncements) {
+						if (deferAnnouncements && !sessionHasRun) {
 							deferredAnnouncements.set(prNumber, getTrackingAnnouncement(prNumber));
 							suppressUpdates = true;
 							continue;
@@ -743,7 +748,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("input", async (event) => {
 		// Skill/template commands are expanded after this event, so appending text would corrupt them.
-		if (event.source === "extension" || event.text.startsWith("/")) {
+		if (event.source === "extension") {
+			return { action: "continue" };
+		}
+		const idle = event.streamingBehavior === undefined;
+		if (idle) userTurnPending = true;
+		if (event.text.startsWith("/")) {
 			return { action: "continue" };
 		}
 		if (startupCheck) {
@@ -759,19 +769,22 @@ export default function (pi: ExtensionAPI) {
 			if (timer) clearTimeout(timer);
 		}
 		// A message queued while the agent is streaming starts no new turn, so keep the notice for an idle one.
-		if (event.streamingBehavior !== undefined || deferredAnnouncements.size === 0) {
+		if (!idle || deferredAnnouncements.size === 0) {
 			return { action: "continue" };
 		}
+		// Keep the notice queued until the turn actually starts, so a prompt that fails is retried with it.
 		const notices = Array.from(deferredAnnouncements.values()).join("\n\n");
-		deferredAnnouncements.clear();
 		noticeAttached = true;
 		return { action: "transform", text: `${event.text}\n\n${notices}`, images: event.images };
 	});
 
 	// The user's message (with the notice) is now running, so follow-ups queue behind it.
 	pi.on("agent_start", () => {
-		if (!noticeAttached) return;
+		sessionHasRun = true;
+		if (!noticeAttached && !userTurnPending) return;
+		if (noticeAttached) deferredAnnouncements.clear();
 		noticeAttached = false;
+		userTurnPending = false;
 		suppressUpdates = false;
 	});
 
@@ -789,7 +802,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const AUTO_TRACKING_PROMPT_MESSAGE =
-		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you.";
+		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): while a PR is observed, the observer sends you messages for new comments, CI results and PR status changes. You may still use `gh` to read the details of a comment or CI failure you were notified about. When the PR is observed and you have no other work to do until CI finishes, end your turn and wait for those messages.";
 
 	pi.on("before_agent_start", (event) => {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
@@ -822,6 +835,8 @@ export default function (pi: ExtensionAPI) {
 		deferredAnnouncements.clear();
 		suppressUpdates = false;
 		noticeAttached = false;
+		userTurnPending = false;
+		sessionHasRun = false;
 		startupCheck = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		cleanupAll();
