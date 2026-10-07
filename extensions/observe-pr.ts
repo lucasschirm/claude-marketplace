@@ -790,7 +790,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const AUTO_TRACKING_PROMPT_MESSAGE =
-		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you.";
+		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): the observer sends you new comments, CI results and PR status changes as messages. When you have no other work to do until CI finishes, end your turn and wait for those messages.";
 
 	pi.on("before_agent_start", (event) => {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
