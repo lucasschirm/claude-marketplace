@@ -255,8 +255,14 @@ exit 0
       if (!testEvent1.systemPromptOptions.sections.pr_auto_tracking?.includes("Automatic PR tracking is enabled")) {
         throw new Error("Expected pr_auto_tracking section in systemPromptOptions");
       }
+      if (!testEvent1.systemPromptOptions.sections.pr_auto_tracking?.includes("# Rules")) {
+        throw new Error("Expected # Rules section in pr_auto_tracking");
+      }
       if (!resPrompt1?.systemPrompt?.includes("Automatic PR tracking is enabled")) {
         throw new Error("Expected auto-tracking message in returned systemPrompt");
+      }
+      if (!resPrompt1?.systemPrompt?.includes("# Rules")) {
+        throw new Error("Expected # Rules section in returned systemPrompt");
       }
       console.log("✓ Test 7 Passed: Initial prompt receives automatic PR tracking notice when enabled.");
 

@@ -802,7 +802,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const AUTO_TRACKING_PROMPT_MESSAGE =
-		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): while a PR is observed, the observer sends you messages for new comments, CI results and PR status changes. You may still use `gh` to read the details of a comment or CI failure you were notified about. When the PR is observed and you have no other work to do until CI finishes, end your turn and wait for those messages.";
+		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): while a PR is observed, the observer sends you messages for new comments, CI results and PR status changes. You may still use `gh` to read the details of a comment or CI failure you were notified about. When the PR is observed and you have no other work to do until CI finishes, end your turn and wait for those messages.\n\n" +
+		"# Rules\n\n" +
+		"- NEVER use \"gh\" sleep loops or \"--track\" in the bash for git updates. All CI/State/Comments updates in the PR will be automatically sent to you, but it may delay the message if you run long run bash commands with sleep loop.\n" +
+		"- Only use \"gh\" to get specific information about coments, failing CI or extend the information passed from the widget.\n" +
+		"- Is OK to end your work and wait for the updates from the CI if there are no other pending tasks until the PR is done or state changes.";
 
 	pi.on("before_agent_start", (event) => {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
