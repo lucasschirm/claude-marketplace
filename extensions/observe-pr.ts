@@ -132,6 +132,7 @@ export default function (pi: ExtensionAPI) {
 	(globalThis as any)[GLOBAL_GUARD_KEY] = true;
 
 	const observedPRs = new Map<number, ObservedPR>();
+	(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
 	const trackedBranchesByRepo = new Map<string, Set<string>>();
 	const branchToPR = new Map<string, number>();
 	const autoDetectedPRs = new Set<number>();
@@ -460,6 +461,12 @@ export default function (pi: ExtensionAPI) {
 				if (changedNumbers.length > 0) {
 					sendAgentMessage(`Comment ${changedNumbers.join(", ")} added or updated to the PR ${prNumber}.`);
 				}
+			}
+
+			if (typeof (globalThis as any).__PI_ON_PR_POLL__ === "function") {
+				try {
+					await (globalThis as any).__PI_ON_PR_POLL__(prNumber, pr.cwd);
+				} catch {}
 			}
 
 			// Verify if all runs and checks passed
@@ -843,6 +850,7 @@ export default function (pi: ExtensionAPI) {
 		sessionHasRun = false;
 		startupCheck = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
+		delete (globalThis as any).__PI_OBSERVED_PRS__;
 		cleanupAll();
 	});
 
