@@ -167,7 +167,7 @@ Independent tasks run fine concurrently, one git worktree and branch each, with 
 
 **Dispatch each run as its own backgrounded call — not one compound `for … & wait` command.** An agent harness may evaluate a compound command as a single unit and deny the whole thing, and the failure is confusing rather than obvious. Worse, anything else bundled into that command (the `mkdir -p` creating the output directory, say) silently never runs, so the next dispatches exit 1 having written nothing and the error surfaces as `No such file or directory` on the output path — which reads like a devin fault rather than a missing directory. Create and verify output directories in a separate step before dispatching anything.
 
-**The rule: if N sessions would each edit the same shared file, forbid all of them from touching it and make those edits yourself.** Task boards, root index files, changelogs, `.gitignore`, and any per-directory map at the repo root are the usual suspects. A status line touched by three branches while a fourth renames the directory it lives in is an N-way conflict that no amount of careful merging fixes cheaply.
+**The rule: if N sessions would each edit the same shared file, forbid all of them from touching it and make those edits yourself.** Task boards, root index files, changelogs, `.gitignore`, and any boundary guide or map (`AGENTS.md`) at the repo root are the usual suspects. A status line touched by three branches while a fourth renames the directory it lives in is an N-way conflict that no amount of careful merging fixes cheaply.
 
 Corollaries worth stating in each prompt:
 
