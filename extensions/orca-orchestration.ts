@@ -43,6 +43,41 @@ export interface OrchestrationStats {
 	workers: ObservedWorker[];
 }
 
+export function formatWorkerOutput(result: any): string {
+	if (!result) return "No output captured.";
+	if (typeof result === "string") return result;
+	if (Array.isArray(result)) return result.join("\n");
+	if (typeof result.output === "string") return result.output;
+	if (Array.isArray(result.output)) return result.output.join("\n");
+	if (Array.isArray(result.lines)) return result.lines.join("\n");
+	if (Array.isArray(result.terminal?.tail)) return result.terminal.tail.join("\n");
+	if (typeof result.terminal?.preview === "string") return result.terminal.preview;
+	if (typeof result.preview === "string") return result.preview;
+	if (Array.isArray(result.transcript)) return result.transcript.join("\n");
+	if (typeof result.transcript === "string") return result.transcript;
+	if (typeof result.text === "string") return result.text;
+	if (typeof result.message === "string") return result.message;
+	try {
+		return JSON.stringify(result, null, 2);
+	} catch {
+		return String(result);
+	}
+}
+
+export function formatMessageText(val: any, fallback = ""): string {
+	if (!val) return fallback;
+	if (typeof val === "string") return val;
+	if (typeof val.text === "string") return val.text;
+	if (typeof val.message === "string") return val.message;
+	if (typeof val.summary === "string") return val.summary;
+	if (typeof val.body === "string") return val.body;
+	try {
+		return JSON.stringify(val);
+	} catch {
+		return String(val);
+	}
+}
+
 export class OrcaDashboardComponent {
 	private theme: any;
 	private getStats: () => OrchestrationStats;
@@ -337,9 +372,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (type === "worker_done") {
 				const outcome = String(msg.outcome || "succeeded").toLowerCase();
 				const isSuccess = outcome === "succeeded";
-				const summary = msg.summary || msg.body || "No summary provided.";
+				const summary = formatMessageText(msg.summary || msg.body, "No summary provided.");
 				const filesModified = Array.isArray(msg.filesModified) ? msg.filesModified : [];
-				const reportPath = msg.reportPath;
+				const reportPath = typeof msg.reportPath === "string" ? msg.reportPath : undefined;
 
 				if (worker) {
 					worker.status = isSuccess ? "succeeded" : "failed";
@@ -374,7 +409,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						`Use "orca_orchestration_release" with dispatch_id "${dispatchId}" to release the worker terminal resources, or review changes.`,
 				);
 			} else if (type === "question") {
-				const questionText = msg.body || msg.summary || "No question text.";
+				const questionText = formatMessageText(msg.body || msg.summary, "No question text.");
 				sendAgentMessage(
 					`[Orca Orchestration] Worker ${dispatchId || "unknown"} asked a blocking question (ID: ${msg.id}):\n` +
 						`"${questionText}"\n\n` +
@@ -382,7 +417,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						`orca_orchestration_reply({ message_id: "${msg.id}", answer: "<your answer>" })`,
 				);
 			} else if (type === "escalation") {
-				const reason = msg.body || msg.summary || "No escalation details.";
+				const reason = formatMessageText(msg.body || msg.summary, "No escalation details.");
 				sendAgentMessage(
 					`[Orca Orchestration] Worker ${dispatchId || "unknown"} escalated an issue:\n` +
 						`"${reason}"\n\n` +
@@ -406,13 +441,18 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		isReconciling = true;
 
 		try {
-			const res = await execOrca<{ rows: OrcaWorkerRow[] }>(
+			const res = await execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(
 				["orchestration", "worker-list"],
 				{ cwd: lastCwd },
 			);
 
-			if (res.ok && res.result && Array.isArray(res.result.rows)) {
-				for (const row of res.result.rows) {
+			const rows: OrcaWorkerRow[] =
+				res.ok && res.result
+					? ((res.result as any).workers || res.result.rows || (Array.isArray(res.result) ? res.result : []))
+					: [];
+
+			if (rows.length > 0) {
+				for (const row of rows) {
 					const dId = row.dispatchId;
 					if (!dId) continue;
 
@@ -839,11 +879,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						{ cwd: ctx.cwd },
 					);
 					const output =
-						readRes.result?.output ||
-						readRes.result?.lines?.join("\n") ||
-						readRes.result ||
-						readRes.error?.message ||
-						"No output captured.";
+						readRes.ok && readRes.result
+							? formatWorkerOutput(readRes.result)
+							: readRes.error?.message || "No output captured.";
 
 					return {
 						content: [
@@ -876,9 +914,33 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					{ cwd: ctx.cwd },
 				);
 				const proj = showRes.result?.projection || showRes.result || {};
-				const stage = proj.stage?.worker || localMeta?.status || "unknown";
-				const outcome = proj.outcome || localMeta?.outcome || "pending";
-				const attention = proj.attention?.categories?.join(", ") || "none";
+				const stage =
+					typeof proj.stage === "string"
+						? proj.stage
+						: proj.stage?.worker ||
+						  proj.stage?.detail ||
+						  showRes.result?.worker?.state ||
+						  showRes.result?.worker?.stage ||
+						  localMeta?.status ||
+						  "unknown";
+
+				const outcome =
+					typeof proj.outcome === "string"
+						? proj.outcome
+						: typeof localMeta?.outcome === "string"
+						? localMeta.outcome
+						: "pending";
+
+				const attention = Array.isArray(proj.attention?.categories)
+					? proj.attention.categories.join(", ")
+					: typeof proj.attention === "string"
+					? proj.attention
+					: "none";
+
+				const summaryText = formatMessageText(localMeta?.summary);
+				const filesModified = localMeta?.filesModified?.length ? `Modified Files: ${localMeta.filesModified.join(", ")}\n` : "";
+				const reportPath = localMeta?.reportPath ? `Report Path: ${localMeta.reportPath}\n` : "";
+				const errorNotice = !showRes.ok && showRes.error?.message ? `Notice: ${showRes.error.message}\n` : "";
 
 				return {
 					content: [
@@ -888,9 +950,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 								`Dispatch ${dId} Status:\n` +
 								`Stage: ${stage} | Outcome: ${outcome}\n` +
 								`Attention Categories: ${attention}\n` +
-								(localMeta?.summary ? `Summary: ${localMeta.summary}\n` : "") +
-								(localMeta?.filesModified?.length ? `Modified Files: ${localMeta.filesModified.join(", ")}\n` : "") +
-								(localMeta?.reportPath ? `Report Path: ${localMeta.reportPath}\n` : ""),
+								(summaryText ? `Summary: ${summaryText}\n` : "") +
+								filesModified +
+								reportPath +
+								errorNotice,
 						},
 					],
 				};
@@ -902,20 +965,24 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			const list: string[] = [];
 
 			for (const w of stats.workers) {
+				const summaryStr = formatMessageText(w.summary);
+				const outcomeStr = typeof w.outcome === "string" ? w.outcome : w.outcome ? JSON.stringify(w.outcome) : "";
 				list.push(
-					`[${w.status.toUpperCase()}] ${w.dispatchId} (${w.agent || "agent"})\n` +
+					`[${(w.status || "unknown").toUpperCase()}] ${w.dispatchId} (${w.agent || "agent"})\n` +
 						`  Spec: ${w.spec?.slice(0, 50) || "N/A"}\n` +
-						(w.outcome ? `  Outcome: ${w.outcome}\n` : "") +
-						(w.summary ? `  Summary: ${w.summary}\n` : ""),
+						(outcomeStr ? `  Outcome: ${outcomeStr}\n` : "") +
+						(summaryStr ? `  Summary: ${summaryStr}\n` : ""),
 				);
 			}
+
+			const objectiveStr = typeof stats.objective === "string" ? stats.objective : stats.objective ? JSON.stringify(stats.objective) : "N/A";
 
 			return {
 				content: [
 					{
 						type: "text",
 						text:
-							`Active Run: ${stats.activeRunId || "None"} (Objective: "${stats.objective || "N/A"}")\n` +
+							`Active Run: ${stats.activeRunId || "None"} (Objective: "${objectiveStr}")\n` +
 							`Worker Counts: ${stats.runningCount} running, ${stats.succeededCount} succeeded, ${stats.failedCount} failed, ${stats.releasedCount} released\n\n` +
 							(list.length > 0 ? list.join("\n") : "No workers observed yet."),
 					},
