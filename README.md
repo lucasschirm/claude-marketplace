@@ -134,6 +134,33 @@ The bash guard has standalone unit tests: `node --test test/test-devin-bash-guar
 
 The package ships a Pi skill (`skills/delegate-to-devin/SKILL.md`) that teaches the agent how to use the `devin_*` tools: which Devin model to pick per task class, how to write the delegation prompt, when to use `create_worktree`, and how to verify the result. It is loaded on demand when a task matches, or explicitly with `/skill:delegate-to-devin`. It is installed together with the extension, so no extra setup is needed; run `pi update` and `/reload` to pick up changes.
 
+### Orca Orchestration Observer (`orca_orchestration_*`)
+
+A [Pi Extension](https://pi.dev/docs/latest/extensions) that enables coding agents to dispatch and supervise Orca workers without writing manual shell polling scripts or blocking loops.
+
+#### Features
+
+- **Tools**:
+  - `orca_orchestration_dispatch`: Dispatches a supervised worker (`spec`, `objective`, `agent`, `worktree`, `task_title`, `model`, `effort`), binds a Run automatically, and begins background observation.
+  - `orca_orchestration_observe`: Checks or toggles background observation for the current Run or specific dispatch.
+  - `orca_orchestration_status`: Checks active workers, attention states, and bounded output lines (`read_output`, `complete`) without polling bash.
+  - `orca_orchestration_reply`: Directly answers blocking worker questions or escalations (`message_id`, `answer`).
+  - `orca_orchestration_release`: Cleans up settled worker terminals (`action: "release"`) or fences/stops runaway workers (`action: "stop"`).
+- **Asynchronous Background Check Loop**:
+  - Automatically runs `orca orchestration check --wait` in the background.
+  - Intercepts keepalive pulses and delivers steer notifications directly to the coordinator agent upon `worker_done`, `question`, or `escalation`.
+- **Periodic Reconciliation**:
+  - Periodically inspects `orca orchestration worker-list` to detect unprompted process exits, attention requirements, or human prompts (`agentWait`).
+- **Prompt Guidelines**:
+  - Automatically augments the coordinator prompt in `before_agent_start` instructing it not to write polling scripts or bash loops, but to end its turn and await steering notifications.
+- **TUI Dashboard & Controls**:
+  - Live status indicator: `Orca: <running> running / <settled> settled`.
+  - Slash command `/orchestration` with interactive TUI dashboard (`/orchestration dashboard`), subcommands `list`, `stop`, `release`, `enable`, `disable`.
+
+#### Skill: `orca-orchestration`
+
+The package ships a Pi skill (`skills/orca-orchestration/SKILL.md`) providing instructions on the task-spec contract, dispatch workflows, question answering, and terminal release.
+
 ### Test Database Tools (`requestdb` & `destroydb`)
 
 When the system commands `requestdb` and/or `destroydb` are present in the environment (`PATH`), the extension dynamically registers them as agent tools and passes their stdout/stderr output directly to the agent:

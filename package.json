@@ -8,7 +8,8 @@
   "pi": {
     "extensions": [
       "./extensions/observe-pr.ts",
-      "./extensions/devin-delegate.ts"
+      "./extensions/devin-delegate.ts",
+      "./extensions/orca-orchestration.ts"
     ],
     "skills": [
       "./skills"
