@@ -134,9 +134,34 @@ if (args[0] === 'orchestration' && args[1] === 'reply') {
   process.exit(0);
 }
 
-// orchestration worker-release
-if (args[0] === 'orchestration' && args[1] === 'worker-release') {
-  console.log(JSON.stringify({ ok: true, result: { released: true } }));
+// orchestration run-list
+if (args[0] === 'orchestration' && args[1] === 'run-list') {
+  console.log(JSON.stringify({
+    ok: true,
+    result: {
+      runs: [
+        {
+          id: 'run-mock-100',
+          objective: 'Test objective',
+          coordinator_handle: 'term-mock-1'
+        }
+      ]
+    }
+  }));
+  process.exit(0);
+}
+
+// orchestration run-show
+if (args[0] === 'orchestration' && args[1] === 'run-show') {
+  console.log(JSON.stringify({
+    ok: true,
+    result: {
+      run: {
+        id: 'run-mock-100',
+        objective: 'Test objective'
+      }
+    }
+  }));
   process.exit(0);
 }
 
@@ -310,6 +335,17 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			);
 			assert.match(overviewRes.content[0].text, /Active Run: run-mock-100/);
 			assert.ok(!overviewRes.content[0].text.includes("[object Object]"), "Overview must not contain [object Object]");
+
+			// 6d. All runs/workers across sessions
+			const allStatusRes = await statusTool.execute(
+				"call-stat-4",
+				{ all: true },
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.match(allStatusRes.content[0].text, /All Orchestration Runs & Workers Across Sessions/);
+			assert.match(allStatusRes.content[0].text, /run-mock-100/);
 			console.log("✓ orca_orchestration_status returned accurate, safely formatted output without [object Object]");
 
 			// 7. Test orca_orchestration_reply
@@ -343,7 +379,15 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			const observeTool = registeredTools.get("orca_orchestration_observe")!;
 			const observeRes = await observeTool.execute("call-obs-1", {}, undefined, undefined, mockCtx);
 			assert.match(observeRes.content[0].text, /Orca Orchestration Observer: Active/);
-			console.log("✓ orca_orchestration_observe reported accurate status");
+
+			// 9b. Test observe with all: true
+			const observeAllRes = await observeTool.execute("call-obs-2", { all: true }, undefined, undefined, mockCtx);
+			assert.match(observeAllRes.content[0].text, /All Orchestration Runs & Workers Across Sessions/);
+
+			// 9c. Test observe with a specific run_id having 0 workers to verify guidance
+			const zeroObserveRes = await observeTool.execute("call-obs-4", { run_id: "run-empty" }, undefined, undefined, mockCtx);
+			assert.match(zeroObserveRes.content[0].text, /If this run was started by another session you can manually start observing it by passing the parameters 'run_id'/);
+			console.log("✓ orca_orchestration_observe reported accurate status and guidance");
 
 			// 10. Test Command Subcommands
 			console.log("Test 10: Testing /orchestration command handler...");
