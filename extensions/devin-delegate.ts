@@ -536,16 +536,20 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		const targetUI = ui || lastUIContext;
 		if (!targetUI) return;
 
-		if (totalInvoked === 0) {
+		let runningCount = 0;
+		let settledCount = 0;
+		for (const s of sessions.values()) {
+			if (s.status === "running") runningCount++;
+			else if (["completed", "idle", "failed", "cancelled", "interrupted"].includes(s.status)) settledCount++;
+		}
+		const queuedCount = queue.length;
+		const totalSettled = Math.max(settledCount, totalCompleted);
+
+		if (runningCount === 0 && totalSettled === 0 && queuedCount === 0) {
 			targetUI.setStatus("devin_delegate", undefined);
 			return;
 		}
 
-		let runningCount = 0;
-		for (const s of sessions.values()) {
-			if (s.status === "running") runningCount++;
-		}
-		const queuedCount = queue.length;
 		// Short format: Devin <running>/<queued>/<completed>
 		targetUI.setStatus("devin_delegate", `Devin ${runningCount}/${queuedCount}/${totalCompleted}`);
 	}
