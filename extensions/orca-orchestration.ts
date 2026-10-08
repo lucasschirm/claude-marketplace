@@ -78,6 +78,83 @@ export function formatMessageText(val: any, fallback = ""): string {
 	}
 }
 
+export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
+	const [workerListRes, runListRes] = await Promise.all([
+		execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(
+			["orchestration", "worker-list"],
+			{ cwd },
+		),
+		execOrca<{ runs?: any[] }>(
+			["orchestration", "run-list"],
+			{ cwd },
+		),
+	]);
+
+	const workers: OrcaWorkerRow[] =
+		workerListRes.ok && workerListRes.result
+			? ((workerListRes.result as any).workers || workerListRes.result.rows || (Array.isArray(workerListRes.result) ? workerListRes.result : []))
+			: [];
+
+	const runs: any[] =
+		runListRes.ok && runListRes.result?.runs
+			? runListRes.result.runs
+			: Array.isArray(runListRes.result)
+			? runListRes.result
+			: [];
+
+	const lines: string[] = ["=== All Orchestration Runs & Workers Across Sessions ===\n"];
+
+	// 1. Live or active workers
+	const liveWorkers = workers.filter((w) => {
+		const isLive =
+			w.terminalState === "active" ||
+			w.workerState === "running" ||
+			w.workerState === "ready" ||
+			w.projection?.liveness?.verdict === "live";
+		return isLive && w.terminalState !== "released";
+	});
+
+	lines.push(`Active / Live Workers (${liveWorkers.length}):`);
+	if (liveWorkers.length > 0) {
+		for (const w of liveWorkers) {
+			const state = (w.workerState || w.projection?.stage?.worker || "active").toUpperCase();
+			const verdict = w.projection?.liveness?.verdict || "unknown";
+			const runInfo = w.runId ? ` (Run: ${w.runId})` : "";
+			const handleInfo = w.agentTerminalHandle ? ` [Terminal: ${w.agentTerminalHandle}]` : "";
+			lines.push(`  - [${state} | Liveness: ${verdict}] ${w.dispatchId}${runInfo}${handleInfo}`);
+			if (w.taskId) {
+				lines.push(`    Task ID: ${w.taskId}`);
+			}
+			if (w.projection?.stage?.activity) {
+				lines.push(`    Activity: ${w.projection.stage.activity}`);
+			}
+		}
+	} else {
+		lines.push("  No live workers currently active.");
+	}
+
+	lines.push("");
+
+	// 2. Recent Runs
+	const nonLegacyRuns = runs.filter((r: any) => r.id !== "run_legacy_local" && !r.legacy);
+	lines.push(`Recent Runs (${nonLegacyRuns.length}):`);
+	if (nonLegacyRuns.length > 0) {
+		for (const r of nonLegacyRuns.slice(0, 10)) {
+			const obj = r.objective ? ` - "${r.objective}"` : "";
+			const coord = r.coordinator_handle ? ` (Coord: ${r.coordinator_handle})` : "";
+			lines.push(`  - ${r.id || r.runId}${obj}${coord}`);
+		}
+	} else {
+		lines.push("  No Runs registered.");
+	}
+
+	lines.push("\nTo observe a specific Run or dispatch from another session, use:");
+	lines.push("  orca_orchestration_observe({ run_id: \"<run_id>\" })");
+	lines.push("  orca_orchestration_status({ dispatch_id: \"<dispatch_id>\" })");
+
+	return lines.join("\n");
+}
+
 export class OrcaDashboardComponent {
 	private theme: any;
 	private getStats: () => OrchestrationStats;
@@ -223,6 +300,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		let failed = 0;
 
 		for (const w of observedWorkers.values()) {
+			if (activeRunId && w.runId && w.runId !== activeRunId) {
+				continue;
+			}
 			if (w.status === "running") running++;
 			else if (w.status === "succeeded") succeeded++;
 			else if (w.status === "failed") failed++;
@@ -254,7 +334,12 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		let failedCount = 0;
 		let releasedCount = 0;
 
+		const workers: ObservedWorker[] = [];
 		for (const w of observedWorkers.values()) {
+			if (activeRunId && w.runId && w.runId !== activeRunId) {
+				continue;
+			}
+			workers.push(w);
 			if (w.status === "running") runningCount++;
 			else if (w.status === "succeeded") succeededCount++;
 			else if (w.status === "failed") failedCount++;
@@ -270,7 +355,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			succeededCount,
 			failedCount,
 			releasedCount,
-			workers: Array.from(observedWorkers.values()),
+			workers,
 		};
 	}
 
@@ -463,13 +548,20 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					const requiresAction = row.projection?.attention?.requiresAction;
 
 					if (!w) {
-						// Only track if active or belongs to current run
-						if (terminalState === "active" || (activeRunId && row.runId === activeRunId)) {
+						// Only track if belongs to current run, or if active and no run bound
+						const matchesRun = activeRunId ? row.runId === activeRunId : terminalState === "active";
+						if (matchesRun) {
+							const isLive =
+								terminalState === "active" ||
+								row.workerState === "running" ||
+								row.workerState === "ready" ||
+								verdict === "live";
+
 							w = {
 								dispatchId: dId,
 								taskId: row.taskId,
 								runId: row.runId,
-								status: terminalState === "active" ? "running" : outcome === "succeeded" ? "succeeded" : "failed",
+								status: isLive ? "running" : outcome === "succeeded" ? "succeeded" : "failed",
 								terminalHandle: row.agentTerminalHandle,
 								startedAt: Date.now(),
 							};
@@ -772,7 +864,12 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			),
 			run_id: Type.Optional(
 				Type.String({
-					description: "Optional Run ID to bind or observe",
+					description: "Optional Run ID to bind or observe (e.g. when started from another session)",
+				}),
+			),
+			all: Type.Optional(
+				Type.Boolean({
+					description: "If true, queries and displays all active workers and runs across all sessions without filtering by active Run",
 				}),
 			),
 		}),
@@ -782,9 +879,58 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			lastCwd = ctx.cwd || lastCwd;
 			const action = params.action?.toLowerCase() || "status";
 
+			if (params.all) {
+				const allText = await formatAllWorkersAndRuns(ctx.cwd || lastCwd);
+				return {
+					content: [{ type: "text", text: allText }],
+				};
+			}
+
 			if (params.run_id && params.run_id !== activeRunId) {
 				activeRunId = params.run_id;
+				try {
+					const runRes = await execOrca<any>(
+						["orchestration", "run-show", "--run", activeRunId],
+						{ cwd: ctx.cwd },
+					);
+					if (runRes.ok && runRes.result?.run?.objective) {
+						activeObjective = runRes.result.run.objective;
+					}
+				} catch {}
 				startCheckProcess();
+			}
+
+			if (params.dispatch_id && (action === "start" || action === "status")) {
+				const dId = params.dispatch_id;
+				if (!observedWorkers.has(dId)) {
+					const showRes = await execOrca<any>(
+						["orchestration", "worker-show", "--dispatch", dId],
+						{ cwd: ctx.cwd },
+					);
+					if (showRes.ok && showRes.result) {
+						const disp = showRes.result.dispatch || {};
+						const proj = showRes.result.projection || {};
+						const workerInfo = showRes.result.worker || {};
+						const rId = disp.runId || proj.runId || activeRunId;
+						const isLive =
+							proj.liveness?.verdict === "live" ||
+							workerInfo.state === "ready" ||
+							workerInfo.state === "running";
+						observedWorkers.set(dId, {
+							dispatchId: dId,
+							taskId: disp.taskId || proj.taskId,
+							runId: rId,
+							status: isLive ? "running" : proj.outcome === "succeeded" ? "succeeded" : "failed",
+							terminalHandle: disp.assigneeHandle || workerInfo.agentTerminalHandle,
+							startedAt: Date.now(),
+						});
+						if (rId && !activeRunId) {
+							activeRunId = rId;
+							startCheckProcess();
+						}
+						updateStatusUI(ctx.ui);
+					}
+				}
 			}
 
 			if (action === "stop") {
@@ -796,6 +942,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					};
 				}
 
+				observedWorkers.clear();
+				activeRunId = undefined;
+				activeObjective = undefined;
+
 				if (checkProcess) {
 					try {
 						checkProcess.kill("SIGTERM");
@@ -804,7 +954,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 				updateStatusUI(ctx.ui);
 				return {
-					content: [{ type: "text", text: `Orca orchestration automatic check process paused.` }],
+					content: [{ type: "text", text: `Orca orchestration automatic check process paused and observation stopped.` }],
 				};
 			}
 
@@ -829,7 +979,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 							`Workers: ${stats.runningCount} running, ${stats.succeededCount} succeeded, ${stats.failedCount} failed, ${stats.releasedCount} released\n\n` +
 							(workerLines.length > 0
 								? `Observed Workers:\n${workerLines.join("\n")}`
-								: `No workers currently tracked.`),
+								: `No workers currently tracked.` +
+								  `\n\nIf this run was started by another session you can manually start observing it by passing the parameters 'run_id' (e.g. orca_orchestration_observe({ run_id: "<run_id>" })), 'dispatch_id' (e.g. orca_orchestration_observe({ dispatch_id: "<dispatch_id>" })), or view all active workers/runs across sessions by passing 'all: true' (e.g. orca_orchestration_observe({ all: true })).`),
 					},
 				],
 			};
@@ -853,6 +1004,16 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					description: "Specific dispatch ID to inspect. If omitted, returns overview of all workers in the Run",
 				}),
 			),
+			run_id: Type.Optional(
+				Type.String({
+					description: "Optional Run ID to inspect or adopt (e.g. when started from another session)",
+				}),
+			),
+			all: Type.Optional(
+				Type.Boolean({
+					description: "If true, queries and displays all active workers and runs across all sessions without filtering by active Run",
+				}),
+			),
 			read_output: Type.Optional(
 				Type.Boolean({
 					description: "If true, reads recent output lines from the target worker (requires dispatch_id)",
@@ -868,6 +1029,27 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || lastCwd;
+
+			if (params.all) {
+				const allText = await formatAllWorkersAndRuns(ctx.cwd || lastCwd);
+				return {
+					content: [{ type: "text", text: allText }],
+				};
+			}
+
+			if (params.run_id && params.run_id !== activeRunId) {
+				activeRunId = params.run_id;
+				try {
+					const runRes = await execOrca<any>(
+						["orchestration", "run-show", "--run", activeRunId],
+						{ cwd: ctx.cwd },
+					);
+					if (runRes.ok && runRes.result?.run?.objective) {
+						activeObjective = runRes.result.run.objective;
+					}
+				} catch {}
+				startCheckProcess();
+			}
 
 			if (params.dispatch_id) {
 				const dId = params.dispatch_id;
@@ -942,6 +1124,30 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				const reportPath = localMeta?.reportPath ? `Report Path: ${localMeta.reportPath}\n` : "";
 				const errorNotice = !showRes.ok && showRes.error?.message ? `Notice: ${showRes.error.message}\n` : "";
 
+				// Track if previously unobserved
+				if (!observedWorkers.has(dId) && showRes.ok && showRes.result) {
+					const disp = showRes.result.dispatch || {};
+					const workerInfo = showRes.result.worker || {};
+					const rId = disp.runId || proj.runId || activeRunId;
+					const isLive =
+						proj.liveness?.verdict === "live" ||
+						workerInfo.state === "ready" ||
+						workerInfo.state === "running";
+					observedWorkers.set(dId, {
+						dispatchId: dId,
+						taskId: disp.taskId || proj.taskId,
+						runId: rId,
+						status: isLive ? "running" : outcome === "succeeded" ? "succeeded" : "failed",
+						terminalHandle: disp.assigneeHandle || workerInfo.agentTerminalHandle,
+						startedAt: Date.now(),
+					});
+					if (rId && !activeRunId) {
+						activeRunId = rId;
+						startCheckProcess();
+					}
+					updateStatusUI(ctx.ui);
+				}
+
 				return {
 					content: [
 						{
@@ -984,7 +1190,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						text:
 							`Active Run: ${stats.activeRunId || "None"} (Objective: "${objectiveStr}")\n` +
 							`Worker Counts: ${stats.runningCount} running, ${stats.succeededCount} succeeded, ${stats.failedCount} failed, ${stats.releasedCount} released\n\n` +
-							(list.length > 0 ? list.join("\n") : "No workers observed yet."),
+							(list.length > 0
+								? list.join("\n")
+								: `No workers observed yet.` +
+								  `\n\nIf this run was started by another session you can manually start observing it by passing the parameters 'run_id' (e.g. orca_orchestration_status({ run_id: "<run_id>" }) or orca_orchestration_observe({ run_id: "<run_id>" })), 'dispatch_id' (e.g. orca_orchestration_status({ dispatch_id: "<dispatch_id>" })), or view all active workers/runs across sessions by passing 'all: true' (e.g. orca_orchestration_status({ all: true })).`),
 					},
 				],
 			};
