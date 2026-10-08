@@ -75,7 +75,7 @@ if (args[0] === 'orchestration' && args[1] === 'worker-list') {
   console.log(JSON.stringify({
     ok: true,
     result: {
-      rows: [
+      workers: [
         {
           dispatchId: 'ctx-mock-1',
           taskId: 'task-mock-1',
@@ -88,6 +88,25 @@ if (args[0] === 'orchestration' && args[1] === 'worker-list') {
           }
         }
       ]
+    }
+  }));
+  process.exit(0);
+}
+
+// orchestration worker-read
+if (args[0] === 'orchestration' && args[1] === 'worker-read') {
+  console.log(JSON.stringify({
+    ok: true,
+    result: {
+      dispatchId: 'ctx-mock-1',
+      source: 'terminal',
+      terminal: {
+        tail: [
+          'Line 1: Worker initializing...',
+          'Line 2: Running test suite...',
+          'Line 3: All tests passed.'
+        ]
+      }
     }
   }));
   process.exit(0);
@@ -256,6 +275,8 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			// 6. Test orca_orchestration_status
 			console.log("Test 6: Testing orca_orchestration_status inspection...");
 			const statusTool = registeredTools.get("orca_orchestration_status")!;
+
+			// 6a. Single dispatch status
 			const statusRes = await statusTool.execute(
 				"call-stat-1",
 				{ dispatch_id: "ctx-mock-1" },
@@ -265,7 +286,31 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			);
 			assert.match(statusRes.content[0].text, /Dispatch ctx-mock-1 Status/);
 			assert.match(statusRes.content[0].text, /Outcome: succeeded/);
-			console.log("✓ orca_orchestration_status returned accurate worker details");
+			assert.ok(!statusRes.content[0].text.includes("[object Object]"), "Status must not contain [object Object]");
+
+			// 6b. Worker output reading
+			const outputRes = await statusTool.execute(
+				"call-stat-2",
+				{ dispatch_id: "ctx-mock-1", read_output: true },
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.match(outputRes.content[0].text, /Line 1: Worker initializing/);
+			assert.match(outputRes.content[0].text, /Line 3: All tests passed/);
+			assert.ok(!outputRes.content[0].text.includes("[object Object]"), "Output read must not contain [object Object]");
+
+			// 6c. Overview status
+			const overviewRes = await statusTool.execute(
+				"call-stat-3",
+				{},
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.match(overviewRes.content[0].text, /Active Run: run-mock-100/);
+			assert.ok(!overviewRes.content[0].text.includes("[object Object]"), "Overview must not contain [object Object]");
+			console.log("✓ orca_orchestration_status returned accurate, safely formatted output without [object Object]");
 
 			// 7. Test orca_orchestration_reply
 			console.log("Test 7: Testing orca_orchestration_reply...");
