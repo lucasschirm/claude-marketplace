@@ -14,51 +14,59 @@ export type ViewMode = "list" | "details";
  * Format property schema details for the tool parameters view
  */
 export function formatParamSchema(name: string, schema: any, isRequired: boolean, theme: Theme, width: number): string[] {
-	const lines: string[] = [];
-	const reqTag = isRequired ? theme.fg("error", " [required]") : theme.fg("dim", " [optional]");
-	const typeStr = schema?.type ? theme.fg("accent", String(schema.type)) : theme.fg("dim", "any");
+	try {
+		const lines: string[] = [];
+		const reqTag = isRequired ? theme.fg("error", " [required]") : theme.fg("dim", " [optional]");
+		const typeStr = schema?.type ? theme.fg("accent", String(schema.type)) : theme.fg("dim", "any");
 
-	let header = `  • ${theme.bold(name)}: ${typeStr}${reqTag}`;
-	if (schema?.default !== undefined) {
-		header += theme.fg("muted", ` (default: ${JSON.stringify(schema.default)})`);
-	}
-	lines.push(truncateToWidth(header, width));
-
-	if (schema?.description) {
-		const descLines = wrapTextWithAnsi(schema.description, Math.max(10, width - 8));
-		for (const d of descLines) {
-			lines.push(`      ${theme.fg("muted", d)}`);
+		let header = `  • ${theme.bold(name)}: ${typeStr}${reqTag}`;
+		if (schema?.default !== undefined) {
+			header += theme.fg("muted", ` (default: ${JSON.stringify(schema.default)})`);
 		}
-	}
+		lines.push(truncateToWidth(header, width));
 
-	if (Array.isArray(schema?.enum) && schema.enum.length > 0) {
-		lines.push(truncateToWidth(`      ${theme.fg("dim", `Allowed values: [${schema.enum.map((v: any) => JSON.stringify(v)).join(", ")}]`)}`, width));
-	}
+		if (schema?.description) {
+			const descLines = wrapTextWithAnsi(String(schema.description), Math.max(10, width - 8));
+			for (const d of descLines) {
+				lines.push(`      ${theme.fg("muted", d)}`);
+			}
+		}
 
-	// Nested object properties
-	if (schema?.type === "object" && schema?.properties) {
-		const nestedRequired = new Set(Array.isArray(schema.required) ? schema.required : []);
-		for (const [nestedKey, nestedProp] of Object.entries(schema.properties)) {
-			const nestedIsReq = nestedRequired.has(nestedKey);
-			const nestedType = (nestedProp as any)?.type ? theme.fg("accent", String((nestedProp as any).type)) : theme.fg("dim", "any");
-			const nestedReqTag = nestedIsReq ? theme.fg("error", " [req]") : theme.fg("dim", " [opt]");
-			lines.push(truncateToWidth(`      - ${nestedKey}: ${nestedType}${nestedReqTag}`, width));
-			if ((nestedProp as any)?.description) {
-				const nestedDesc = wrapTextWithAnsi((nestedProp as any).description, Math.max(10, width - 12));
-				for (const nd of nestedDesc) {
-					lines.push(`          ${theme.fg("muted", nd)}`);
+		if (Array.isArray(schema?.enum) && schema.enum.length > 0) {
+			lines.push(truncateToWidth(`      ${theme.fg("dim", `Allowed values: [${schema.enum.map((v: any) => JSON.stringify(v)).join(", ")}]`)}`, width));
+		}
+
+		// Nested object properties
+		if (schema?.type === "object" && schema?.properties && typeof schema.properties === "object") {
+			const nestedRequired = new Set(Array.isArray(schema.required) ? schema.required : []);
+			for (const [nestedKey, nestedProp] of Object.entries(schema.properties)) {
+				const nestedIsReq = nestedRequired.has(nestedKey);
+				const nestedType = (nestedProp as any)?.type ? theme.fg("accent", String((nestedProp as any).type)) : theme.fg("dim", "any");
+				const nestedReqTag = nestedIsReq ? theme.fg("error", " [req]") : theme.fg("dim", " [opt]");
+				lines.push(truncateToWidth(`      - ${nestedKey}: ${nestedType}${nestedReqTag}`, width));
+				if ((nestedProp as any)?.description) {
+					const nestedDesc = wrapTextWithAnsi(String((nestedProp as any).description), Math.max(10, width - 12));
+					for (const nd of nestedDesc) {
+						lines.push(`          ${theme.fg("muted", nd)}`);
+					}
 				}
 			}
 		}
-	}
 
-	// Array items
-	if (schema?.type === "array" && schema?.items) {
-		const itemType = schema.items.type ? String(schema.items.type) : "item";
-		lines.push(truncateToWidth(`      ${theme.fg("dim", `Items type: ${itemType}`)}`, width));
-	}
+		// Array items
+		if (schema?.type === "array" && schema?.items) {
+			const itemType = schema.items.type ? String(schema.items.type) : "item";
+			lines.push(truncateToWidth(`      ${theme.fg("dim", `Items type: ${itemType}`)}`, width));
+		}
 
-	return lines;
+		return lines;
+	} catch (err) {
+		console.error(`[tools] Error formatting schema for parameter "${name}":`, err);
+		return [
+			truncateToWidth(`  • ${theme.bold(name)}: ${theme.fg("dim", "unknown")}`, width),
+			truncateToWidth(`      ${theme.fg("dim", "(schema could not be parsed)")}`, width),
+		];
+	}
 }
 
 /**
@@ -76,6 +84,7 @@ export class ToolsManagerComponent {
 	private detailsScrollOffset: number = 0;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private renderError?: Error;
 
 	constructor(
 		allTools: ToolInfo[],
@@ -91,6 +100,16 @@ export class ToolsManagerComponent {
 		this.onClose = onClose;
 	}
 
+	setError(err: unknown): void {
+		this.renderError = err instanceof Error ? err : new Error(String(err));
+		this.invalidate();
+	}
+
+	clearError(): void {
+		this.renderError = undefined;
+		this.invalidate();
+	}
+
 	getViewMode(): ViewMode {
 		return this.viewMode;
 	}
@@ -104,19 +123,33 @@ export class ToolsManagerComponent {
 	}
 
 	handleInput(data: string): void {
-		if (this.viewMode === "list") {
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
-				this.onClose();
-				return;
-			}
-
-			if (matchesKey(data, "up") || data === "k") {
-				if (this.selectedIndex > 0) {
-					this.selectedIndex--;
-					this.invalidate();
+		try {
+			if (this.renderError) {
+				if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+					this.onClose();
+					return;
+				}
+				if (matchesKey(data, "left") || data === "r" || data === "R" || data === " ") {
+					this.clearError();
+					this.viewMode = "list";
+					return;
 				}
 				return;
 			}
+
+			if (this.viewMode === "list") {
+				if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data === "q" || data === "Q") {
+					this.onClose();
+					return;
+				}
+
+				if (matchesKey(data, "up") || data === "k") {
+					if (this.selectedIndex > 0) {
+						this.selectedIndex--;
+						this.invalidate();
+					}
+					return;
+				}
 
 			if (matchesKey(data, "down") || data === "j") {
 				if (this.selectedIndex < this.allTools.length - 1) {
@@ -213,16 +246,37 @@ export class ToolsManagerComponent {
 				return;
 			}
 		}
+	} catch (err) {
+		console.error("[tools] Error processing input in ToolsManagerComponent:", err);
+		this.setError(err);
 	}
+}
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
 
-		const lines: string[] = [];
 		const th = this.theme;
 		const safeWidth = Math.max(20, width);
+
+		if (this.renderError) {
+			const errLines: string[] = [];
+			errLines.push("");
+			const title = th.fg("error", " Tool Manager Error ");
+			const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Error "))));
+			errLines.push(truncateToWidth(headerLine, safeWidth));
+			errLines.push("");
+			errLines.push(truncateToWidth(`  ${th.fg("error", "An error occurred while displaying tool details:")}`, safeWidth));
+			errLines.push(truncateToWidth(`  ${th.fg("dim", this.renderError.message || String(this.renderError))}`, safeWidth));
+			errLines.push("");
+			errLines.push(truncateToWidth(`  ${th.fg("dim", "Press 'r' or Left Arrow to return to tools list, or Esc to close.")}`, safeWidth));
+			errLines.push("");
+			return errLines;
+		}
+
+		try {
+			const lines: string[] = [];
 
 		if (this.viewMode === "list") {
 			// List header
@@ -377,6 +431,21 @@ export class ToolsManagerComponent {
 		this.cachedWidth = width;
 		this.cachedLines = lines;
 		return lines;
+		} catch (err) {
+			console.error("[tools] Unhandled error during render:", err);
+			const errLines: string[] = [];
+			errLines.push("");
+			const title = th.fg("error", " Tool Manager Render Error ");
+			const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Render Error "))));
+			errLines.push(truncateToWidth(headerLine, safeWidth));
+			errLines.push("");
+			errLines.push(truncateToWidth(`  ${th.fg("error", "Failed to render tool details or list:")}`, safeWidth));
+			errLines.push(truncateToWidth(`  ${th.fg("dim", err instanceof Error ? err.message : String(err))}`, safeWidth));
+			errLines.push("");
+			errLines.push(truncateToWidth(`  ${th.fg("dim", "Press 'r' or Left Arrow to return to tools list, or Esc to close.")}`, safeWidth));
+			errLines.push("");
+			return errLines;
+		}
 	}
 
 	invalidate(): void {
@@ -458,34 +527,67 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			allTools = pi.getAllTools();
 			enabledTools = new Set(pi.getActiveTools());
 
-			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-				const component = new ToolsManagerComponent(
-					allTools,
-					enabledTools,
-					theme,
-					(_name, _isEnabled) => {
-						applyTools();
-						persistState();
-						tui.requestRender();
-					},
-					() => {
-						done();
-					}
-				);
+			try {
+				await ctx.ui.custom<void>((tui, theme, _kb, done) => {
+					const component = new ToolsManagerComponent(
+						allTools,
+						enabledTools,
+						theme,
+						(_name, _isEnabled) => {
+							try {
+								applyTools();
+								persistState();
+								tui.requestRender();
+							} catch (toggleErr) {
+								console.error("[tools] Error updating tool state:", toggleErr);
+								component.setError(toggleErr);
+								tui.requestRender();
+							}
+						},
+						() => {
+							done();
+						}
+					);
 
-				return {
-					render(width: number) {
-						return component.render(width);
-					},
-					invalidate() {
-						component.invalidate();
-					},
-					handleInput(data: string) {
-						component.handleInput(data);
-						tui.requestRender();
-					},
-				};
-			});
+					return {
+						render(width: number) {
+							try {
+								return component.render(width);
+							} catch (renderErr) {
+								console.error("[tools] Critical render error:", renderErr);
+								return [
+									"",
+									theme.fg("error", "  Failed to display tools manager."),
+									theme.fg("dim", "  Press Esc to close."),
+									"",
+								];
+							}
+						},
+						invalidate() {
+							try {
+								component.invalidate();
+							} catch {
+								// Safe fallback
+							}
+						},
+						handleInput(data: string) {
+							try {
+								component.handleInput(data);
+								tui.requestRender();
+							} catch (inputErr) {
+								console.error("[tools] Critical input error:", inputErr);
+								tui.requestRender();
+							}
+						},
+					};
+				});
+			} catch (cmdErr) {
+				console.error("[tools] Error running /tools command:", cmdErr);
+				ctx.ui.notify(
+					`Tool Manager encountered an error: ${cmdErr instanceof Error ? cmdErr.message : String(cmdErr)}`,
+					"error"
+				);
+			}
 		},
 	});
 

@@ -217,6 +217,27 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 		const restoredActive = pi.getActiveTools();
 		assert(restoredActive.includes("read") && restoredActive.includes("bash"), "read and bash restored from branch entry");
 
+		// 5. Test error boundary behavior and fallback UI
+		console.log("Test 5: Testing UI error boundary and human-readable fallback UI...");
+		const errorComp = new ToolsManagerComponent(
+			sampleTools,
+			new Set(["read"]),
+			mockTheme,
+			() => {},
+			() => {}
+		);
+		// Simulate a caught error
+		errorComp.setError(new Error("Simulated schema rendering error"));
+		const errorLines = errorComp.render(80);
+		assert(errorLines.some(l => l.includes("Tool Manager Error")), "Error fallback header is rendered");
+		assert(errorLines.some(l => l.includes("Simulated schema rendering error")), "Error details are clearly displayed to the user");
+		assert(errorLines.some(l => l.includes("Press 'r' or Left Arrow")), "Recovery instructions are displayed");
+
+		// Test clearing error / recovery with 'r' key
+		errorComp.handleInput("r");
+		const recoveredLines = errorComp.render(80);
+		assert(recoveredLines.some(l => l.includes("Tools & Extensions Configuration")), "Component cleanly recovers back to tools list");
+
 		console.log("✓ ALL TESTS PASSED!");
 		process.exit(0);
 	});
