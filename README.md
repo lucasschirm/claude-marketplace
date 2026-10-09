@@ -77,6 +77,37 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
     pi --pr-observer-interval 30
     ```
 
+### PR Conversation Tasks (`pr-tasks`)
+
+A [Pi Extension](https://pi.dev/docs/latest/extensions) that integrates with `observe_pr` to keep track of PR review conversations (comments associated to a file and code line) as actionable tasks for the agent. Prevents PRs from being closed or abandoned with unresolved conversations.
+
+#### Features
+
+- **Agent Tools**:
+  - **`pr_tasks_list`**:
+    - Lists all open conversation tasks. Supports optional `pr_number` and optional `show_all` (to include resolved tasks).
+    - Formats output using the strict **Task Summary template**.
+  - **`pr_task_detail`**:
+    - Retrieves full conversation details including file location, author, timestamp, status, full replies, and code suggestions.
+    - Formats output using the strict **Task Detail template**.
+  - **`pr_task_resolve`**:
+    - Resolves a conversation by posting a resolution reply to GitHub and closing the thread via GraphQL mutation (`resolveReviewThread`).
+    - Optional `accept_suggestion: true` accepts and applies the reviewer's code suggestion directly to the file on disk. Returns a clear error if invoked on a conversation without a code suggestion.
+  - **`pr_task_blocked`**:
+    - Marks a conversation as `BLOCKED` when human clarification or intervention is required. Posts the explanation as a reply to the thread.
+    - When a user replies to that blocked conversation, the task automatically unblocks back to `UNRESOLVED` and notifies the agent.
+- **Agent Loop Enforcement**:
+  - Whenever the agent attempts to stop or settle while open (`UNRESOLVED`) conversation tasks remain, the extension intercepts settlement (`agent_before_settle`) and sends a nudge:
+    `You still have <number> of open tasks. You can resolve them using the pr_task_resolve tool or if you don't have all required information to solve the conversation you can use the pr_task_blocked to mark the conversation as blocked.`
+  - The turn continues until all tasks are either resolved or marked as blocked.
+- **TUI & User Controls**:
+  - **Status bar**: Displays live task counts in the footer: `PR Tasks: <open> open / <blocked> blocked / <resolved> resolved`.
+  - **Slash command `/tasks`**:
+    - `/tasks list` (or `/tasks list all`): Displays tasks in terminal or opens interactive dashboard modal.
+    - `/tasks detail <task-id>`: Displays full conversation details.
+    - `/tasks resolve <task-id> "<reason>"`: Resolves conversation directly from CLI.
+    - `/tasks reply <task-id> "<message>"`: Adds a comment to the thread without resolving it.
+
 ### Devin Delegate (`devin_delegate`)
 
 A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding agent to delegate tasks asynchronously to Devin via Devin's native Agent Client Protocol (ACP) server. Supports concurrency throttling, FIFO queueing, worktree isolation, multi-turn follow-ups, disk-backed logging, and arrow-key TUI navigation.
