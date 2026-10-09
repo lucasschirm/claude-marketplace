@@ -63,8 +63,11 @@ exit 0
 		realPiSessionId = ctx.sessionManager?.getSessionId?.() || "unknown";
 		if (fixturePlanted) return;
 		fixturePlanted = true;
-		// Live process to be treated as an orphan by recovery
-		const sleeper = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+		// Live process to be treated as an orphan by recovery. argv[0] is labelled
+		// "devin-fake" (via bash's exec -a; dash lacks it) so the kill-path's
+		// cmdline identity check accepts it — a bare `sleep 300` would be refused
+		// as a non-devin process (and a dead pid that gets reused must stay refused).
+		const sleeper = spawn("bash", ["-c", "exec -a devin-fake sleep 300"], { detached: true, stdio: "ignore" });
 		sleeper.unref();
 		fixtureLivePid = sleeper.pid || 0;
 
@@ -227,12 +230,29 @@ exit 0
 			assert.strictEqual(t4rStatus, "idle", `T4b restarted session must be idle (was ${t4rStatus})`);
 			console.log("✓ T4b: restart after interruption completes a fresh turn");
 
+			// ---------- T4c (clean exit code 0 mid-turn -> idle, NOT overwritten to failed) ----------
+			console.log("T4c: process exits cleanly (code 0) mid-turn...");
+			process.env.FAKE_DELAY_MS = "30000";
+			process.env.FAKE_EXIT_EARLY_MS = "4000";
+			process.env.FAKE_EXIT_CODE = "0";
+			const t4c = await delegateTool.execute("t4c", { prompt: "task that exits cleanly", model: "swe-2-high", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
+			const t4cId = t4c.content[0].text.replace("Your session started with id: ", "").trim();
+			created.push(t4cId);
+			const t4cStatus = await waitForStatus(statusTool, mockCtx, t4cId, "idle", 30_000);
+			assert.strictEqual(t4cStatus, "idle", `T4c clean exit must be idle, not failed (was ${t4cStatus})`);
+			const t4cMeta = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4cId, "meta.json"), "utf-8"));
+			assert.notStrictEqual(t4cMeta.status, "failed", "T4c: clean exit must not be marked failed by the prompt catch path");
+			process.env.FAKE_EXIT_CODE = "42";
+			console.log("✓ T4c: clean exit code 0 mid-turn -> idle (no false failed)");
+
 			// ---------- T5 (out-of-vocab model: no set_config_option, no failure) ----------
 			console.log("T5: delegating with out-of-vocab model swe-2-max...");
 			try {
 				fs.rmSync(path.join(markerDir, "set_config_option_model"), { force: true });
 			} catch {}
 			process.env.FAKE_DELAY_MS = "5000";
+			process.env.FAKE_EXIT_EARLY_MS = "0";
+			process.env.FAKE_EXIT_CODE = "42";
 			const t5 = await delegateTool.execute("t5", { prompt: "task with swe-2-max", model: "swe-2-max", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
 			const t5Id = t5.content[0].text.replace("Your session started with id: ", "").trim();
 			created.push(t5Id);

@@ -11,6 +11,7 @@
 //  - streams session/update events (agent_message_chunk, tool_call, usage_update)
 //  - answers session/prompt only after the delay (long turns are normal)
 //  - set_config_option(model) with a value outside the advertised vocab fails
+//    and ANY set_config_option(model) call is recorded to a marker file
 //    with -32602 (like the real server does for e.g. swe-2-max)
 import readline from "node:readline";
 import * as fs from "node:fs";
@@ -73,9 +74,13 @@ rl.on("line", (line) => {
 	} else if (m === "session/set_mode") {
 		send({ jsonrpc: "2.0", id: msg.id, result: {} });
 	} else if (m === "session/set_config_option") {
-		// Mimic real devin acp: model values outside the advertised vocab fail.
-		if (msg.params?.configId === "model" && !MODEL_VOCAB.includes(msg.params.value)) {
+		// Record ANY set_config_option call (T5 asserts the extension never calls it
+		// for the model) and mimic real devin acp: model values outside the
+		// advertised vocab fail with -32602.
+		if (msg.params?.configId === "model") {
 			marker("set_config_option_model");
+		}
+		if (msg.params?.configId === "model" && !MODEL_VOCAB.includes(msg.params.value)) {
 			send({
 				jsonrpc: "2.0",
 				id: msg.id,

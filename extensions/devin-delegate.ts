@@ -130,6 +130,12 @@ class AcpClient {
 			}
 		});
 
+		// Swallow async stream errors on stdin (EPIPE when writing to a dying process);
+		// an unhandled 'error' event would crash the host pi process.
+		if (this.child.stdin) {
+			this.child.stdin.on("error", () => {});
+		}
+
 		const rl = readline.createInterface({
 			input: this.child.stdout!,
 			crlfDelay: Infinity,
@@ -198,7 +204,15 @@ class AcpClient {
 			}
 
 			this.pendingRequests.set(id, { resolve, reject, timer });
-			this.child.stdin.write(JSON.stringify(req) + "\n");
+			try {
+				this.child.stdin.write(JSON.stringify(req) + "\n");
+			} catch (err) {
+				// Synchronous write failure (e.g. destroyed stdin): don't leave a zombie
+				// pending entry — reject immediately.
+				this.pendingRequests.delete(id);
+				if (timer) clearTimeout(timer);
+				reject(err instanceof Error ? err : new Error(String(err)));
+			}
 		});
 	}
 
@@ -215,7 +229,7 @@ class AcpClient {
 	private handleMessage(msg: AcpMessage): void {
 		if (msg.id !== undefined && this.pendingRequests.has(msg.id)) {
 			const { resolve, reject, timer } = this.pendingRequests.get(msg.id)!;
-			clearTimeout(timer);
+			if (timer) clearTimeout(timer);
 			this.pendingRequests.delete(msg.id);
 			if (msg.error) {
 				reject(new Error(msg.error.message || `RPC error ${msg.error.code}`));
@@ -461,6 +475,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	const assistantBuffers = new Map<string, string>();
 	// Advertised ACP config-option vocabularies, captured from config_option_update
 	const sessionConfigOptions = new Map<string, Map<string, string[]>>();
+	// Where each session's files were last written (mirrors state.json's sessionDirs),
+	// so recovered sessions' event files can be found in their original directory.
+	const sessionDirs = new Map<string, string>();
 
 	function isCommandAvailable(cmd: string): boolean {
 		if (binaryAvailableCache.has(cmd)) {
@@ -506,7 +523,24 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// Kill a detached devin process group directly (used when no live AcpClient exists,
 	// e.g. after a pi restart left an orphaned `devin acp` behind).
+	// PID-recycle guard: before killing a *recorded* (possibly long-dead) pid, verify
+	// on Linux that it is still a devin process. Returns null when unverifiable
+	// (non-Linux, unreadable cmdline) — in that case the kill proceeds as before.
+	function looksLikeDevinProcess(pid: number): boolean | null {
+		if (process.platform !== "linux") return null;
+		try {
+			const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+			return cmdline.includes("devin");
+		} catch {
+			return null;
+		}
+	}
+
 	function killProcessGroup(pid: number): void {
+		if (looksLikeDevinProcess(pid) === false) {
+			console.warn(`[devin-delegate] refusing to kill pid ${pid}: not a devin process (possible pid reuse)`);
+			return;
+		}
 		try {
 			if (process.platform !== "win32") {
 				try {
@@ -762,6 +796,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				sessionIds: Array.from(sessions.keys()),
 				sessionDirs: Object.fromEntries(Array.from(sessions.keys()).map((id) => [id, currentPiSessionId])),
 			};
+			for (const id of sessions.keys()) sessionDirs.set(id, currentPiSessionId);
 			const tempFile = path.join(dir, `state.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
 			fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), "utf-8");
 			fs.renameSync(tempFile, getStatePath(currentPiSessionId));
@@ -839,7 +874,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// Read last N messages on demand from disk with fixed-size tail buffer (O(1) RAM)
 	function readLastMessagesFromDisk(meta: SessionMeta, count = 3): string[] {
-		const filePath = getEventsLogPath(currentPiSessionId, meta.sessionId);
+		// Recovered sessions may keep their events file in the old (pre-restart)
+		// directory — the state record carries the mapping.
+		let filePath = getEventsLogPath(currentPiSessionId, meta.sessionId);
+		const recordedDir = sessionDirs.get(meta.sessionId);
+		if (!fs.existsSync(filePath) && recordedDir && recordedDir !== currentPiSessionId) {
+			const oldPath = path.join(getStorageDir(recordedDir), meta.sessionId, "events.jsonl");
+			if (fs.existsSync(oldPath)) filePath = oldPath;
+		}
 		if (!fs.existsSync(filePath)) {
 			return [`(Session initialized: "${meta.prompt.slice(0, 100)}")`];
 		}
@@ -851,8 +893,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const bufferSize = Math.min(stat.size, 65536);
 			const buffer = Buffer.alloc(bufferSize);
 			const fd = fs.openSync(filePath, "r");
-			fs.readSync(fd, buffer, 0, bufferSize, Math.max(0, stat.size - bufferSize));
-			fs.closeSync(fd);
+			try {
+				fs.readSync(fd, buffer, 0, bufferSize, Math.max(0, stat.size - bufferSize));
+			} finally {
+				fs.closeSync(fd);
+			}
 
 			const chunk = buffer.toString("utf-8");
 			const lines = chunk.split("\n").filter((l) => l.trim().length > 0);
@@ -1021,9 +1066,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		client.setOnUpdate((update) => {
 			meta.lastMessageTime = Date.now();
-			// Activity resumed: a stalled turn with new updates goes back to running.
+			// Activity resumed: a stalled turn with new updates goes back to running,
+			// and its watchdog (stopped when it marked stalled) must restart.
 			if (meta.status === "stalled") {
 				meta.status = "running";
+				startStallWatchdog(meta);
 			}
 			const u = update.update;
 			if (u) {
@@ -1066,6 +1113,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		client.setOnExit((code) => {
 			const turnInFlight = meta.status === "running" || meta.status === "stalled";
 			stopStallWatchdog(meta.sessionId);
+			// Always drop the client — even when the process dies between turns, a stale
+			// entry would let devin_message write to a destroyed stdin.
+			activeClients.delete(meta.sessionId);
 			if (turnInFlight) {
 				flushAssistantBuffer(meta);
 				// A mid-turn process exit is an interruption, not a failure: the devin
@@ -1079,7 +1129,6 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					);
 				}
 				persistSessionMeta(meta, true);
-				activeClients.delete(meta.sessionId);
 				totalCompleted++;
 				persistState();
 				updateStatusUI();
@@ -1093,6 +1142,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	async function startSession(task: QueuedTask): Promise<SessionMeta> {
 		const targetCwd = task.worktreePath || baseDir;
 		const client = new AcpClient(targetCwd, task.model);
+		try {
 		await client.start();
 
 		// Create session in ACP
@@ -1193,8 +1243,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				drainQueue();
 			})
 			.catch((err) => {
-				// Do not override cancelled/interrupted (set by onExit or devin_cancel).
-				if (meta.status !== "cancelled" && meta.status !== "interrupted") {
+				// Only override a turn that is still in flight: onExit (idle/interrupted)
+				// and devin_cancel (cancelled) already set the terminal state.
+				if (meta.status === "running" || meta.status === "stalled") {
 					stopStallWatchdog(meta.sessionId);
 					flushAssistantBuffer(meta);
 					meta.status = "failed";
@@ -1212,37 +1263,55 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			});
 
 		return meta;
+		} catch (err) {
+			// Spawn/handshake/session-new failed: kill the spawned child so it is not
+			// an untracked orphan, then surface the error.
+			client.dispose();
+			throw err;
+		}
 	}
 
+	let isDraining = false;
 	async function drainQueue(): Promise<void> {
-		let runningCount = countInFlight();
+		if (isDraining) {
+			// A drain is in progress; its post-loop recheck picks up new capacity.
+			return;
+		}
+		isDraining = true;
+		try {
+			while (countInFlight() < maxRuns && queue.length > 0) {
+				const task = queue.shift()!;
+				persistState();
+				updateStatusUI();
 
-		while (runningCount < maxRuns && queue.length > 0) {
-			const task = queue.shift()!;
-			runningCount++;
-			persistState();
-			updateStatusUI();
-
-			// Prepare worktree if needed
-			if (task.createWorktree && !task.worktreePath) {
-				try {
-					const wt = await createWorktree(baseDir);
-					task.worktreePath = wt.worktreePath;
-					task.worktreeBranch = wt.worktreeBranch;
-				} catch (err: any) {
-					console.error(`[devin-delegate] Failed to create worktree for queued task ${task.queueId}:`, err);
+				// Prepare worktree if needed
+				if (task.createWorktree && !task.worktreePath) {
+					try {
+						const wt = await createWorktree(baseDir);
+						task.worktreePath = wt.worktreePath;
+						task.worktreeBranch = wt.worktreeBranch;
+					} catch (err: any) {
+						console.error(`[devin-delegate] Failed to create worktree for queued task ${task.queueId}:`, err);
+					}
 				}
-			}
 
-			startSession(task)
-				.then((meta) => {
-					// Notify agent as soon as queued session starts
-					sendAgentMessage(`Your session started with id: ${meta.sessionId}`);
-				})
-				.catch((err) => {
-					console.error(`[devin-delegate] Failed to start dequeued session:`, err);
-					drainQueue();
-				});
+				startSession(task)
+					.then((meta) => {
+						// Notify agent as soon as queued session starts
+						sendAgentMessage(`Your session started with id: ${meta.sessionId}`);
+					})
+					.catch((err) => {
+						console.error(`[devin-delegate] Failed to start dequeued session:`, err);
+						// Slot freed: the post-loop recheck below starts the next task.
+					});
+			}
+		} finally {
+			isDraining = false;
+		}
+		// Recheck: turns may have completed (or a session failed to start) while we were
+		// draining, and drain calls made during the drain were skipped by the guard.
+		if (queue.length > 0 && countInFlight() < maxRuns) {
+			drainQueue();
 		}
 	}
 
@@ -1282,6 +1351,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 			totalInvoked = state.totalInvoked || 0;
 			totalCompleted = state.totalCompleted || 0;
+			for (const [id, dir] of Object.entries(state.sessionDirs ?? {})) {
+				sessionDirs.set(id, dir);
+			}
 
 			// Restore session records from disk (current dir first, then the dir the
 			// session was persisted to — self-describing sessionDirs).
@@ -1309,6 +1381,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 							// so the process is dead weight — terminate it.
 							killProcessGroup(meta.pid);
 							meta.status = "interrupted";
+							meta.finishedAt = Date.now();
 							meta.error = "pi session restarted; the devin process was still running (orphaned) and was terminated. Restart with devin_restart.";
 							persistSessionMeta(meta, true);
 						} else {
@@ -1326,6 +1399,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 										);
 									} else {
 										meta.status = "interrupted";
+										meta.finishedAt = Date.now();
 										meta.error = "Process interrupted unexpectedly (pi session restart)";
 									}
 									persistSessionMeta(meta, true);
@@ -1683,12 +1757,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				};
 			}
 
-			if (meta.status === "running") {
+			if (meta.status === "running" || meta.status === "stalled") {
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Session '${params.session_id}' is currently running. Please wait for the current turn to complete.`,
+							text: `Session '${params.session_id}' is currently ${meta.status}. Please wait for the current turn to complete (or devin_cancel it first).`,
 						},
 					],
 				};
@@ -1706,11 +1780,15 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					activeClients.set(params.session_id, client);
 					wireClientEvents(client, meta);
 				} catch (err: any) {
+					// A failed handshake must not leave the spawned child behind.
+					client.dispose();
 					return {
 						content: [{ type: "text", text: `Failed to re-attach to session: ${err.message}` }],
 						isError: true,
 					};
 				}
+				// Track the new process so recovery/devin_restart can see it.
+				meta.pid = client.pid;
 			}
 
 			meta.status = "running";
@@ -1754,8 +1832,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					drainQueue();
 				})
 				.catch((err) => {
-					// Do not override cancelled/interrupted (set by onExit or devin_cancel).
-					if (meta.status !== "cancelled" && meta.status !== "interrupted") {
+					// Only override a turn that is still in flight: onExit (idle/interrupted)
+					// and devin_cancel (cancelled) already set the terminal state.
+					if (meta.status === "running" || meta.status === "stalled") {
 						stopStallWatchdog(meta.sessionId);
 						flushAssistantBuffer(meta);
 						meta.status = "failed";
@@ -1998,34 +2077,16 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					ctx.ui.notify("Please specify a session ID to cancel: /devin cancel <session-id>", "warning");
 					return;
 				}
-				const meta = sessions.get(targetId);
-				const qIdx = queue.findIndex((q) => q.queueId === targetId);
-
-				if (qIdx !== -1) {
-					queue.splice(qIdx, 1);
-					persistState();
-					updateStatusUI(ctx.ui);
-					ctx.ui.notify(`Cancelled queued session ${targetId}.`, "info");
-					return;
+				// Share the tool's cancel path (watchdog stop, buffer flush, orphan-pid kill).
+				const kind = cancelSessionById(targetId);
+				if (kind) {
+					ctx.ui.notify(
+						kind === "queued" ? `Cancelled queued session ${targetId}.` : `Cancelled session ${targetId}.`,
+						"info",
+					);
+				} else {
+					ctx.ui.notify(`Session '${targetId}' not found.`, "warning");
 				}
-
-				if (meta) {
-					meta.status = "cancelled";
-					const client = activeClients.get(targetId);
-					if (client) {
-						client.notify("session/cancel", { sessionId: targetId });
-						client.dispose();
-						activeClients.delete(targetId);
-					}
-					persistSessionMeta(meta, true);
-					persistState();
-					updateStatusUI(ctx.ui);
-					ctx.ui.notify(`Cancelled session ${targetId}.`, "info");
-					drainQueue();
-					return;
-				}
-
-				ctx.ui.notify(`Session '${targetId}' not found.`, "warning");
 				return;
 			}
 

@@ -157,6 +157,51 @@ Deviations from the plan (deliberate):
 
 Remaining open questions (unchanged, lower priority): ACP `session/cancel` semantics; whether ACP supports `session/load`/re-attach for `devin_message` (re-attach still spawns a fresh `devin acp`); default stall threshold tuning (30 min vs. longest observed real turn ~15 min).
 
+### 4.1 Independent review (Devin `swe-2-high`, read-only) — 2026-10-09
+
+A read-only review of the diff (session `mixolydian-salsa`; the final report was
+recovered from the Devin session DB — the review session itself hit the old 60s
+timeout because this pi session had the pre-fix extension loaded, which is
+exactly issue #16; the DB recovery path worked as designed). Verdict:
+**MERGE WITH FIXES.** Six major findings, all fixed in the follow-up commit:
+
+1. **Exit code 0 mid-turn could be overridden to `failed`** — the prompt `.catch`
+   only exempted `cancelled`/`interrupted`, so the `idle` set by `onExit` was
+   clobbered. Fix: the catch now overrides only `running`/`stalled` (same fix in
+   `devin_message`). Regression test added: **T4c** (clean exit 0 mid-turn → `idle`).
+2. **Dead client left in `activeClients` when the process dies between turns** →
+   `devin_message` would write to destroyed stdin. Fix: `onExit` always deletes
+   the client entry.
+3. **`devin_message` re-attach never updated `meta.pid`** → the new process was
+   invisible to recovery and the double-spawn guard. Fix: `meta.pid = client.pid`
+   after `client.start()`; a failed re-attach handshake now disposes the child.
+4. **Unguarded kill of recorded pids** → pid reuse could SIGKILL an innocent
+   process. Fix: `looksLikeDevinProcess()` reads `/proc/<pid>/cmdline` on Linux
+   and `killProcessGroup` refuses non-devin pids (verified live: the T6 fixture's
+   dying dash process was correctly refused).
+5. **`startSession` failure left the spawned child untracked** → orphan. Fix:
+   try/catch around the spawn→handshake body disposes the client on failure.
+6. **`/devin cancel` diverged from `devin_cancel`** (no orphan-pid kill, no
+   buffer flush, no watchdog stop). Fix: both now share `cancelSessionById`.
+
+Also fixed (minor/nit): stall-watchdog restart on `stalled → running` resume;
+`devin_message` now blocks `stalled` sessions; `drainQueue()` re-entrancy guard
+with a post-loop recheck; synchronous stdin write failures reject the pending
+request instead of leaking a zombie map entry; `child.stdin` error handler
+prevents `uncaughtException` on EPIPE; `readLastMessagesFromDisk` fd leak
+(try/finally) plus recovery of event files that live in the pre-restart
+directory (module-level `sessionDirs`); `finishedAt` on recovery transitions;
+fake server now records *any* `set_config_option(model)` call so T5 cannot pass
+on an in-vocab call.
+
+The `devin_restart` cancel-window race found during testing (a just-cancelled
+session's process still dying) is handled by force-killing the old process and
+waiting (async, so the pending SIGKILL timers fire) before spawning.
+
+Full suite status after the fixes: fake-ACP lifecycle tests T1–T6 + T4c pass
+(two consecutive runs), the existing live test passes, bash-guard tests pass,
+no orphaned `devin acp` processes after any run.
+
 ## 5. Open questions (verify during implementation)
 
 1. ACP `session/cancel` semantics — does it abort in-flight agent work, or only end the session? (Needed to phrase Phase 2 correctly; verify with a fake/real ACP server.)
