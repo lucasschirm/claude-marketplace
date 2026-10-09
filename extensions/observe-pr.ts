@@ -132,6 +132,7 @@ export default function (pi: ExtensionAPI) {
 	(globalThis as any)[GLOBAL_GUARD_KEY] = true;
 
 	const observedPRs = new Map<number, ObservedPR>();
+	(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
 	const trackedBranchesByRepo = new Map<string, Set<string>>();
 	const branchToPR = new Map<string, number>();
 	const autoDetectedPRs = new Set<number>();
@@ -460,6 +461,12 @@ export default function (pi: ExtensionAPI) {
 				if (changedNumbers.length > 0) {
 					sendAgentMessage(`Comment ${changedNumbers.join(", ")} added or updated to the PR ${prNumber}.`);
 				}
+			}
+
+			if (typeof (globalThis as any).__PI_ON_PR_POLL__ === "function") {
+				try {
+					await (globalThis as any).__PI_ON_PR_POLL__(prNumber, pr.cwd);
+				} catch {}
 			}
 
 			// Verify if all runs and checks passed
@@ -802,7 +809,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	const AUTO_TRACKING_PROMPT_MESSAGE =
-		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): while a PR is observed, the observer sends you messages for new comments, CI results and PR status changes. You may still use `gh` to read the details of a comment or CI failure you were notified about. When the PR is observed and you have no other work to do until CI finishes, end your turn and wait for those messages.";
+		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): while a PR is observed, the observer sends you messages for new comments, CI results and PR status changes. You may still use `gh` to read the details of a comment or CI failure you were notified about. When the PR is observed and you have no other work to do until CI finishes, end your turn and wait for those messages.\n\n" +
+		"# Rules\n\n" +
+		"- NEVER use \"gh\" sleep loops or \"--track\" in the bash for git updates. All CI/State/Comments updates in the PR will be automatically sent to you, but it may delay the message if you run long run bash commands with sleep loop.\n" +
+		"- Only use \"gh\" to get specific information about coments, failing CI or extend the information passed from the widget.\n" +
+		"- Is OK to end your work and wait for the updates from the CI if there are no other pending tasks until the PR is done or state changes.";
 
 	pi.on("before_agent_start", (event) => {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
@@ -839,6 +850,7 @@ export default function (pi: ExtensionAPI) {
 		sessionHasRun = false;
 		startupCheck = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
+		delete (globalThis as any).__PI_OBSERVED_PRS__;
 		cleanupAll();
 	});
 
