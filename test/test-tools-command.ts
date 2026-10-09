@@ -196,6 +196,27 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 		pi.setActiveTools([...updatedActive, "read"]);
 		assert(pi.getActiveTools().includes("read"), "read tool successfully re-enabled via setActiveTools");
 
+		// 4. Test branch restoration logic with tools-config entry
+		console.log("Test 4: Testing branch restoration from tools-config entry...");
+		const mockSessionContext: any = {
+			sessionManager: {
+				getBranch: () => [
+					{
+						type: "custom",
+						customType: "tools-config",
+						data: { enabledTools: ["read", "bash"] },
+					},
+				],
+			},
+		};
+		// Trigger session_tree handler to verify restoration from branch
+		const treeHandlers = (pi as any)._handlers?.get("session_tree") || [];
+		for (const h of treeHandlers) {
+			await h({}, mockSessionContext);
+		}
+		const restoredActive = pi.getActiveTools();
+		assert(restoredActive.includes("read") && restoredActive.includes("bash"), "read and bash restored from branch entry");
+
 		console.log("✓ ALL TESTS PASSED!");
 		process.exit(0);
 	});

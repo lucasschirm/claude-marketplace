@@ -17,7 +17,7 @@ export function formatParamSchema(name: string, schema: any, isRequired: boolean
 	const lines: string[] = [];
 	const reqTag = isRequired ? theme.fg("error", " [required]") : theme.fg("dim", " [optional]");
 	const typeStr = schema?.type ? theme.fg("accent", String(schema.type)) : theme.fg("dim", "any");
-	
+
 	let header = `  • ${theme.bold(name)}: ${typeStr}${reqTag}`;
 	if (schema?.default !== undefined) {
 		header += theme.fg("muted", ` (default: ${JSON.stringify(schema.default)})`);
@@ -239,7 +239,25 @@ export class ToolsManagerComponent {
 			if (this.allTools.length === 0) {
 				lines.push(truncateToWidth(`  ${th.fg("dim", "No tools discovered in this session.")}`, safeWidth));
 			} else {
-				for (let i = 0; i < this.allTools.length; i++) {
+				const maxVisible = 15;
+				let startIdx = 0;
+				let endIdx = this.allTools.length;
+
+				if (this.allTools.length > maxVisible) {
+					const half = Math.floor(maxVisible / 2);
+					if (this.selectedIndex <= half) {
+						startIdx = 0;
+						endIdx = maxVisible;
+					} else if (this.selectedIndex >= this.allTools.length - half) {
+						startIdx = this.allTools.length - maxVisible;
+						endIdx = this.allTools.length;
+					} else {
+						startIdx = this.selectedIndex - half;
+						endIdx = startIdx + maxVisible;
+					}
+				}
+
+				for (let i = startIdx; i < endIdx; i++) {
 					const tool = this.allTools[i];
 					const isSelected = i === this.selectedIndex;
 					const pointer = isSelected ? th.fg("accent", "▶ ") : "  ";
@@ -254,6 +272,10 @@ export class ToolsManagerComponent {
 
 					const row = `${pointer}${statusBadge} ${nameStyled}${descStr}`;
 					lines.push(truncateToWidth(row, safeWidth));
+				}
+
+				if (this.allTools.length > maxVisible) {
+					lines.push(truncateToWidth(`  ${th.fg("dim", `[Showing ${startIdx + 1}-${endIdx} of ${this.allTools.length} tools]`)}`, safeWidth));
 				}
 			}
 
