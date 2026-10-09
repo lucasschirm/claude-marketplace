@@ -9,7 +9,8 @@
     "extensions": [
       "./extensions/observe-pr.ts",
       "./extensions/devin-delegate.ts",
-      "./extensions/orca-orchestration.ts"
+      "./extensions/orca-orchestration.ts",
+      "./extensions/tools.ts"
     ],
     "skills": [
       "./skills"
