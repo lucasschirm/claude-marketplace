@@ -13,6 +13,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
 import { DEVIN_BASH_BLOCK_REASON, findBlockedDevinCommand } from "./lib/devin-bash-guard.ts";
+import { stripAnsi, extractCliError } from "./lib/devin-diagnostics.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
@@ -372,6 +373,16 @@ class DevinDashboardComponent {
 	}
 
 	render(width: number): string[] {
+		// Never crash the TUI render loop (e.g. a theme token missing from a
+		// custom theme). Render failures surface as a plain-text placeholder.
+		try {
+			return this.renderInner(width);
+		} catch (err: any) {
+			return [`[devin-delegate] dashboard unavailable: ${String(err?.message || err)}`];
+		}
+	}
+
+	renderInner(width: number): string[] {
 		const lines: string[] = [];
 		const th = this.theme;
 		const sessions = this.getSessions();
@@ -463,6 +474,33 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	const sessions = new Map<string, SessionMeta>();
 	const activeClients = new Map<string, AcpClient>();
 	let lastUIContext: ExtensionUIContext | undefined;
+
+	// Diagnostics: in TUI mode route through the pi UI (raw console writes
+	// corrupt the alternate-screen render); in non-TUI modes use the console.
+	function logWarn(message: string): void {
+		const safe = stripAnsi(message).replace(/\s+/g, " ").trim().slice(0, 500);
+		const ui = lastUIContext;
+		if (ui?.notify) {
+			try {
+				ui.notify(safe, "warning");
+				return;
+			} catch {}
+		}
+		console.warn(safe);
+	}
+
+	function logError(message: string): void {
+		const safe = stripAnsi(message).replace(/\s+/g, " ").trim().slice(0, 500);
+		const ui = lastUIContext;
+		if (ui?.notify) {
+			try {
+				ui.notify(safe, "error");
+				return;
+			} catch {}
+		}
+		console.error(safe);
+	}
+
 	let baseDir = process.cwd();
 	// When false (default), shell calls to the `devin` CLI are blocked so work goes through the devin_* tools.
 	let allowBash = false;
@@ -538,7 +576,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	function killProcessGroup(pid: number): void {
 		if (looksLikeDevinProcess(pid) === false) {
-			console.warn(`[devin-delegate] refusing to kill pid ${pid}: not a devin process (possible pid reuse)`);
+			logWarn(`refusing to kill pid ${pid}: not a devin process (possible pid reuse)`);
 			return;
 		}
 		try {
@@ -646,7 +684,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			fs.mkdirSync(path.dirname(p), { recursive: true });
 			fs.appendFileSync(p, JSON.stringify({ timestamp: new Date().toISOString(), type, data }) + "\n");
 		} catch (err) {
-			console.error(`[devin-delegate] Failed to append event for ${meta.sessionId}:`, err);
+			logError(`Failed to append event for ${meta.sessionId}: ${extractCliError(err)}`);
 		}
 	}
 
@@ -801,7 +839,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), "utf-8");
 			fs.renameSync(tempFile, getStatePath(currentPiSessionId));
 		} catch (err) {
-			console.error("[devin-delegate] Failed to persist state:", err);
+			logError(`Failed to persist state: ${extractCliError(err)}`);
 		}
 	}
 
@@ -816,7 +854,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				const metaPath = getMetaPath(currentPiSessionId, meta.sessionId);
 				fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
 			} catch (err) {
-				console.error(`[devin-delegate] Failed to persist meta for ${meta.sessionId}:`, err);
+				logError(`Failed to persist meta for ${meta.sessionId}: ${extractCliError(err)}`);
 			}
 		};
 
@@ -868,7 +906,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// "steer" lands after the current turn's tool calls; "followUp" would wait until the agent stops calling tools.
 			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
-			console.error("[devin-delegate] Failed to send message to agent:", err);
+			logError(`Failed to send message to agent: ${extractCliError(err)}`);
 		}
 	}
 
@@ -1023,6 +1061,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				continue;
 			}
 
+			let orcaFailure: string | undefined;
 			if (orcaAvailable) {
 				try {
 					const { stdout } = await execFileAsync(
@@ -1034,13 +1073,24 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					const createdPath = parsed.result?.worktree?.path || targetFolder;
 					return { worktreePath: createdPath, worktreeBranch: targetBranch };
 				} catch (orcaErr) {
-					console.warn("[devin-delegate] orca worktree create failed, falling back to git:", orcaErr);
+					// orca reports failures as `ok: false` JSON on stdout and exits
+					// non-zero; surface the real error instead of a generic
+					// "Command failed" before falling back to git.
+					orcaFailure = extractCliError(orcaErr) || "unknown orca failure";
+					logWarn(
+						`orca worktree create failed for ${targetBranch}, falling back to git: ${orcaFailure}`,
+					);
 				}
 			}
 
 			// Fallback: Git worktree
 			fs.mkdirSync(path.dirname(targetFolder), { recursive: true });
-			await execFileAsync("git", ["worktree", "add", "-b", targetBranch, targetFolder, baseBranch], { cwd });
+			try {
+				await execFileAsync("git", ["worktree", "add", "-b", targetBranch, targetFolder, baseBranch], { cwd });
+			} catch (gitErr) {
+				const gitFailure = extractCliError(gitErr) || String(gitErr);
+				throw new Error(orcaFailure ? `orca: ${orcaFailure}; git fallback: ${gitFailure}` : gitFailure);
+			}
 			return { worktreePath: targetFolder, worktreeBranch: targetBranch };
 		}
 	}
@@ -1194,9 +1244,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			});
 		} catch (err: any) {
 			const knownModes = sessionConfigOptions.get(realSessionId)?.get("mode");
-			console.warn(
-				`[devin-delegate] set_mode ${acpMode} failed${knownModes ? ` (valid modes: ${knownModes.join(", ")})` : ""}:`,
-				err,
+			logWarn(
+				`set_mode ${acpMode} failed${knownModes ? ` (valid modes: ${knownModes.join(", ")})` : ""}: ${extractCliError(err)}`,
 			);
 		}
 
@@ -1291,7 +1340,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						task.worktreePath = wt.worktreePath;
 						task.worktreeBranch = wt.worktreeBranch;
 					} catch (err: any) {
-						console.error(`[devin-delegate] Failed to create worktree for queued task ${task.queueId}:`, err);
+						logError(`Failed to create worktree for queued task ${task.queueId}: ${extractCliError(err)}`);
 					}
 				}
 
@@ -1301,7 +1350,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						sendAgentMessage(`Your session started with id: ${meta.sessionId}`);
 					})
 					.catch((err) => {
-						console.error(`[devin-delegate] Failed to start dequeued session:`, err);
+						logError(`Failed to start dequeued session: ${extractCliError(err)}`);
 						// Slot freed: the post-loop recheck below starts the next task.
 					});
 			}
@@ -1335,7 +1384,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		try {
 			state = JSON.parse(raw);
 		} catch (err) {
-			console.error("[devin-delegate] Error recovering state (bad state.json):", err);
+			logError(`Error recovering state (bad state.json): ${extractCliError(err)}`);
 			return;
 		}
 
@@ -1405,7 +1454,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 									persistSessionMeta(meta, true);
 									persistState();
 								} catch (err) {
-									console.error(`[devin-delegate] Error reconciling session ${meta.sessionId}:`, err);
+									logError(`Error reconciling session ${meta.sessionId}: ${extractCliError(err)}`);
 								}
 								updateStatusUI();
 								drainQueue();
@@ -1431,7 +1480,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// Resume processing pending queue
 			drainQueue();
 		} catch (err) {
-			console.error("[devin-delegate] Error recovering state:", err);
+			logError(`Error recovering state: ${extractCliError(err)}`);
 		}
 	}
 
@@ -1509,9 +1558,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				if (currentPiSessionId === "default") {
 					currentPiSessionId = toolPiId;
 				} else if (toolPiId !== currentPiSessionId) {
-					console.warn(
-						`[devin-delegate] pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`,
-					);
+					logWarn(`pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`);
 				}
 			}
 
@@ -1615,9 +1662,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
-				console.warn(
-					`[devin-delegate] pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`,
-				);
+				logWarn(`pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`);
 			}
 			if (params.complete && !params.session_id) {
 				return {
@@ -1871,9 +1916,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
-				console.warn(
-					`[devin-delegate] pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`,
-				);
+				logWarn(`pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`);
 			}
 			const targetId = params.session_id;
 
@@ -1919,9 +1962,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
-				console.warn(
-					`[devin-delegate] pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`,
-				);
+				logWarn(`pi session id mismatch (tool: ${toolPiId}, anchored: ${currentPiSessionId}); keeping anchored storage dir`);
 			}
 			const meta = sessions.get(params.session_id);
 			if (!meta) {

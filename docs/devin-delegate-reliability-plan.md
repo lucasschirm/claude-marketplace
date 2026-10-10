@@ -202,6 +202,58 @@ Full suite status after the fixes: fake-ACP lifecycle tests T1–T6 + T4c pass
 (two consecutive runs), the existing live test passes, bash-guard tests pass,
 no orphaned `devin acp` processes after any run.
 
+### 4.2 TUI breakage on `create_worktree` + swallowed Orca error — 2026-10-09
+
+A user reported that `devin_delegate(create_worktree: true)` broke the TUI
+with "something that looks like an Orca error" (pep session
+`01a120ae-…`, 2026-10-09 ~00:35).
+
+**Diagnosis** (session transcript + crash log + live probing of `orca
+worktree create --json`):
+
+1. **No new uncaught exception.** `~/.pi/agent/crashes.json` has no new entry
+   (only the pre-existing Oct-7 `Unknown theme color: bold`, fixed in
+   `b6836c7`); the pi session ran on normally after the incident.
+2. **The TUI breakage was raw console output.** Pi does not intercept
+   extension `console.*`. The extension's
+   `console.warn("[devin-delegate] orca worktree create failed, falling back
+to git:", orcaErr)` wrote the Orca error text directly into the
+   alternate-screen terminal, corrupting the render.
+3. **The real Orca error was swallowed.** Orca reports failures as
+   `"ok": false` JSON on stdout (non-zero exit, empty stderr). The old code
+   used plain `execFile`, whose rejection carries only the generic
+   `Command failed: orca …` message; the JSON on `stdout` was never parsed,
+   so the true cause was invisible everywhere. The tool result then showed
+   only the git-fallback error (`fatal: a branch named '…-dt1' already
+   exists` — a stale pre-fix branch), hiding the Orca failure behind it.
+
+**Fixes implemented:**
+
+- `extensions/lib/devin-diagnostics.ts` (new): `stripAnsi()` (strips CSI/OSC/
+  charset escapes so child output can never corrupt the terminal) and
+  `extractCliError()` (parses Orca's `ok:false` JSON payload from the failed
+  child's stdout; falls back to stderr, then the generic message; output is
+  ANSI-stripped, whitespace-flattened, truncated).
+- TUI-safe `logWarn`/`logError` in the extension: route through
+  `lastUIContext.notify(type)` in TUI mode (Pi renders toasts safely), fall
+  back to `console.*` in non-TUI modes. **All 15 raw `console.warn` /
+  `console.error` diagnostic sites replaced.**
+- `createWorktree()`: the Orca catch path now extracts the real Orca error
+  via `extractCliError` and logs it through `logWarn`; if the git fallback
+  also fails, the thrown error combines both (`orca: …; git fallback: …`) so
+  the root cause is never hidden behind the fallback.
+- `DevinDashboardComponent.render()` is wrapped in a try/catch that returns a
+  plain-text placeholder on render failure, so a missing theme token in a
+  custom theme can never crash the TUI render loop again (the Oct-7
+  `Unknown theme color: bold` crash class).
+
+**Validation:** `node --test test/test-devin-tui-safety.ts` (11 tests,
+including the exact real-world Orca `ok:false` failure shape) pass; the full
+regression suite (fake-ACP lifecycle T1–T6 + T4c, live test, bash-guard)
+passes; no orphaned `devin acp` processes (one legacy orphan from pre-fix
+code, pid 1152013, was identified and killed; idle-session ACP processes are
+kept alive by design for `devin_message` re-attach).
+
 ## 5. Open questions (verify during implementation)
 
 1. ACP `session/cancel` semantics — does it abort in-flight agent work, or only end the session? (Needed to phrase Phase 2 correctly; verify with a fake/real ACP server.)
