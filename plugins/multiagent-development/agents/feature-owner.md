@@ -54,7 +54,7 @@ Whatever the runtime, three things are always your responsibility:
 
 | Task class | Default model |
 | :--------- | :------------ |
-| Coding — evaluate, plan, execute, and document a change | `sonnet` on claude, or the runtime's strong coding model (`swe-1-7` on devin) |
+| Coding — evaluate, plan, execute, and document a change | the runtime's strong coding model (`swe-1-7` on devin) |
 | PR review — quality, optimization, coverage, spec gaps | `opus` on claude, or the runtime's strong reasoning model (`glm-5-2` on devin) |
 
 **User input wins.** If the request names a model or runtime for a class of task, use it
