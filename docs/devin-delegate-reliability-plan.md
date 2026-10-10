@@ -232,7 +232,9 @@ to git:", orcaErr)` wrote the Orca error text directly into the
 - `extensions/lib/devin-diagnostics.ts` (new): `stripAnsi()` (strips CSI/OSC/
   charset escapes so child output can never corrupt the terminal) and
   `extractCliError()` (parses Orca's `ok:false` JSON payload from the failed
-  child's stdout; falls back to stderr, then the generic message; output is
+  child's streams (prefers stderr, then stdout, on trimmed non-emptiness;
+  parseable JSON without a failure payload is not dumped; internal
+  errors without stream output keep the flattened stack trace); output is
   ANSI-stripped, whitespace-flattened, truncated).
 - TUI-safe `logWarn`/`logError` in the extension: route through
   `lastUIContext.notify(type)` in TUI mode (Pi renders toasts safely), fall
@@ -253,6 +255,40 @@ regression suite (fake-ACP lifecycle T1–T6 + T4c, live test, bash-guard)
 passes; no orphaned `devin acp` processes (one legacy orphan from pre-fix
 code, pid 1152013, was identified and killed; idle-session ACP processes are
 kept alive by design for `devin_message` re-attach).
+
+**Post-merge review** (Devin `swe-2-high`, read-only, session `ginger-tuck` —
+PR #19 was merged before the review finished, so the findings were addressed
+as a follow-up commit): verdict **MERGE WITH FIXES**, nothing blocking;
+10 findings, all addressed:
+
+1. [MINOR] `stripAnsi` CSI regex missed real CSI forms (colon-style SGR,
+   `<`/`=`/`>` private params, intermediate bytes, non-alpha final bytes) and
+   had no catch-all for other ESC sequences → replaced with the full
+   ECMA-48 form (`\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]`) plus DCS/so-/APC/PM
+   handling and a final `\x1b.?` catch-all (lone trailing ESC, keypad modes,
+   RIS, ...).
+2. [MINOR] `lastUIContext` was never cleared on `session_shutdown` — a
+   delayed diagnostic could call `notify` on a dead context and fall back to
+   raw `console.*` (reintroducing the corruption) → cleared in the handler.
+3. [MINOR] `fs.mkdirSync` sat outside the git try/catch so a mkdir failure
+   lost the orca context → moved inside.
+4. [MINOR] `extractCliError` dropped the stack for internal (non-CLI)
+   errors → stack is now preserved (flattened, 1000-char cap) when no stream
+   output exists.
+5. [MINOR] whitespace-only stderr shadowed stdout's `ok:false` JSON →
+   streams now selected on trimmed non-emptiness.
+6. [NIT] string-form `"error": "msg"` payloads were not parsed → handled.
+7. [NIT] render-failure placeholder interpolated raw `err.message` → wrapped
+   in `stripAnsi`.
+8. [NIT] docs said `extractCliError` "falls back to stderr" (it prefers
+   stderr, then stdout) → reworded.
+9. [NIT] orca exiting 0 with an `ok:false` payload was treated as success →
+   now throws with the payload's error message.
+
+**Validation after follow-up:** `test/test-devin-tui-safety.ts` 17/17 (new
+cases for the extended CSI/ESC forms, string-form error payloads,
+whitespace-only stderr, and stack preservation); fake-ACP lifecycle T1–T6 +
+T4b + T4c, live test, bash-guard all pass; no orphaned processes.
 
 ## 5. Open questions (verify during implementation)
 

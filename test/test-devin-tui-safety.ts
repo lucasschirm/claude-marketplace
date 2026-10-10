@@ -10,6 +10,32 @@ test("stripAnsi removes CSI sequences", () => {
 	assert.equal(stripAnsi("\x1b[1;32m bold-green \x1b[39m"), " bold-green ");
 });
 
+test("stripAnsi removes extended CSI forms", () => {
+	// Colon-style SGR (24-bit color)
+	assert.equal(stripAnsi("\x1b[38:2:255:0:0mred\x1b[0m"), "red");
+	// Private parameter markers
+	assert.equal(stripAnsi("\x1b[>4;2mfoo"), "foo");
+	// Intermediate bytes (DECSTR / DECSCUSR)
+	assert.equal(stripAnsi("\x1b[!pDECSTR\x1b[0 qDECSCUSR"), "DECSTRDECSCUSR");
+	// Non-alpha final bytes
+	assert.equal(stripAnsi("\x1b[38;5;198 m ok"), " ok"); // CSI: params 38;5;198, intermediate ' ', final 'm'
+	assert.equal(stripAnsi("a\x1b[0 ba"), "aa"); // \x1b[0 b is a valid CSI (param 0, intermediate ' ', final 'b')
+});
+
+test("stripAnsi removes other ESC sequences and lone ESC", () => {
+	assert.equal(stripAnsi("\x1b=keypad"), "keypad"); // keypad mode
+	assert.equal(stripAnsi("\x1b>shift"), "shift"); // keypad mode
+	assert.equal(stripAnsi("\x1b7save"), "save"); // save cursor
+	assert.equal(stripAnsi("\x1bMscroll"), "scroll"); // reverse index
+	assert.equal(stripAnsi("\x1bcRIS"), "RIS"); // reset
+	assert.equal(stripAnsi("dangling\x1b"), "dangling"); // lone trailing ESC
+});
+
+test("stripAnsi removes DCS/PM/APC sequences", () => {
+	assert.equal(stripAnsi("a\x1bPDCS payload\x1b\\b"), "ab");
+	assert.equal(stripAnsi("a\x1bXso- payload\x1b\\b"), "ab");
+});
+
 test("stripAnsi removes OSC sequences (BEL and ST terminated)", () => {
 	assert.equal(stripAnsi("before\x1b]0;window title\x07after"), "beforeafter");
 	assert.equal(stripAnsi("before\x1b]2;title\x1b\\after"), "beforeafter");
@@ -34,6 +60,29 @@ test("extractCliError parses orca ok:false JSON from stdout", () => {
 	const out = extractCliError(err);
 	assert.match(out, /invalid reference: y/);
 	assert.doesNotMatch(out, /^Command failed: orca/);
+});
+
+test("extractCliError parses string-form error payloads", () => {
+	const err: any = new Error("Command failed: orca");
+	err.stdout = '{"ok":false,"error":"something went wrong"}';
+	assert.equal(extractCliError(err), "something went wrong");
+});
+
+test("extractCliError inspects stdout when stderr is whitespace-only", () => {
+	const err: any = new Error("Command failed: orca");
+	err.stderr = " \n";
+	err.stdout = '{"ok":false,"error":{"message":"real cause"}}';
+	assert.equal(extractCliError(err), "real cause");
+});
+
+test("extractCliError preserves the stack for internal errors", () => {
+	try {
+		throw new Error("Failed to persist state");
+	} catch (err) {
+		const out = extractCliError(err as Error);
+		assert.match(out, /Failed to persist state/);
+		assert.match(out, /extractCliError|at /); // stack frames present
+	}
 });
 
 test("extractCliError prefers stderr when present", () => {
