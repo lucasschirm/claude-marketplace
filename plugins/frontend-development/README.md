@@ -12,7 +12,7 @@ rendered output against Figma and auto-fixes — without ever hardcoding behavio
 ## How it works
 
 ```
-figma-to-code-orchestrator  (lead — opus)
+figma-to-code-orchestrator  (lead)
 ├─ Phase 1  Extract (parallel, read-only)
 │   ├─ figma-variant-mapper     → variants, derived inputs, instances per layout
 │   ├─ figma-token-extractor    → tokens (CSS vars + DTCG) + raw-value flags
@@ -35,16 +35,19 @@ figma-to-code-orchestrator  (lead — opus)
 
 **Agents** (`agents/`)
 
-| Agent | Model | Role |
-|-------|-------|------|
-| `figma-to-code-orchestrator` | opus | Lead: extract → interview → dispatch → enforce |
-| `figma-variant-mapper` | sonnet | Variants, derived inputs, instance inventory |
-| `figma-token-extractor` | sonnet | Tokens + raw-value flags |
-| `figma-asset-exporter` | sonnet | SVG/PNG export + manifest |
-| `component-builder` | sonnet | One stack-agnostic component per dispatch (+ token-only fixes) |
-| `layout-assembler` | sonnet | Composes layouts from built components (+ token-only fixes) |
-| `figma-token-enforcer-qa` | sonnet | Strict token/prop fidelity gate |
-| `visual-validator` | sonnet | Playwright DOM deltas + uimatch pixel/ΔE + fidelity score |
+No agent pins a model — each inherits whatever the caller runs on, so dispatchers pick a
+higher-tier model from what their runtime and tools actually expose.
+
+| Agent | Role |
+|-------|------|
+| `figma-to-code-orchestrator` | Lead: extract → interview → dispatch → enforce |
+| `figma-variant-mapper` | Variants, derived inputs, instance inventory |
+| `figma-token-extractor` | Tokens + raw-value flags |
+| `figma-asset-exporter` | SVG/PNG export + manifest |
+| `component-builder` | One stack-agnostic component per dispatch (+ token-only fixes) |
+| `layout-assembler` | Composes layouts from built components (+ token-only fixes) |
+| `figma-token-enforcer-qa` | Strict token/prop fidelity gate |
+| `visual-validator` | Playwright DOM deltas + uimatch pixel/ΔE + fidelity score |
 
 **Skills** (`skills/`)
 

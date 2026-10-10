@@ -15,7 +15,6 @@ description: >
   Composing a layout from real component instances is this agent's job.
   </commentary>
   </example>
-model: sonnet
 color: green
 tools:
   - Read

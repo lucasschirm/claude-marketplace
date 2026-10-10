@@ -15,7 +15,6 @@ description: >
   Read-only structural extraction of variants and instances is this agent's sole job.
   </commentary>
   </example>
-model: sonnet
 color: cyan
 tools:
   - Read

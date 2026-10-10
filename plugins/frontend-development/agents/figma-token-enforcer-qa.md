@@ -15,7 +15,6 @@ description: >
   Enforcement of token binding and input fidelity is this agent's job.
   </commentary>
   </example>
-model: sonnet
 color: red
 tools:
   - Read

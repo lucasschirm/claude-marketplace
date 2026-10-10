@@ -16,7 +16,6 @@ description: >
   Token extraction and raw-value flagging is this agent's sole job.
   </commentary>
   </example>
-model: sonnet
 color: cyan
 tools:
   - Read

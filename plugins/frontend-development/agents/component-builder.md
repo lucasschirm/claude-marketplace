@@ -16,7 +16,6 @@ description: >
   Single-component generation with token binding and prop fidelity is this agent's job.
   </commentary>
   </example>
-model: sonnet
 color: green
 tools:
   - Read
