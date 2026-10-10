@@ -27,7 +27,6 @@ description: >
   those inputs and drives the build.
   </commentary>
   </example>
-model: opus
 color: magenta
 tools:
   - Task
