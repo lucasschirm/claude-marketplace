@@ -378,7 +378,7 @@ class DevinDashboardComponent {
 		try {
 			return this.renderInner(width);
 		} catch (err: any) {
-			return [`[devin-delegate] dashboard unavailable: ${String(err?.message || err)}`];
+			return [`[devin-delegate] dashboard unavailable: ${stripAnsi(String(err?.message || err))}`];
 		}
 	}
 
@@ -1070,6 +1070,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						{ cwd },
 					);
 					const parsed = JSON.parse(stdout);
+					// orca exiting 0 with an `ok: false` payload is still a failure.
+					if (parsed && parsed.ok === false) {
+						const m = typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
+						throw new Error(m ?? "orca worktree create failed");
+					}
 					const createdPath = parsed.result?.worktree?.path || targetFolder;
 					return { worktreePath: createdPath, worktreeBranch: targetBranch };
 				} catch (orcaErr) {
@@ -1084,8 +1089,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 
 			// Fallback: Git worktree
-			fs.mkdirSync(path.dirname(targetFolder), { recursive: true });
 			try {
+				fs.mkdirSync(path.dirname(targetFolder), { recursive: true });
 				await execFileAsync("git", ["worktree", "add", "-b", targetBranch, targetFolder, baseBranch], { cwd });
 			} catch (gitErr) {
 				const gitFailure = extractCliError(gitErr) || String(gitErr);
@@ -1501,6 +1506,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// Release the load guard so a session switch (/resume, /new, /reload) re-registers the tools.
 	pi.on("session_shutdown", () => {
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
+		// Drop the UI context so delayed diagnostics (watchdogs, debounced
+		// persists) after shutdown fall back to console instead of calling
+		// notify on a dead context while the alt-screen is still up.
+		lastUIContext = undefined;
 		cleanupAllClients();
 	});
 
