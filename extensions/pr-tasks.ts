@@ -2,9 +2,11 @@ import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@ea
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import {
 	fetchReviewThreads,
+	getRepoCoordinates,
 	replyToReviewThread,
 	resolveReviewThread,
 	applyCodeSuggestion,
@@ -18,6 +20,7 @@ import {
 	formatTaskSummary,
 	formatTaskDetail,
 	formatLoopMessage,
+	formatStaleNotice,
 	formatTaskFileLocation,
 	isListedDeadThread,
 	sameReplyBody,
@@ -27,6 +30,9 @@ import {
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_PR_TASKS_EXTENSION_ACTIVE__";
+// Identical settle nudges (same unresolved tasks, no new replies) delivered before the extension
+// stops blocking the agent from settling
+const MAX_IDENTICAL_NUDGES = 3;
 
 class PRTasksDashboardComponent {
 	private theme: any;
@@ -112,6 +118,8 @@ export default function (pi: ExtensionAPI) {
 	let lastCwd: string = process.cwd();
 	let syncAllInFlight: { run: Promise<void>; cwd: string; explicitPr?: number } | undefined;
 	let lastSettleNudgeTime = 0;
+	let lastNudgeSignature = "";
+	let identicalNudgeCount = 0;
 	let sessionId = 0; // bumped on shutdown, so a sync still in flight then is dropped
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
@@ -138,10 +146,16 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function getObservedPRNumbers(): number[] {
+	type SyncTarget = { prNumber: number; cwd?: string; repo?: string };
+
+	function getObservedPRs(): SyncTarget[] {
 		const observedMap = (globalThis as any).__PI_OBSERVED_PRS__;
-		if (observedMap && typeof observedMap.keys === "function") {
-			return Array.from(observedMap.keys());
+		if (observedMap && typeof observedMap.entries === "function") {
+			// (each from observe-pr's folder for it, so it resolves to its own repository)
+			return Array.from(observedMap.entries() as Iterable<[number, any]>).map(([prNumber, pr]) => ({
+				prNumber,
+				cwd: typeof pr?.cwd === "string" ? pr.cwd : undefined,
+			}));
 		}
 		return [];
 	}
@@ -155,18 +169,46 @@ export default function (pi: ExtensionAPI) {
 		return undefined;
 	}
 
-	async function getTargetPRNumbers(cwd: string, explicitPr?: number): Promise<number[]> {
-		if (explicitPr !== undefined) return [explicitPr];
+	async function getTargetPRs(cwd: string, explicitPr?: number): Promise<SyncTarget[]> {
+		if (explicitPr !== undefined) {
+			// The current folder's PR, plus any tracked or observed PR with that number in its own folder
+			const known = [...manager.getPRsToSync(), ...getObservedPRs()].filter((t) => t.prNumber === explicitPr);
+			return [{ prNumber: explicitPr, cwd }, ...known];
+		}
 		// PRs with open tasks stay synced even when no longer observed (e.g. observe-pr stopped after
 		// a merge), so their tasks can't keep nudging from cached state
 		// (STALE ones too: they recover only through a sync that lists their thread again)
-		const tracked = manager
-			.getAllTasks()
-			.filter((t) => t.status !== "RESOLVED")
-			.map((t) => t.prNumber);
-		const observed = getObservedPRNumbers();
-		const current = observed.length > 0 ? observed : [await detectCurrentBranchPR(cwd)].filter((n): n is number => n !== undefined);
-		return [...new Set([...current, ...tracked])];
+		const tracked = manager.getPRsToSync();
+		const observed = getObservedPRs();
+		const detected = observed.length > 0 ? undefined : await detectCurrentBranchPR(cwd);
+		const current = observed.length > 0 ? observed : detected !== undefined ? [{ prNumber: detected, cwd }] : [];
+		return [...current, ...tracked];
+	}
+
+	/**
+	 * The folder to reach a task's (or PR's) repository from: its recorded folder while it exists.
+	 * When that was removed (e.g. a deleted worktree), the fallback is used only if it is the same
+	 * repository, so another repo's PR with the same number is never synced (or acted on) instead.
+	 */
+	async function folderFor(target: { cwd?: string; repo?: string }, fallback: string): Promise<string | undefined> {
+		if (target.cwd && existsSync(target.cwd)) return target.cwd;
+		// (a removed folder of unknown repository, e.g. an observed PR's, may be any repo: never replaced)
+		if (!target.repo) return target.cwd ? undefined : fallback;
+		try {
+			const coords = await getRepoCoordinates(fallback);
+			return `${coords.owner}/${coords.repo}` === target.repo ? fallback : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * The folder to act on a task from (see folderFor); throws when its repository has no local checkout.
+	 */
+	async function taskFolder(task: PRTask, fallback: string): Promise<string> {
+		const folder = await folderFor(task, fallback);
+		if (!folder) throw new Error(`no local checkout of ${task.repo} is available`);
+		return folder;
 	}
 
 	async function syncPR(prNumber: number, cwd: string): Promise<void> {
@@ -182,9 +224,13 @@ export default function (pi: ExtensionAPI) {
 		const fetchedAt = manager.beginFetch();
 		const session = sessionId;
 		const threads = await fetchReviewThreads(prNumber, cwd);
+		const coords = await getRepoCoordinates(cwd); // (cached by fetchReviewThreads)
 		// (thrown, so an action waiting on this refresh doesn't go on from discarded state)
 		if (session !== sessionId) throw new Error("the session shut down while syncing");
-		const { unblockedTasks, repostedTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt);
+		const { unblockedTasks, repostedTasks, staleTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt, {
+			repo: `${coords.owner}/${coords.repo}`,
+			cwd,
+		});
 
 		// Check for unblocked tasks that received user replies
 		for (const { task, latestReply } of unblockedTasks) {
@@ -198,6 +244,9 @@ export default function (pi: ExtensionAPI) {
 				`The task ${task.conversationId} you blocked was re-posted by the reviewer, so it is open again. use the **pr_task_detail** to see the comment.`,
 			);
 		}
+		// Reported once, on the transition (a task with an action in flight is reported by that action)
+		const newlyStale = staleTasks.filter((t) => !taskLocks.has(t));
+		if (newlyStale.length > 0) sendAgentMessage(formatStaleNotice(newlyStale));
 
 		updateStatusUI();
 	}
@@ -396,7 +445,9 @@ export default function (pi: ExtensionAPI) {
 		cwd: string,
 		options: { acceptSuggestion?: boolean; own?: boolean } = {},
 	): Promise<ResolveResult> {
-		return withTaskLock(task, () => resolveTaskLocked(task, message, cwd, options.acceptSuggestion ?? false, options.own ?? true));
+		// (the task's own checkout: GitHub calls and a suggestion's file edit must reach its repository)
+		const folder = await taskFolder(task, cwd);
+		return withTaskLock(task, () => resolveTaskLocked(task, message, folder, options.acceptSuggestion ?? false, options.own ?? true));
 	}
 
 	/**
@@ -606,9 +657,14 @@ export default function (pi: ExtensionAPI) {
 			if (!fresh && inFlight.cwd === cwd && inFlight.explicitPr === explicitPr) return;
 		}
 		const run = (async () => {
-			const prs = await getTargetPRNumbers(cwd, explicitPr);
-			for (const pr of prs) {
-				await syncPR(pr, cwd);
+			// Each PR is synced once, from its own folder (a PR whose repository has no folder left is skipped)
+			const prs = new Map<string, { prNumber: number; cwd: string }>();
+			for (const target of await getTargetPRs(cwd, explicitPr)) {
+				const folder = await folderFor(target, cwd);
+				if (folder) prs.set(`${folder}|${target.prNumber}`, { prNumber: target.prNumber, cwd: folder });
+			}
+			for (const pr of prs.values()) {
+				await syncPR(pr.prNumber, pr.cwd);
 			}
 		})();
 		const entry = { run, cwd, explicitPr };
@@ -652,13 +708,33 @@ export default function (pi: ExtensionAPI) {
 		updateStatusUI(ctx?.ui);
 
 		const unresolvedTasks = manager.getUnresolvedTasks();
-		if (unresolvedTasks.length > 0) {
+		if (unresolvedTasks.length === 0) {
+			lastNudgeSignature = "";
+			identicalNudgeCount = 0;
+		} else {
 			// Throttle loop messages to prevent runaway loops if identical tick
 			const now = Date.now();
 			if (now - lastSettleNudgeTime < 1000) {
 				return;
 			}
 			lastSettleNudgeTime = now;
+
+			// Cap nudges that make no progress (same tasks, no new replies): stop blocking and warn once
+			const signature = unresolvedTasks
+				.map((t) => `${t.repo ?? ""}#${t.prNumber}:${t.conversationId}:${t.replies.length}`)
+				.sort()
+				.join(",");
+			identicalNudgeCount = signature === lastNudgeSignature ? identicalNudgeCount + 1 : 1;
+			lastNudgeSignature = signature;
+			if (identicalNudgeCount > MAX_IDENTICAL_NUDGES) {
+				if (identicalNudgeCount === MAX_IDENTICAL_NUDGES + 1) {
+					lastUIContext?.notify(
+						`[pr_tasks] ${unresolvedTasks.length} open task(s) unchanged after ${MAX_IDENTICAL_NUDGES} nudges; no longer blocking the agent from stopping. Use /tasks to review them.`,
+						"warning",
+					);
+				}
+				return;
+			}
 
 			const totalTasks = manager.getAllTasks().length;
 			const loopMessage = formatLoopMessage(unresolvedTasks, totalTasks);
@@ -680,6 +756,14 @@ export default function (pi: ExtensionAPI) {
 		"- Use `pr_task_blocked` if you require human clarification before you can resolve the conversation.\n" +
 		"- Do not stop your run with unresolved tasks unless they are marked as blocked.";
 
+	// A new prompt from the user re-arms the nudge cap (the nudges themselves arrive as extension input)
+	pi.on("input", (event) => {
+		if (event.source !== "extension") {
+			lastNudgeSignature = "";
+			identicalNudgeCount = 0;
+		}
+	});
+
 	pi.on("before_agent_start", (event) => {
 		if (event.systemPromptOptions?.promptGuidelines) {
 			if (!event.systemPromptOptions.promptGuidelines.includes(PROMPT_GUIDELINES)) {
@@ -700,6 +784,8 @@ export default function (pi: ExtensionAPI) {
 		delete (globalThis as any).__PI_ON_PR_CLOSED__;
 		sessionId++;
 		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
+		lastNudgeSignature = "";
+		identicalNudgeCount = 0;
 		manager.clear();
 	});
 
@@ -896,14 +982,15 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				return await withTaskLock(task, async () => {
-					const upstream = await refreshTask(task, ctx.cwd);
+					const folder = await taskFolder(task, ctx.cwd);
+					const upstream = await refreshTask(task, folder);
 					if (upstream && blocksPosting(upstream)) return upstreamResult(upstream, "The blocked reason was not posted.");
 
 					// Those replies may already answer the question: show them instead of blocking
 					const unseen = showUnseenReplies(task, "blocked", "pr_task_blocked", "answer your question");
 					if (unseen) return { ...text(unseen), isError: true };
 
-					const outcome = await replyToTaskThread(task, reason, ctx.cwd);
+					const outcome = await replyToTaskThread(task, reason, folder);
 					if (outcome.kind !== "replied") return upstreamResult(outcome.kind, "The blocked reason was not posted.");
 					if (task.status === "RESOLVED" || task.status === "STALE") {
 						// A sync while the reply was being posted closed the conversation: don't override that
@@ -1021,17 +1108,18 @@ export default function (pi: ExtensionAPI) {
 				try {
 					// Replying to a resolved conversation is fine; only a stale thread is skipped. This is the
 					// user writing, so the reply can unblock the task.
-					const upstream = await refreshTask(task, ctx.cwd);
+					const folder = await taskFolder(task, ctx.cwd);
+					const upstream = await refreshTask(task, folder);
 					const outcome: ThreadReplyOutcome = upstream && blocksPosting(upstream, true)
 						? { kind: upstream }
-						: await replyToTaskThread(task, replyMsg, ctx.cwd, { allowResolved: true, own: false });
+						: await replyToTaskThread(task, replyMsg, folder, { allowResolved: true, own: false });
 					if (outcome.kind !== "replied") {
 						updateStatusUI(ctx.ui);
 						ctx.ui.notify(describeUpstreamState(task, outcome.kind, "No reply was posted."), "warning");
 						return;
 					}
 					// Pick up the reply now, so a BLOCKED task unblocks and the agent is notified right away
-					await syncPR(task.prNumber, ctx.cwd);
+					await syncPR(task.prNumber, folder);
 					updateStatusUI(ctx.ui);
 					ctx.ui.notify(`Reply posted to task #${task.conversationId}.`, "info");
 				} catch (err: any) {

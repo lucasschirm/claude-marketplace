@@ -17,6 +17,8 @@ export interface PRTaskReply {
 }
 
 export interface PRTask {
+	repo?: string; // "owner/name" of the task's repository, when known
+	cwd?: string; // the folder the task's PR was last synced from (reaches its repository with gh)
 	threadId: string;
 	databaseId?: number;
 	conversationId: string;
@@ -65,6 +67,16 @@ export interface SyncResult {
 	newTasks: PRTask[];
 	unblockedTasks: Array<{ task: PRTask; latestReply: PRTaskReply }>;
 	repostedTasks: PRTask[]; // BLOCKED tasks reopened because the reviewer re-posted the comment
+	staleTasks: PRTask[]; // open tasks this sync marked STALE (reported on the transition only)
+}
+
+/**
+ * The repository a thread list was fetched from. Tasks of another repository whose PR has the same
+ * number are out of scope (tasks without a recorded repo match any).
+ */
+export interface SyncScope {
+	repo?: string;
+	cwd?: string;
 }
 
 export interface TaskCounts {
@@ -79,7 +91,7 @@ export class PRTasksManager {
 	// A list rather than a map keyed by threadId: thread node IDs change when GitHub replaces a thread
 	private tasks: PRTask[] = [];
 	private clock = 0;
-	private lastSync = new Map<number, number>(); // PR number -> fetch tick of the newest applied thread list
+	private lastSync = new Map<string, number>(); // repo#PR -> fetch tick of the newest applied thread list
 	private agentLogin?: string; // the GitHub login the agent's replies are posted as, once one was recorded
 	// Right after a local resolve, GitHub's reads can still show the thread open: such a list
 	// doesn't reopen the task (a real re-open is picked up by a later sync)
@@ -109,6 +121,18 @@ export class PRTasksManager {
 	public getVisibleTasks(prNumber?: number): PRTask[] {
 		// Open tasks plus STALE ones, so stale conversations stay visible in listings
 		return this.getAllTasks(prNumber).filter((t) => t.status !== "RESOLVED");
+	}
+
+	/**
+	 * PRs (with the repo and folder they were synced from) that must keep syncing: those with tasks
+	 * not RESOLVED, including STALE ones, which recover only through a sync that lists their thread.
+	 */
+	public getPRsToSync(): Array<{ prNumber: number; repo?: string; cwd?: string }> {
+		const prs = new Map<string, { prNumber: number; repo?: string; cwd?: string }>();
+		for (const t of this.getVisibleTasks()) {
+			prs.set(`${t.repo ?? ""}|${t.cwd ?? ""}|${t.prNumber}`, { prNumber: t.prNumber, repo: t.repo, cwd: t.cwd });
+		}
+		return [...prs.values()];
 	}
 
 	public findTask(id: string | number): PRTask | undefined {
@@ -162,6 +186,7 @@ export class PRTasksManager {
 	 * Identifies newly discovered tasks and unblocked tasks that received user replies.
 	 * `fetchedAt` is the `beginFetch` tick taken before fetching `nodes` (omit for a list fetched
 	 * just now). Syncs can overlap, so a list fetched before the last applied one is ignored.
+	 * `scope` names the repository the list came from (see SyncScope).
 	 *
 	 * Review thread node IDs are not stable (a PR merge or a re-posted comment can replace the
 	 * thread node), so a tracked task whose thread ID is missing from `nodes` is re-linked to its
@@ -171,11 +196,14 @@ export class PRTasksManager {
 		prNumber: number,
 		nodes: GitHubReviewThreadNode[],
 		fetchedAt = this.beginFetch(),
+		scope: SyncScope = {},
 	): SyncResult {
-		const result: SyncResult = { newTasks: [], unblockedTasks: [], repostedTasks: [] };
-		if (fetchedAt < (this.lastSync.get(prNumber) ?? 0)) return result;
-		this.lastSync.set(prNumber, fetchedAt);
-		const prTasks = this.getAllTasks(prNumber);
+		const result: SyncResult = { newTasks: [], unblockedTasks: [], repostedTasks: [], staleTasks: [] };
+		const { repo, cwd } = scope;
+		const syncKey = `${repo ?? ""}#${prNumber}`;
+		if (fetchedAt < (this.lastSync.get(syncKey) ?? 0)) return result;
+		this.lastSync.set(syncKey, fetchedAt);
+		const prTasks = this.getAllTasks(prNumber).filter((t) => !repo || !t.repo || t.repo === repo);
 		const seen = new Set<PRTask>();
 		const deadIds = new Set(prTasks.flatMap((t) => t.deadThreadIds || []));
 		const isDead = (id: string) => deadIds.has(id);
@@ -183,6 +211,8 @@ export class PRTasksManager {
 			t.conversationId === conversationId || Boolean(t.aliasIds?.includes(conversationId));
 		const claim = (task: PRTask, node: GitHubReviewThreadNode) => {
 			seen.add(task);
+			if (repo && !task.repo) task.repo = repo;
+			if (cwd) task.cwd = cwd;
 			this.applyThreadNode(task, node, result, fetchedAt);
 		};
 
@@ -272,12 +302,15 @@ export class PRTasksManager {
 
 		for (const node of unmatched) {
 			const newTask = createTask(prNumber, node);
+			if (repo) newTask.repo = repo;
+			if (cwd) newTask.cwd = cwd;
 			this.tasks.push(newTask);
 			result.newTasks.push(newTask);
 		}
 
 		for (const orphan of prTasks.filter((t) => !seen.has(t) && isOpen(t))) {
 			this.markStale(orphan, `Review thread ${orphan.threadId} no longer exists on PR #${prNumber} (replaced or deleted).`);
+			result.staleTasks.push(orphan);
 		}
 		for (const task of prTasks) task.isListed = seen.has(task);
 
@@ -787,6 +820,17 @@ export function formatTaskDetail(task: PRTask): string {
 	}
 
 	return sections.join("\n\n");
+}
+
+/**
+ * Formats the one-time notice sent when a sync finds open tasks whose thread no longer exists.
+ */
+export function formatStaleNotice(staleTasks: PRTask[]): string {
+	const list = staleTasks.map((t) => `- ${t.conversationId} (PR #${t.prNumber}, ${formatTaskFileLocation(t)})`).join("\n");
+	return (
+		`${staleTasks.length} PR review conversation task(s) no longer exist on GitHub and were marked STALE. ` +
+		`They no longer count as open tasks and need no further action:\n${list}`
+	);
 }
 
 /**
