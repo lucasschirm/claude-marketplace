@@ -11,4 +11,7 @@ echo "✓ pr-tasks extension loads cleanly in Pi"
 echo "Running pr-tasks extension test suite..."
 pi -ne -e test/test-pr-tasks.ts --offline -p "test"
 
+echo "Running pr-tasks GitHub reconciliation test suite..."
+pi -ne -e test/test-pr-tasks-reconcile.ts --offline -p "test"
+
 echo "✓ All pr-tasks tests passed successfully"

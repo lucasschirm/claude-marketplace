@@ -22,11 +22,18 @@ import { fileURLToPath } from "node:url";
 
 export default function testRunner(pi: ExtensionAPI): void {
 	const registeredTools = new Map<string, any>();
+	const agentMessages: string[] = [];
 	const mockPi = {
 		...pi,
 		registerTool(t: any) {
 			registeredTools.set(t.name, t);
 			return pi.registerTool(t);
+		},
+		// Record agent notifications instead of steering the real pi agent: a woken
+		// agent calls devin_restart/devin_message on its own, spawning extra sessions
+		// that occupy concurrency slots and make later tests (T5) flaky.
+		sendUserMessage(content: any, _opts?: any) {
+			agentMessages.push(typeof content === "string" ? content : JSON.stringify(content));
 		},
 	};
 
@@ -217,6 +224,10 @@ exit 0
 			const t4Meta = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4Id, "meta.json"), "utf-8"));
 			assert.notStrictEqual(t4Meta.status, "failed", "T4: process death must not be marked failed");
 			assert.match(t4Meta.error || "", /code 42/);
+			assert.ok(
+				agentMessages.some((m) => m.includes(`The session ${t4Id} was interrupted`)),
+				"T4: the agent must be notified of the interruption",
+			);
 			console.log("✓ T4: mid-turn process death -> interrupted (not failed)");
 
 			console.log("T4b: restarting the interrupted session...");

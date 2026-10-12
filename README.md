@@ -85,28 +85,42 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that integrates with `ob
 
 - **Agent Tools**:
   - **`pr_tasks_list`**:
-    - Lists all open conversation tasks. Supports optional `pr_number` and optional `show_all` (to include resolved tasks).
+    - Lists all unresolved, blocked, and stale conversation tasks. Supports optional `pr_number` and optional `show_all` (to include resolved tasks).
     - Formats output using the strict **Task Summary template**.
   - **`pr_task_detail`**:
     - Retrieves full conversation details including file location, author, timestamp, status, full replies, and code suggestions.
     - Formats output using the strict **Task Detail template**.
   - **`pr_task_resolve`**:
     - Resolves a conversation by posting a resolution reply to GitHub and closing the thread via GraphQL mutation (`resolveReviewThread`).
-    - Optional `accept_suggestion: true` accepts and applies the reviewer's code suggestion directly to the file on disk. Returns a clear error if invoked on a conversation without a code suggestion.
+    - If the conversation has replies the agent hasn't been shown yet (via `pr_task_detail`), or its comment was edited since the agent saw it, it is not resolved; the new text is returned instead, since it may change the resolution (calling again resolves it).
+    - Optional `accept_suggestion: true` accepts and applies the reviewer's code suggestion directly to the file on disk. Returns a clear error if invoked on a conversation without a code suggestion, on an outdated conversation (the code changed since the comment) or one on the base side of the diff, on a `STALE` conversation, when an earlier version of the suggestion was already applied, when its lines are not in the local file, or when the suggestion changed on GitHub since the agent was last shown it (the new suggestion is shown, and calling again applies it).
   - **`pr_task_blocked`**:
     - Marks a conversation as `BLOCKED` when human clarification or intervention is required. Posts the explanation as a reply to the thread.
     - When a user replies to that blocked conversation, the task automatically unblocks back to `UNRESOLVED` and notifies the agent.
+    - If the conversation has replies the agent hasn't been shown yet (via `pr_task_detail`), it is not blocked; those replies are returned instead, since they may already answer the question.
+- **Stale Review Threads**:
+  - GitHub review-thread node IDs are not stable: a PR merge or a re-posted comment can replace a thread node. On every sync, a tracked task whose thread is gone is re-linked to its current thread: the same root comment, or an unambiguous re-post of it (same file, author, and body) listed in that same sync (a re-post that only appears in a later sync is tracked as a new task, and the old one stays `STALE`). A re-linked task takes the re-posted comment's conversation ID and still answers to the old one. A re-post is a new comment (created later), so a blocked task re-linked to one is reopened, and the agent is told; a replacement thread GitHub created for the same comment keeps the block. If the root comment is deleted while its thread stays, the task keeps the original request (its suggestion is treated as withdrawn) rather than taking the first reply as its comment.
+  - Before posting, `pr_task_resolve`, `pr_task_blocked`, and `/tasks resolve` re-check the PR's review threads. A conversation already resolved upstream is marked `RESOLVED` without posting. If GitHub still rejects the stored thread ID (`Could not resolve to a node`) when replying or resolving, the extension re-syncs and retries once with the current ID. If the thread list can't be fetched, nothing is posted or changed. If resolving fails after the reply was posted, calling `pr_task_resolve` again with the same message only retries the resolve.
+  - A PR stays synced while it has tasks that are not `RESOLVED` (including `STALE` ones, which recover through a sync), even after observe-pr stops observing it (e.g. once it is merged), so those tasks follow GitHub instead of nudging from cached state.
+  - Each task records its repository and the folder its PR was synced from, so every PR is synced from its own checkout and a sync never touches another repository's PR with the same number. If that folder is removed (e.g. a deleted worktree), the current folder is used only when it is the same repository; otherwise the PR is no longer synced, and acting on its tasks fails with `no local checkout of <owner/repo> is available` (a code suggestion is never applied to another repository's checkout).
+  - When no current thread exists, the task is marked `STALE` instead: it stays visible in `pr_tasks_list` and the status bar, but no longer triggers the open-tasks nudge. It returns to its previous state (`UNRESOLVED` or `BLOCKED`) if its thread reappears, or to `RESOLVED` if it was resolved upstream. Calling `pr_task_resolve` on a task that is already `STALE` marks it resolved without posting; if GitHub still lists the thread it rejected, the thread is retried instead and the task is never cleared while listed (`accept_suggestion` is refused for a `STALE` task).
 - **Agent Loop Enforcement**:
   - Whenever the agent attempts to stop or settle while open (`UNRESOLVED`) conversation tasks remain, the extension intercepts settlement (`agent_before_settle`) and sends a nudge:
     `You still have <number> of open tasks. You can resolve them using the pr_task_resolve tool or if you don't have all required information to solve the conversation you can use the pr_task_blocked to mark the conversation as blocked.`
   - The turn continues until all tasks are either resolved or marked as blocked.
+  - The nudge is capped: after 3 identical nudges (same open tasks, no new replies) the extension stops blocking settlement and shows a single warning. A change to the open tasks or a new user prompt re-arms it.
+  - Open tasks a sync marks `STALE` are reported to the agent once, on the transition, so it knows they need no further action.
 - **TUI & User Controls**:
-  - **Status bar**: Displays live task counts in the footer: `PR Tasks: <open> open / <blocked> blocked / <resolved> resolved`.
+  - **Status bar**: Displays live task counts in the footer: `PR Tasks: <open> open / <blocked> blocked / <resolved> resolved` (plus `/ <stale> stale` when any task is stale).
   - **Slash command `/tasks`**:
     - `/tasks list` (or `/tasks list all`): Displays tasks in terminal or opens interactive dashboard modal.
     - `/tasks detail <task-id>`: Displays full conversation details.
     - `/tasks resolve <task-id> "<reason>"`: Resolves conversation directly from CLI.
     - `/tasks reply <task-id> "<message>"`: Adds a comment to the thread without resolving it.
+
+#### Tests
+
+`bash test/test-pr-tasks.sh` runs the extension end to end inside Pi against a mocked `gh` (`test/test-pr-tasks.ts`, plus the GitHub reconciliation scenarios in `test/test-pr-tasks-reconcile.ts`). The sync/re-link logic has standalone unit tests: `node --test test/test-pr-tasks-manager.ts` (Node 23.6+, which runs TypeScript directly).
 
 ### Devin Delegate (`devin_delegate`)
 
