@@ -7,6 +7,9 @@ import {
 	execOrca,
 	resolveOrcaCmd,
 	spawnOrcaCheck,
+	removeOrcaWorktree,
+	checkWorktreeSafety,
+	pruneChildWorktrees,
 	type OrcaWorkerRow,
 	type OrcaMessageDelivery,
 } from "./lib/orca-client.ts";
@@ -1252,14 +1255,27 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		name: "orca_orchestration_release",
 		label: "Orchestration Release",
 		description:
-			"Performs lifecycle cleanup: releases the terminal of a settled worker (succeeded or failed), or stops/fences a running worker.",
+			"Performs lifecycle cleanup: releases the terminal of a settled worker, stops/fences a running worker, or releases and deletes a stray child worktree session.",
 		parameters: Type.Object({
-			dispatch_id: Type.String({
-				description: "Dispatch ID of the worker to release or stop",
-			}),
+			dispatch_id: Type.Optional(
+				Type.String({
+					description: "Dispatch ID of the worker to release or stop",
+				}),
+			),
+			worktree: Type.Optional(
+				Type.String({
+					description: "Worktree path or selector to release/remove from Orca and disk",
+				}),
+			),
 			action: Type.Optional(
 				Type.String({
-					description: "Action to take: 'release' (default, for settled workers) or 'stop' (to cancel running worker)",
+					description:
+						"Action to take: 'release' (default, for settled workers or worktrees), 'stop' (to cancel running worker), or 'prune_children' (to audit and delete stray child worktrees)",
+				}),
+			),
+			force: Type.Optional(
+				Type.Boolean({
+					description: "Force deletion without checking uncommitted or unpushed changes (default: false)",
 				}),
 			),
 		}),
@@ -1269,6 +1285,76 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			lastCwd = ctx.cwd || lastCwd;
 			const action = params.action?.toLowerCase() || "release";
 			const dId = params.dispatch_id;
+
+			if (action === "prune_children" || action === "prune") {
+				const pruneRes = await pruneChildWorktrees({ cwd: ctx.cwd, force: params.force });
+				const lines = [`Pruned ${pruneRes.removed.length} child worktree(s).`];
+				if (pruneRes.removed.length > 0) {
+					lines.push("Removed:");
+					for (const r of pruneRes.removed) {
+						lines.push(`  - ${r.path}: ${r.reason}`);
+					}
+				}
+				if (pruneRes.retained.length > 0) {
+					lines.push("Retained (protected or failed):");
+					for (const r of pruneRes.retained) {
+						lines.push(`  - ${r.path}: ${r.reason}`);
+					}
+				}
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+				};
+			}
+
+			if (params.worktree) {
+				const target = params.worktree;
+				const safety = await checkWorktreeSafety(target, undefined, ctx.cwd);
+				if (!safety.safe && !params.force) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Cannot safely delete worktree '${target}': ${safety.reason}. To force deletion anyway, pass force: true.`,
+							},
+						],
+						isError: true,
+					};
+				}
+
+				const rmRes = await removeOrcaWorktree(target, { force: true, cwd: ctx.cwd });
+				if (!rmRes.ok) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Failed to remove worktree '${target}': ${rmRes.error?.message || "Unknown error"}`,
+							},
+						],
+						isError: true,
+					};
+				}
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Worktree '${target}' has been successfully removed and released from Orca.`,
+						},
+					],
+				};
+			}
+
+			if (!dId) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Please specify either dispatch_id, worktree, or action: 'prune_children'.",
+						},
+					],
+					isError: true,
+				};
+			}
 
 			if (action === "stop") {
 				const stopRes = await execOrca<any>(
@@ -1337,12 +1423,21 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	// --- Command / Dashboard ---
 
 	pi.registerCommand("orchestration", {
-		description: "Orca orchestration controls and dashboard (subcommands: list, dashboard, stop <id>, release <id>, enable, disable)",
+		description: "Orca orchestration controls and dashboard (subcommands: list, dashboard, stop <id>, release <id>, prune, enable, disable)",
 		handler: async (args, ctx) => {
 			lastUIContext = ctx.ui;
 			const trimmed = (args || "").trim();
 			const parts = trimmed.split(/\s+/);
 			const sub = parts[0]?.toLowerCase();
+
+			if (sub === "prune" || sub === "prune-children") {
+				const pruneRes = await pruneChildWorktrees({ cwd: ctx.cwd });
+				ctx.ui.notify(
+					`Pruned ${pruneRes.removed.length} child worktree(s). Retained: ${pruneRes.retained.length}.`,
+					"info",
+				);
+				return;
+			}
 
 			if (sub === "stop") {
 				const target = parts[1];
@@ -1361,7 +1456,22 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (sub === "release") {
 				const target = parts[1];
 				if (!target) {
-					ctx.ui.notify("Please specify a dispatch ID: /orchestration release <dispatch_id>", "warning");
+					ctx.ui.notify("Please specify a dispatch ID or worktree: /orchestration release <target>", "warning");
+					return;
+				}
+				if (target.startsWith("/") || target.startsWith("path:") || target.includes("::")) {
+					const force = parts.includes("--force") || parts.includes("-f");
+					const safety = await checkWorktreeSafety(target, undefined, ctx.cwd);
+					if (!safety.safe && !force) {
+						ctx.ui.notify(`Refusing to remove worktree: ${safety.reason}. Use --force to override.`, "warning");
+						return;
+					}
+					const rmRes = await removeOrcaWorktree(target, { force, cwd: ctx.cwd });
+					if (rmRes.ok) {
+						ctx.ui.notify(`Released and removed worktree ${target}.`, "info");
+					} else {
+						ctx.ui.notify(`Failed to release worktree: ${rmRes.error?.message || "Unknown error"}`, "error");
+					}
 					return;
 				}
 				await execOrca(["orchestration", "worker-release", "--dispatch", target], { cwd: ctx.cwd });

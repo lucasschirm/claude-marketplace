@@ -165,6 +165,41 @@ if (args[0] === 'orchestration' && args[1] === 'run-show') {
   process.exit(0);
 }
 
+// worktree rm
+if (args[0] === 'worktree' && args[1] === 'rm') {
+  console.log(JSON.stringify({ ok: true, result: { removed: true } }));
+  process.exit(0);
+}
+
+// worktree current
+if (args[0] === 'worktree' && args[1] === 'current') {
+  console.log(JSON.stringify({
+    ok: true,
+    result: {
+      worktree: {
+        id: 'mock-repo::/mock/parent',
+        childWorktreeIds: ['mock-repo::/mock/child-1']
+      }
+    }
+  }));
+  process.exit(0);
+}
+
+// worktree show
+if (args[0] === 'worktree' && args[1] === 'show') {
+  console.log(JSON.stringify({
+    ok: true,
+    result: {
+      worktree: {
+        id: args.includes('--worktree') ? args[args.indexOf('--worktree') + 1] : 'mock-child-1',
+        path: '/mock/child-1',
+        branch: 'mock-branch-1'
+      }
+    }
+  }));
+  process.exit(0);
+}
+
 // default fallback
 console.log(JSON.stringify({ ok: true, result: {} }));
 `;
@@ -374,6 +409,44 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			assert.match(releaseRes.content[0].text, /Worker terminal for dispatch ctx-mock-1 has been successfully released/);
 			console.log("✓ orca_orchestration_release released worker terminal");
 
+			// 8b. Test orca_orchestration_release for worktree (safe guard when not forced)
+			const dirtyDir = path.join(tmpDir, "dirty-wt");
+			fs.mkdirSync(dirtyDir, { recursive: true });
+			// Initialize a git repo and make it dirty
+			const { execSync } = require("child_process");
+			execSync("git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b feature-test -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt", { cwd: dirtyDir });
+
+			const wtUnsafeRes = await releaseTool.execute(
+				"call-rel-wt-unsafe",
+				{ worktree: dirtyDir, force: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.strictEqual(wtUnsafeRes.isError, true, "Should fail when worktree cannot be verified safely");
+			assert.match(wtUnsafeRes.content[0].text, /Cannot safely delete worktree/);
+
+			const wtReleaseRes = await releaseTool.execute(
+				"call-rel-wt",
+				{ worktree: "/mock/child-1", force: true },
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.match(wtReleaseRes.content[0].text, /Worktree '\/mock\/child-1' has been successfully removed and released from Orca/);
+			console.log("✓ orca_orchestration_release safety guard and removal verified");
+
+			// 8c. Test orca_orchestration_release for prune_children
+			const pruneRes = await releaseTool.execute(
+				"call-rel-prune",
+				{ action: "prune_children", force: true },
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.match(pruneRes.content[0].text, /Pruned 1 child worktree/);
+			console.log("✓ orca_orchestration_release pruned child worktrees");
+
 			// 9. Test orca_orchestration_observe Tool
 			console.log("Test 9: Testing orca_orchestration_observe status reporting...");
 			const observeTool = registeredTools.get("orca_orchestration_observe")!;
@@ -397,6 +470,13 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 				"Notification sent for /orchestration status",
 			);
 			console.log("✓ /orchestration command handler verified");
+
+			await registeredCommand.handler("prune", mockCtx);
+			assert.ok(
+				notifiedMessages.some((m) => m.includes("Pruned")),
+				"Notification sent for /orchestration prune",
+			);
+			console.log("✓ /orchestration prune handler verified");
 
 			console.log("\n✓ ALL ORCA ORCHESTRATION EXTENSION TESTS PASSED SUCCESSFULLY!");
 

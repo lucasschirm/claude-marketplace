@@ -20,6 +20,7 @@ The `devin_*` tools run Devin sessions in the background over its Agent Client P
 | `devin_message` | Send a follow-up to an existing session (`session_id`, `message`). |
 | `devin_cancel` | Cancel a running or queued session (session id or queue id). |
 | `devin_restart` | Resume a failed, interrupted or stopped session in its original worktree. Optional new `prompt`. |
+| `devin_clean_worktree` | Release and delete the worktree for a settled session (`session_id`), or all settled sessions whose PRs are merged/closed (`all_settled: true`). Optional `force`. |
 
 Do not run the `devin` CLI through bash. The extension blocks it and the call fails with a message pointing back to these tools. Only read-only commands are allowed (`devin models list`, `devin ls`, `devin version`, `devin --help`). If a direct CLI run is truly needed, ask the user to run `/devin allow_bash`.
 
@@ -62,6 +63,13 @@ Treat `dangerous` as a decision, not a default: pair it with `create_worktree: t
 ## Isolating work with `create_worktree`
 
 `create_worktree: true` runs the session in a new worktree on a branch named `<currentBranch>-dt<N>`. Use it for coding runs, and always when several sessions run in parallel.
+
+**Worktree lifecycle & cleanup:**
+- Orca registers the worktree as a child workspace of the parent session.
+- When an associated PR is merged or closed, the PR observer automatically deletes the worktree and releases the child workspace from Orca.
+- When a clean session is cancelled, its worktree is cleaned up automatically.
+- To manually clean a finished session's worktree, call `devin_clean_worktree({ session_id })` or `devin_clean_worktree({ all_settled: true })`.
+- Uncommitted or unpushed work is protected by default; pass `force: true` only if you intentionally wish to discard changes.
 
 **The rule: if N sessions would edit the same shared file, forbid all of them from touching it and make those edits yourself.** Task boards, root index files, changelogs and `.gitignore` are the usual suspects. Give each prompt an explicit list of paths the session does not own. Keep bookkeeping (ticket status, PR URLs) in your own session. If a session needs a shared file changed, have it report the needed line and apply it at merge time.
 

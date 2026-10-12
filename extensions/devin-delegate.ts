@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as readline from "node:readline";
 import { DEVIN_BASH_BLOCK_REASON, findBlockedDevinCommand } from "./lib/devin-bash-guard.ts";
 import { stripAnsi, extractCliError } from "./lib/devin-diagnostics.ts";
+import { removeOrcaWorktree, checkWorktreeSafety } from "./lib/orca-client.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
@@ -30,6 +31,9 @@ interface QueuedTask {
 	parentSessionId?: string;
 	worktreePath?: string;
 	worktreeBranch?: string;
+	worktreeId?: string;
+	parentWorktreeId?: string;
+	worktreeStatus?: "active" | "released" | "retained";
 }
 
 interface SessionMeta {
@@ -41,6 +45,10 @@ interface SessionMeta {
 	createWorktree: boolean;
 	worktreePath?: string;
 	worktreeBranch?: string;
+	worktreeId?: string;
+	parentWorktreeId?: string;
+	worktreeStatus?: "active" | "released" | "retained";
+	prState?: string;
 	status: "running" | "stalled" | "idle" | "completed" | "cancelled" | "failed" | "interrupted";
 	createdAt: number;
 	startedAt?: number;
@@ -776,7 +784,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	function cancelSessionById(targetId: string): "queued" | "session" | null {
 		const queueIndex = queue.findIndex((q) => q.queueId === targetId);
 		if (queueIndex !== -1) {
+			const queued = queue[queueIndex];
 			queue.splice(queueIndex, 1);
+			if (queued.worktreePath) {
+				const selector = queued.worktreeId || `path:${queued.worktreePath}`;
+				removeOrcaWorktree(selector).catch(() => {});
+			}
 			persistState();
 			updateStatusUI();
 			return "queued";
@@ -795,6 +808,21 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		} else if (meta.pid && isPidAlive(meta.pid)) {
 			killProcessGroup(meta.pid);
 		}
+
+		if (meta.worktreePath && meta.worktreeStatus === "active") {
+			checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch).then((safety) => {
+				if (safety.safe) {
+					const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+					removeOrcaWorktree(selector).then((rmRes) => {
+						if (rmRes.ok) {
+							meta.worktreeStatus = "released";
+							persistSessionMeta(meta, true);
+						}
+					}).catch(() => {});
+				}
+			}).catch(() => {});
+		}
+
 		persistSessionMeta(meta, true);
 		persistState();
 		updateStatusUI();
@@ -1045,7 +1073,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	async function createWorktree(cwd: string): Promise<{ worktreePath: string; worktreeBranch: string }> {
+	async function createWorktree(
+		cwd: string,
+	): Promise<{ worktreePath: string; worktreeBranch: string; worktreeId?: string; parentWorktreeId?: string }> {
 		const currentBranch = await getGitBranch(cwd);
 		const baseBranch = currentBranch.replace(/^refs\/heads\//, "");
 		let index = await findNextWorktreeIndex(cwd, baseBranch);
@@ -1076,7 +1106,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						throw new Error(m ?? "orca worktree create failed");
 					}
 					const createdPath = parsed.result?.worktree?.path || targetFolder;
-					return { worktreePath: createdPath, worktreeBranch: targetBranch };
+					const worktreeId = parsed.result?.worktree?.id;
+					const parentWorktreeId = parsed.result?.worktree?.parentWorktreeId;
+					return {
+						worktreePath: createdPath,
+						worktreeBranch: targetBranch,
+						worktreeId,
+						parentWorktreeId,
+					};
 				} catch (orcaErr) {
 					// orca reports failures as `ok: false` JSON on stdout and exits
 					// non-zero; surface the real error instead of a generic
@@ -1220,6 +1257,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			createWorktree: task.createWorktree,
 			worktreePath: task.worktreePath,
 			worktreeBranch: task.worktreeBranch,
+			worktreeId: task.worktreeId,
+			parentWorktreeId: task.parentWorktreeId,
+			worktreeStatus: task.worktreePath ? "active" : undefined,
 			status: "running",
 			createdAt: task.enqueuedAt,
 			startedAt: Date.now(),
@@ -1344,6 +1384,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						const wt = await createWorktree(baseDir);
 						task.worktreePath = wt.worktreePath;
 						task.worktreeBranch = wt.worktreeBranch;
+						task.worktreeId = wt.worktreeId;
+						task.parentWorktreeId = wt.parentWorktreeId;
+						task.worktreeStatus = "active";
 					} catch (err: any) {
 						logError(`Failed to create worktree for queued task ${task.queueId}: ${extractCliError(err)}`);
 					}
@@ -1583,12 +1626,16 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				// Start immediately
 				let wtPath: string | undefined;
 				let wtBranch: string | undefined;
+				let wtId: string | undefined;
+				let parentWtId: string | undefined;
 
 				if (createWorktreeReq) {
 					try {
 						const wt = await createWorktree(ctx.cwd);
 						wtPath = wt.worktreePath;
 						wtBranch = wt.worktreeBranch;
+						wtId = wt.worktreeId;
+						parentWtId = wt.parentWorktreeId;
 					} catch (err: any) {
 						return {
 							content: [{ type: "text", text: `Error creating worktree: ${err.message}` }],
@@ -1605,6 +1652,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					createWorktree: createWorktreeReq,
 					worktreePath: wtPath,
 					worktreeBranch: wtBranch,
+					worktreeId: wtId,
+					parentWorktreeId: parentWtId,
+					worktreeStatus: wtPath ? "active" : undefined,
 					enqueuedAt: Date.now(),
 				};
 
@@ -2030,14 +2080,39 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			totalInvoked++;
 			const queueId = `q-${totalInvoked}`;
 
+			let wtPath = meta.worktreePath;
+			let wtBranch = meta.worktreeBranch;
+			let wtId = meta.worktreeId;
+			let parentWtId = meta.parentWorktreeId;
+			let wtStatus = meta.worktreeStatus;
+
+			if (meta.createWorktree && (!wtPath || wtStatus === "released" || !fs.existsSync(wtPath))) {
+				try {
+					const wt = await createWorktree(ctx.cwd || baseDir);
+					wtPath = wt.worktreePath;
+					wtBranch = wt.worktreeBranch;
+					wtId = wt.worktreeId;
+					parentWtId = wt.parentWorktreeId;
+					wtStatus = "active";
+				} catch (err: any) {
+					return {
+						content: [{ type: "text", text: `Failed to recreate worktree for restart: ${err.message}` }],
+						isError: true,
+					};
+				}
+			}
+
 			const task: QueuedTask = {
 				queueId,
 				prompt: revisedPrompt,
 				model: meta.model,
 				mode: meta.mode,
 				createWorktree: meta.createWorktree,
-				worktreePath: meta.worktreePath,
-				worktreeBranch: meta.worktreeBranch,
+				worktreePath: wtPath,
+				worktreeBranch: wtBranch,
+				worktreeId: wtId,
+				parentWorktreeId: parentWtId,
+				worktreeStatus: wtStatus,
 				enqueuedAt: Date.now(),
 				parentSessionId: meta.sessionId,
 			};
@@ -2072,6 +2147,199 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 		},
 	});
+
+	// 6. devin_clean_worktree
+	pi.registerTool({
+		name: "devin_clean_worktree",
+		label: "Devin Clean Worktree",
+		description:
+			"Releases and removes an isolated worktree for a settled or finished Devin session, releasing the child workspace in Orca.",
+		parameters: Type.Object({
+			session_id: Type.Optional(
+				Type.String({
+					description: "Session ID whose worktree should be released and deleted",
+				}),
+			),
+			force: Type.Optional(
+				Type.Boolean({
+					description: "Force deletion without checking uncommitted or unpushed changes (default: false)",
+				}),
+			),
+			all_settled: Type.Optional(
+				Type.Boolean({
+					description: "Clean all settled sessions whose PRs are merged or closed (default: false)",
+				}),
+			),
+		}),
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
+			lastUIContext = ctx.ui;
+			const targetId = params.session_id;
+
+			if (params.all_settled) {
+				const cleaned: string[] = [];
+				const skipped: Array<{ sessionId: string; reason: string }> = [];
+
+				for (const [sId, meta] of sessions.entries()) {
+					if (!meta.worktreePath || meta.worktreeStatus === "released") continue;
+					if (meta.status === "running" || meta.status === "stalled") {
+						skipped.push({ sessionId: sId, reason: "Session is still active" });
+						continue;
+					}
+
+					const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch);
+					const prSettled = safety.prState === "MERGED" || safety.prState === "CLOSED";
+					if (!params.force && (!safety.safe || (!prSettled && safety.prState !== "NONE" && safety.prState !== undefined))) {
+						skipped.push({
+							sessionId: sId,
+							reason: !safety.safe
+								? safety.reason
+								: `PR #${safety.prNumber} is still ${safety.prState || "OPEN"}`,
+						});
+						continue;
+					}
+
+					const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+					const rmRes = await removeOrcaWorktree(selector, { force: true });
+					if (rmRes.ok) {
+						meta.worktreeStatus = "released";
+						persistSessionMeta(meta, true);
+						cleaned.push(sId);
+					} else {
+						skipped.push({ sessionId: sId, reason: rmRes.error?.message || "orca worktree rm failed" });
+					}
+				}
+
+				persistState();
+				updateStatusUI();
+
+				const lines = [
+					`Cleaned worktrees for ${cleaned.length} settled session(s): ${cleaned.join(", ") || "none"}.`,
+				];
+				if (skipped.length > 0) {
+					lines.push("Skipped sessions:");
+					for (const s of skipped) {
+						lines.push(`  - ${s.sessionId}: ${s.reason}`);
+					}
+				}
+				return {
+					content: [{ type: "text", text: lines.join("\n") }],
+				};
+			}
+
+			if (!targetId) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Please specify a session_id or set all_settled: true to clean up Devin worktrees.",
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const meta = sessions.get(targetId);
+			if (!meta) {
+				return {
+					content: [{ type: "text", text: `Session '${targetId}' not found.` }],
+					isError: true,
+				};
+			}
+
+			if (!meta.worktreePath) {
+				return {
+					content: [{ type: "text", text: `Session '${targetId}' was not created with an isolated worktree.` }],
+					isError: true,
+				};
+			}
+
+			if (meta.worktreeStatus === "released") {
+				return {
+					content: [{ type: "text", text: `Worktree for session '${targetId}' has already been released.` }],
+				};
+			}
+
+			if (meta.status === "running" || meta.status === "stalled") {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Session '${targetId}' is currently ${meta.status}. Wait for it to complete or use devin_cancel first.`,
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch);
+			if (!safety.safe && !params.force) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Cannot safely delete worktree for '${targetId}': ${safety.reason}. To force deletion anyway, pass force: true.`,
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+			const rmRes = await removeOrcaWorktree(selector, { force: true });
+			if (!rmRes.ok) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Failed to remove worktree for session '${targetId}': ${rmRes.error?.message || "Unknown error"}`,
+						},
+					],
+					isError: true,
+				};
+			}
+
+			meta.worktreeStatus = "released";
+			persistSessionMeta(meta, true);
+			persistState();
+			updateStatusUI();
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Worktree for session '${targetId}' (${meta.worktreePath}) has been deleted and released from Orca.`,
+					},
+				],
+			};
+		},
+	});
+
+	// Global PR closed hook to clean up worktrees whose PRs are merged or closed
+	(globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ = async (prNumber: number, state: string) => {
+		for (const [sId, meta] of sessions.entries()) {
+			if (meta.detectedPrNumber === prNumber && meta.worktreePath && meta.worktreeStatus === "active") {
+				if (meta.status === "running" || meta.status === "stalled") {
+					logWarn(`Skipping worktree cleanup for active session ${sId} on PR #${prNumber} closed event`);
+					continue;
+				}
+				const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch);
+				if (!safety.safe) {
+					logWarn(`Cannot safely release worktree for PR #${prNumber} (session ${sId}): ${safety.reason}`);
+					continue;
+				}
+				const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+				const rmRes = await removeOrcaWorktree(selector, { force: true });
+				if (rmRes.ok) {
+					meta.worktreeStatus = "released";
+					persistSessionMeta(meta, true);
+					sendAgentMessage(
+						`Child worktree for PR #${prNumber} (session ${sId}) was automatically released from Orca because the PR was ${state.toLowerCase()}.`,
+					);
+				}
+			}
+		}
+	};
 
 	// --- Slash Command /devin ---
 
