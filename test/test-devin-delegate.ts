@@ -40,7 +40,14 @@ export default function testRunner(pi: ExtensionAPI): void {
 		try {
 			// 1. Verify Tool Registrations
 			console.log("Test 1: Verifying registered tools...");
-			const expectedTools = ["devin_delegate", "devin_status", "devin_message", "devin_cancel", "devin_restart"];
+			const expectedTools = [
+				"devin_delegate",
+				"devin_status",
+				"devin_message",
+				"devin_cancel",
+				"devin_restart",
+				"devin_clean_worktree",
+			];
 			for (const t of expectedTools) {
 				assert.ok(registeredTools.has(t), `Expected tool ${t} to be registered`);
 			}
@@ -201,6 +208,21 @@ export default function testRunner(pi: ExtensionAPI): void {
 			assert.strictEqual(state.maxRuns, 2);
 			assert.ok(state.totalInvoked >= 3);
 			console.log("✓ Persistence file state.json verified on disk");
+
+			// 10b. Test devin_clean_worktree tool
+			console.log("Test 10b: Testing devin_clean_worktree...");
+			const cleanWtTool = registeredTools.get("devin_clean_worktree")!;
+			// Test clean with no session id and no all_settled
+			const noIdRes = await cleanWtTool.execute("clean-wt-0", {}, undefined, undefined, mockCtx);
+			assert.strictEqual(noIdRes.isError, true);
+			// Test clean on non-existent session
+			const badIdRes = await cleanWtTool.execute("clean-wt-1", { session_id: "non-existent" }, undefined, undefined, mockCtx);
+			assert.strictEqual(badIdRes.isError, true);
+			// Test all_settled
+			const allSettledRes = await cleanWtTool.execute("clean-wt-2", { all_settled: true }, undefined, undefined, mockCtx);
+			assert.strictEqual(allSettledRes.isError, undefined);
+			assert.match(allSettledRes.content[0].text, /Cleaned worktrees for/);
+			console.log("✓ devin_clean_worktree validated successfully");
 
 			// Clean up all sessions
 			for (const id of createdSessionIds) {

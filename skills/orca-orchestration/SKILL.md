@@ -19,7 +19,7 @@ The `orca_orchestration_*` tools provide automated, asynchronous dispatch and ba
 | `orca_orchestration_observe` | Check or toggle observation state for the Run or a specific dispatch. Params: `run_id` (bind/adopt Run from another session), `dispatch_id` (observe specific dispatch), `all` (list all active workers/runs across sessions), `action` (`status`, `start`, `stop`). |
 | `orca_orchestration_status` | Query active workers, attention states, and bounded output without polling bash. Params: `dispatch_id`, `run_id` (adopt/inspect Run from another session), `all` (list all active workers/runs across sessions), `read_output`, `complete`. |
 | `orca_orchestration_reply` | Answer a worker's blocking question or escalation without manual CLI piping (`message_id`, `answer`). |
-| `orca_orchestration_release` | Release settled worker terminals (`action: "release"`, default) or fence/stop a runaway worker (`action: "stop"`). |
+| `orca_orchestration_release` | Release settled worker terminals, stop running workers, or delete stray child worktrees (`dispatch_id`, `worktree`, `action: "release" | "stop" | "prune_children"`, `force`). |
 
 ## Workflow
 
@@ -42,6 +42,16 @@ The `orca_orchestration_*` tools provide automated, asynchronous dispatch and ba
 5. **Verify and release**:
    Once `worker_done` is reported, inspect changes if needed, and call `orca_orchestration_release` to clean up the worker terminal.
 
+## Cleaning Stray Child Workspaces
+
+When subagents or Devin sessions create isolated worktrees under the current parent workspace, they appear as child sessions in Orca.
+1. **Audit & Prune Safe Child Workspaces**:
+   - Call `orca_orchestration_release({ action: "prune_children" })` to audit all child worktrees of the current workspace.
+   - Child worktrees whose PRs are merged or closed, or that have no uncommitted/unpushed changes, are automatically deleted and released from Orca.
+   - Or use `/orchestration prune` in the Pi TUI.
+2. **Targeted Worktree Release**:
+   - Call `orca_orchestration_release({ worktree: "<path-or-id>" })` to remove a specific child worktree. Pass `force: true` to override safety guards if discarding unmerged work intentionally.
+
 ## Observing Work Dispatched from Another Session
 
 If a task or worker was dispatched from bash or a separate terminal, the current session is not automatically bound to that Run. To observe it:
@@ -53,4 +63,4 @@ If a task or worker was dispatched from bash or a separate terminal, the current
 
 ## Slash Command & Dashboard
 
-Run `/orchestration dashboard` in the Pi TUI to view the live dashboard component with keyboard navigation, active worker statuses, and outcomes.
+Run `/orchestration dashboard` in the Pi TUI to view the live dashboard component with keyboard navigation, active worker statuses, and outcomes. Use `/orchestration prune` to prune stray child workspaces.

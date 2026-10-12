@@ -418,6 +418,16 @@ export default function (pi: ExtensionAPI) {
 					`Stoping observing the pr ${prNumber}. The PR was ${status}. You will no longer receive updates about this PR.`,
 				);
 				stopObserving(prNumber);
+				if (typeof (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ === "function") {
+					try {
+						await (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__(prNumber, state);
+					} catch {}
+				}
+				if (typeof (globalThis as any).__PI_ON_PR_CLOSED__ === "function") {
+					try {
+						await (globalThis as any).__PI_ON_PR_CLOSED__(prNumber, state, pr.cwd);
+					} catch {}
+				}
 				return;
 			}
 

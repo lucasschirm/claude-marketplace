@@ -1,4 +1,5 @@
 import { execFile, spawn, execFileSync, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -68,6 +69,51 @@ export interface OrcaWorkerRow {
 		terminalHandle?: string;
 		worktreeId?: string;
 	};
+}
+
+export interface OrcaWorktree {
+	id: string;
+	identity?: {
+		key?: string;
+		instanceId?: string;
+		executionHostId?: string;
+	};
+	instanceId?: string;
+	repoId?: string;
+	projectId?: string;
+	hostId?: string;
+	path: string;
+	branch?: string;
+	head?: string;
+	displayName?: string;
+	displayNameMode?: string;
+	comment?: string;
+	workspaceStatus?: string;
+	isArchived?: boolean;
+	parentWorktreeId?: string | null;
+	childWorktreeIds?: string[];
+	lineage?: any;
+	linkedPR?: number | null;
+	linkedIssue?: number | null;
+	createdWithAgent?: string;
+	git?: {
+		path: string;
+		branch?: string;
+		head?: string;
+		isBare?: boolean;
+		isMainWorktree?: boolean;
+	};
+}
+
+export interface OrcaWorktreeSafetyResult {
+	safe: boolean;
+	reason: string;
+	worktreePath: string;
+	branch?: string;
+	prNumber?: number;
+	prState?: "OPEN" | "MERGED" | "CLOSED" | "NONE" | string;
+	uncommitted?: boolean;
+	unpushed?: boolean;
 }
 
 export interface OrcaMessageDelivery {
@@ -192,3 +238,213 @@ export function spawnOrcaCheck(
 		stdio: ["ignore", "pipe", "pipe"],
 	});
 }
+
+/**
+ * Removes an Orca worktree and deletes its folder/branch.
+ */
+export async function removeOrcaWorktree(
+	selector: string,
+	options: { force?: boolean; cwd?: string } = {},
+): Promise<OrcaEnvelope<{ removed: boolean }>> {
+	const args = ["worktree", "rm", "--worktree", selector];
+	if (options.force !== false) {
+		args.push("--force");
+	}
+	return execOrca<{ removed: boolean }>(args, { cwd: options.cwd });
+}
+
+/**
+ * Gets the Orca worktree for the current working directory.
+ */
+export async function getCurrentWorktree(
+	cwd?: string,
+): Promise<OrcaEnvelope<{ worktree?: OrcaWorktree }>> {
+	return execOrca<{ worktree?: OrcaWorktree }>(["worktree", "current"], { cwd });
+}
+
+/**
+ * Gets details for a single Orca worktree selector.
+ */
+export async function getWorktree(
+	selector: string,
+	cwd?: string,
+): Promise<OrcaEnvelope<{ worktree?: OrcaWorktree }>> {
+	return execOrca<{ worktree?: OrcaWorktree }>(["worktree", "show", "--worktree", selector], { cwd });
+}
+
+/**
+ * Lists Orca worktrees, optionally filtered by repo selector.
+ */
+export async function listWorktrees(
+	options: { repo?: string; cwd?: string } = {},
+): Promise<OrcaEnvelope<{ worktrees?: OrcaWorktree[] }>> {
+	const args = ["worktree", "list"];
+	if (options.repo) {
+		args.push("--repo", options.repo);
+	}
+	return execOrca<{ worktrees?: OrcaWorktree[] }>(args, { cwd: options.cwd });
+}
+
+/**
+ * Evaluates whether an Orca worktree is safe to delete.
+ */
+export async function checkWorktreeSafety(
+	worktreePath: string,
+	branch?: string,
+	cwd?: string,
+): Promise<OrcaWorktreeSafetyResult> {
+	if (!fs.existsSync(worktreePath)) {
+		return {
+			safe: true,
+			reason: "Worktree path does not exist on disk",
+			worktreePath,
+			branch,
+		};
+	}
+
+	// 1. Check uncommitted changes
+	try {
+		const { stdout } = await execFileAsync("git", ["status", "--porcelain"], { cwd: worktreePath });
+		if (stdout.trim().length > 0) {
+			return {
+				safe: false,
+				reason: "Worktree has uncommitted git changes",
+				worktreePath,
+				branch,
+				uncommitted: true,
+			};
+		}
+	} catch {}
+
+	let targetBranch = branch;
+	if (!targetBranch) {
+		try {
+			const { stdout } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath });
+			targetBranch = stdout.trim();
+		} catch {}
+	}
+
+	// 2. Check associated GitHub PR status
+	let prNum: number | undefined;
+	let prState: string = "NONE";
+	if (targetBranch) {
+		try {
+			const { stdout } = await execFileAsync("gh", ["pr", "view", targetBranch, "--json", "number,state"], {
+				cwd: worktreePath,
+			});
+			const parsed = JSON.parse(stdout);
+			if (parsed.number && typeof parsed.number === "number") {
+				prNum = parsed.number;
+				prState = String(parsed.state || "").toUpperCase();
+			}
+		} catch {}
+	}
+
+	if (prState === "MERGED" || prState === "CLOSED") {
+		return {
+			safe: true,
+			reason: `Associated PR #${prNum} is ${prState.toLowerCase()}`,
+			worktreePath,
+			branch: targetBranch,
+			prNumber: prNum,
+			prState,
+		};
+	}
+
+	if (prState === "OPEN") {
+		return {
+			safe: false,
+			reason: `Associated PR #${prNum} is still open on GitHub`,
+			worktreePath,
+			branch: targetBranch,
+			prNumber: prNum,
+			prState,
+		};
+	}
+
+	// 3. Check for unpushed commits
+	if (targetBranch) {
+		try {
+			const { stdout: diffOut } = await execFileAsync("git", ["log", "@{u}..HEAD", "--oneline"], {
+				cwd: worktreePath,
+			});
+			if (diffOut.trim().length > 0) {
+				return {
+					safe: false,
+					reason: "Worktree branch has unpushed commits ahead of upstream",
+					worktreePath,
+					branch: targetBranch,
+					unpushed: true,
+					prState,
+				};
+			}
+		} catch {
+			try {
+				const { stdout: logOut } = await execFileAsync("git", ["log", "origin/main..HEAD", "--oneline"], {
+					cwd: worktreePath,
+				});
+				if (logOut.trim().length > 0) {
+					return {
+						safe: false,
+						reason: "Worktree branch has commits not yet merged into origin/main",
+						worktreePath,
+						branch: targetBranch,
+						unpushed: true,
+						prState,
+					};
+				}
+			} catch {}
+		}
+	}
+
+	return {
+		safe: true,
+		reason: "No uncommitted or unpushed changes found",
+		worktreePath,
+		branch: targetBranch,
+		prState,
+	};
+}
+
+/**
+ * Audits child worktrees of the current or specified parent workspace and deletes safe/stray ones.
+ */
+export async function pruneChildWorktrees(
+	options: { parentWorktreeId?: string; cwd?: string; force?: boolean } = {},
+): Promise<{
+	removed: Array<{ id: string; path: string; reason: string }>;
+	retained: Array<{ id: string; path: string; reason: string }>;
+}> {
+	const parentRes = await getCurrentWorktree(options.cwd);
+	const parent = parentRes.result?.worktree;
+	const childIds = parent?.childWorktreeIds || [];
+
+	const removed: Array<{ id: string; path: string; reason: string }> = [];
+	const retained: Array<{ id: string; path: string; reason: string }> = [];
+
+	for (const childId of childIds) {
+		const childRes = await getWorktree(childId, options.cwd);
+		const child = childRes.result?.worktree;
+		const childPath = child?.path || (childId.includes("::") ? childId.split("::")[1] : childId);
+		const branch = child?.branch?.replace(/^refs\/heads\//, "");
+
+		const safety = await checkWorktreeSafety(childPath, branch, options.cwd);
+		if (safety.safe || options.force) {
+			const rmRes = await removeOrcaWorktree(childId, { force: true, cwd: options.cwd });
+			if (rmRes.ok) {
+				removed.push({ id: childId, path: childPath, reason: safety.reason || "Removed successfully" });
+			} else {
+				retained.push({
+					id: childId,
+					path: childPath,
+					reason: rmRes.error?.message || "orca worktree rm failed",
+				});
+			}
+		} else {
+			retained.push({ id: childId, path: childPath, reason: safety.reason });
+		}
+	}
+
+	return { removed, retained };
+}
+
