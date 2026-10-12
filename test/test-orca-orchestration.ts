@@ -409,7 +409,23 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			assert.match(releaseRes.content[0].text, /Worker terminal for dispatch ctx-mock-1 has been successfully released/);
 			console.log("✓ orca_orchestration_release released worker terminal");
 
-			// 8b. Test orca_orchestration_release for worktree
+			// 8b. Test orca_orchestration_release for worktree (safe guard when not forced)
+			const dirtyDir = path.join(tmpDir, "dirty-wt");
+			fs.mkdirSync(dirtyDir, { recursive: true });
+			// Initialize a git repo and make it dirty
+			const { execSync } = require("child_process");
+			execSync("git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b feature-test -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt", { cwd: dirtyDir });
+
+			const wtUnsafeRes = await releaseTool.execute(
+				"call-rel-wt-unsafe",
+				{ worktree: dirtyDir, force: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
+			assert.strictEqual(wtUnsafeRes.isError, true, "Should fail when worktree cannot be verified safely");
+			assert.match(wtUnsafeRes.content[0].text, /Cannot safely delete worktree/);
+
 			const wtReleaseRes = await releaseTool.execute(
 				"call-rel-wt",
 				{ worktree: "/mock/child-1", force: true },
@@ -418,7 +434,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 				mockCtx,
 			);
 			assert.match(wtReleaseRes.content[0].text, /Worktree '\/mock\/child-1' has been successfully removed and released from Orca/);
-			console.log("✓ orca_orchestration_release removed worktree successfully");
+			console.log("✓ orca_orchestration_release safety guard and removal verified");
 
 			// 8c. Test orca_orchestration_release for prune_children
 			const pruneRes = await releaseTool.execute(

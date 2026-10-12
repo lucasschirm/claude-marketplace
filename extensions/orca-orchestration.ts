@@ -1460,7 +1460,13 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				if (target.startsWith("/") || target.startsWith("path:") || target.includes("::")) {
-					const rmRes = await removeOrcaWorktree(target, { cwd: ctx.cwd });
+					const force = parts.includes("--force") || parts.includes("-f");
+					const safety = await checkWorktreeSafety(target, undefined, ctx.cwd);
+					if (!safety.safe && !force) {
+						ctx.ui.notify(`Refusing to remove worktree: ${safety.reason}. Use --force to override.`, "warning");
+						return;
+					}
+					const rmRes = await removeOrcaWorktree(target, { force, cwd: ctx.cwd });
 					if (rmRes.ok) {
 						ctx.ui.notify(`Released and removed worktree ${target}.`, "info");
 					} else {

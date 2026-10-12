@@ -1,5 +1,6 @@
 import { execFile, spawn, execFileSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -240,6 +241,23 @@ export function spawnOrcaCheck(
 }
 
 /**
+ * Normalizes an Orca worktree selector (e.g. "path:/dir", "repo::/dir", "/dir") to an absolute filesystem path.
+ */
+export function normalizeWorktreePath(selector: string, cwd?: string): string {
+	let p = selector.trim();
+	if (p.startsWith("path:")) {
+		p = p.slice(5).trim();
+	} else if (p.includes("::")) {
+		const parts = p.split("::");
+		if (parts[1]) p = parts[1].trim();
+	}
+	if (!path.isAbsolute(p) && cwd) {
+		p = path.resolve(cwd, p);
+	}
+	return p;
+}
+
+/**
  * Removes an Orca worktree and deletes its folder/branch.
  */
 export async function removeOrcaWorktree(
@@ -247,10 +265,23 @@ export async function removeOrcaWorktree(
 	options: { force?: boolean; cwd?: string } = {},
 ): Promise<OrcaEnvelope<{ removed: boolean }>> {
 	const args = ["worktree", "rm", "--worktree", selector];
-	if (options.force !== false) {
+	if (options.force === true) {
 		args.push("--force");
 	}
-	return execOrca<{ removed: boolean }>(args, { cwd: options.cwd });
+	const res = await execOrca<{ removed: boolean }>(args, { cwd: options.cwd });
+	// Fallback to git worktree remove if orca execution failed
+	if (!res.ok) {
+		try {
+			const normPath = normalizeWorktreePath(selector, options.cwd);
+			if (fs.existsSync(normPath)) {
+				const gitArgs = ["worktree", "remove", normPath];
+				if (options.force === true) gitArgs.push("--force");
+				await execFileAsync("git", gitArgs, { cwd: options.cwd || process.cwd() });
+				return { ok: true, result: { removed: true } };
+			}
+		} catch {}
+	}
+	return res;
 }
 
 /**
@@ -286,13 +317,15 @@ export async function listWorktrees(
 }
 
 /**
- * Evaluates whether an Orca worktree is safe to delete.
+ * Evaluates whether an Orca worktree is safe to delete. Fails closed on any ambiguity or execution failure.
  */
 export async function checkWorktreeSafety(
-	worktreePath: string,
+	worktreeSelectorOrPath: string,
 	branch?: string,
 	cwd?: string,
 ): Promise<OrcaWorktreeSafetyResult> {
+	const worktreePath = normalizeWorktreePath(worktreeSelectorOrPath, cwd);
+
 	if (!fs.existsSync(worktreePath)) {
 		return {
 			safe: true,
@@ -302,7 +335,7 @@ export async function checkWorktreeSafety(
 		};
 	}
 
-	// 1. Check uncommitted changes
+	// 1. Check uncommitted changes (fail closed on git error)
 	try {
 		const { stdout } = await execFileAsync("git", ["status", "--porcelain"], { cwd: worktreePath });
 		if (stdout.trim().length > 0) {
@@ -314,14 +347,27 @@ export async function checkWorktreeSafety(
 				uncommitted: true,
 			};
 		}
-	} catch {}
+	} catch (err: any) {
+		return {
+			safe: false,
+			reason: `Failed to verify git status: ${err?.message || String(err)}`,
+			worktreePath,
+			branch,
+		};
+	}
 
 	let targetBranch = branch;
 	if (!targetBranch) {
 		try {
 			const { stdout } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath });
 			targetBranch = stdout.trim();
-		} catch {}
+		} catch (err: any) {
+			return {
+				safe: false,
+				reason: `Failed to detect git branch: ${err?.message || String(err)}`,
+				worktreePath,
+			};
+		}
 	}
 
 	// 2. Check associated GitHub PR status
@@ -362,12 +408,16 @@ export async function checkWorktreeSafety(
 		};
 	}
 
-	// 3. Check for unpushed commits
+	// 3. Check for unpushed commits - FAIL CLOSED on ambiguous or errored results
 	if (targetBranch) {
+		let unpushedChecked = false;
+
+		// 3a. Check against tracking upstream if set
 		try {
 			const { stdout: diffOut } = await execFileAsync("git", ["log", "@{u}..HEAD", "--oneline"], {
 				cwd: worktreePath,
 			});
+			unpushedChecked = true;
 			if (diffOut.trim().length > 0) {
 				return {
 					safe: false,
@@ -379,21 +429,70 @@ export async function checkWorktreeSafety(
 				};
 			}
 		} catch {
+			// No upstream configured for branch @{u}
+		}
+
+		// 3b. Check against origin remote branch if origin/<branch> exists
+		if (!unpushedChecked) {
 			try {
-				const { stdout: logOut } = await execFileAsync("git", ["log", "origin/main..HEAD", "--oneline"], {
-					cwd: worktreePath,
-				});
-				if (logOut.trim().length > 0) {
+				const { stdout: remoteBranchOut } = await execFileAsync(
+					"git",
+					["log", `origin/${targetBranch}..HEAD`, "--oneline"],
+					{ cwd: worktreePath },
+				);
+				unpushedChecked = true;
+				if (remoteBranchOut.trim().length > 0) {
 					return {
 						safe: false,
-						reason: "Worktree branch has commits not yet merged into origin/main",
+						reason: `Worktree branch has unpushed commits ahead of origin/${targetBranch}`,
 						worktreePath,
 						branch: targetBranch,
 						unpushed: true,
 						prState,
 					};
 				}
-			} catch {}
+			} catch {
+				// origin/<branch> not present
+			}
+		}
+
+		// 3c. Check against default base branch (origin/main, origin/master, main, master)
+		if (!unpushedChecked) {
+			const candidateBases = ["origin/main", "origin/master", "main", "master"];
+			let foundBase = false;
+			for (const base of candidateBases) {
+				try {
+					await execFileAsync("git", ["rev-parse", "--verify", base], { cwd: worktreePath });
+					const { stdout: baseDiff } = await execFileAsync("git", ["log", `${base}..HEAD`, "--oneline"], {
+						cwd: worktreePath,
+					});
+					foundBase = true;
+					unpushedChecked = true;
+					if (baseDiff.trim().length > 0) {
+						return {
+							safe: false,
+							reason: `Worktree branch has unpushed commits ahead of ${base}`,
+							worktreePath,
+							branch: targetBranch,
+							unpushed: true,
+							prState,
+						};
+					}
+					break;
+				} catch {}
+			}
+
+			if (!foundBase) {
+				// Could not determine base or upstream - fail closed!
+				return {
+					safe: false,
+					reason: "Could not verify if worktree branch has unpushed commits against an upstream or base branch",
+					worktreePath,
+					branch: targetBranch,
+					unpushed: true,
+					prState,
+				};
+			}
 		}
 	}
 
@@ -415,9 +514,15 @@ export async function pruneChildWorktrees(
 	removed: Array<{ id: string; path: string; reason: string }>;
 	retained: Array<{ id: string; path: string; reason: string }>;
 }> {
-	const parentRes = await getCurrentWorktree(options.cwd);
-	const parent = parentRes.result?.worktree;
-	const childIds = parent?.childWorktreeIds || [];
+	let childIds: string[] = [];
+
+	if (options.parentWorktreeId) {
+		const parentRes = await getWorktree(options.parentWorktreeId, options.cwd);
+		childIds = parentRes.result?.worktree?.childWorktreeIds || [];
+	} else {
+		const parentRes = await getCurrentWorktree(options.cwd);
+		childIds = parentRes.result?.worktree?.childWorktreeIds || [];
+	}
 
 	const removed: Array<{ id: string; path: string; reason: string }> = [];
 	const retained: Array<{ id: string; path: string; reason: string }> = [];
@@ -425,8 +530,18 @@ export async function pruneChildWorktrees(
 	for (const childId of childIds) {
 		const childRes = await getWorktree(childId, options.cwd);
 		const child = childRes.result?.worktree;
-		const childPath = child?.path || (childId.includes("::") ? childId.split("::")[1] : childId);
+		const childPath = child?.path || normalizeWorktreePath(childId, options.cwd);
 		const branch = child?.branch?.replace(/^refs\/heads\//, "");
+
+		// Guard against active running workers in the child workspace
+		const isChildActive =
+			child?.workspaceStatus === "running" ||
+			(child as any)?.liveTerminalCount > 0 ||
+			(child as any)?.status === "active";
+		if (isChildActive && !options.force) {
+			retained.push({ id: childId, path: childPath, reason: "Child workspace is currently active" });
+			continue;
+		}
 
 		const safety = await checkWorktreeSafety(childPath, branch, options.cwd);
 		if (safety.safe || options.force) {
