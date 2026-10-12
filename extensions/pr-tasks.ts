@@ -8,13 +8,20 @@ import {
 	replyToReviewThread,
 	resolveReviewThread,
 	applyCodeSuggestion,
-	type GitHubReviewThreadNode,
+	isStaleNodeError,
+	describeGhError,
+	FETCH_TIMEOUT_MS,
+	type GitHubCommentNode,
 } from "./lib/github-review-threads.ts";
 import {
 	PRTasksManager,
 	formatTaskSummary,
 	formatTaskDetail,
 	formatLoopMessage,
+	formatTaskFileLocation,
+	isListedDeadThread,
+	sameReplyBody,
+	toReply,
 	type PRTask,
 } from "./lib/pr-tasks-manager.ts";
 
@@ -54,7 +61,7 @@ class PRTasksDashboardComponent {
 		const statusSummary = `  Total: ${counts.total}  |  ${th.fg("warning", `Open: ${counts.open}`)}  |  ${th.fg(
 			"error",
 			`Blocked: ${counts.blocked}`,
-		)}  |  ${th.fg("success", `Resolved: ${counts.resolved}`)}`;
+		)}  |  ${th.fg("success", `Resolved: ${counts.resolved}`)}  |  ${th.fg("dim", `Stale: ${counts.stale}`)}`;
 		lines.push(truncateToWidth(statusSummary, width));
 		lines.push("");
 
@@ -65,9 +72,10 @@ class PRTasksDashboardComponent {
 				let statusColor = "warning";
 				if (task.status === "RESOLVED") statusColor = "success";
 				if (task.status === "BLOCKED") statusColor = "error";
+				if (task.status === "STALE") statusColor = "dim";
 
 				const statusBadge = th.fg(statusColor as any, `[${task.status}]`);
-				const taskHeader = `  ${statusBadge} Task #${task.conversationId} (${task.file}@${task.line})`;
+				const taskHeader = `  ${statusBadge} Task #${task.conversationId} (${formatTaskFileLocation(task)})`;
 				lines.push(truncateToWidth(taskHeader, width));
 
 				const snippet = task.message.split("\n")[0] || "";
@@ -97,11 +105,14 @@ export default function (pi: ExtensionAPI) {
 	}
 	(globalThis as any)[GLOBAL_GUARD_KEY] = true;
 
-	const manager = new PRTasksManager();
+	// (the reopen grace can be lowered for tests that re-open a conversation right after resolving it)
+	const graceEnv = Number.parseInt(process.env.PI_PR_TASKS_REOPEN_GRACE_MS ?? "", 10);
+	const manager = new PRTasksManager(Number.isNaN(graceEnv) ? {} : { reopenGraceMs: graceEnv });
 	let lastUIContext: ExtensionUIContext | undefined;
 	let lastCwd: string = process.cwd();
-	let isSyncing = false;
+	let syncAllInFlight: { run: Promise<void>; cwd: string; explicitPr?: number } | undefined;
 	let lastSettleNudgeTime = 0;
+	let sessionId = 0; // bumped on shutdown, so a sync still in flight then is dropped
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
 		const targetUI = ui || lastUIContext;
@@ -109,9 +120,10 @@ export default function (pi: ExtensionAPI) {
 
 		const counts = manager.getCounts();
 		if (counts.total > 0) {
+			const staleNote = counts.stale > 0 ? ` / ${counts.stale} stale` : "";
 			targetUI.setStatus(
 				"pr_tasks",
-				`PR Tasks: ${counts.open} open / ${counts.blocked} blocked / ${counts.resolved} resolved`,
+				`PR Tasks: ${counts.open} open / ${counts.blocked} blocked / ${counts.resolved} resolved${staleNote}`,
 			);
 		} else {
 			targetUI.setStatus("pr_tasks", undefined);
@@ -136,7 +148,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function detectCurrentBranchPR(cwd: string): Promise<number | undefined> {
 		try {
-			const { stdout } = await execFileAsync("gh", ["pr", "view", "--json", "number"], { cwd });
+			const { stdout } = await execFileAsync("gh", ["pr", "view", "--json", "number"], { cwd, timeout: FETCH_TIMEOUT_MS });
 			const parsed = JSON.parse(stdout);
 			if (parsed?.number) return parsed.number;
 		} catch {}
@@ -145,47 +157,476 @@ export default function (pi: ExtensionAPI) {
 
 	async function getTargetPRNumbers(cwd: string, explicitPr?: number): Promise<number[]> {
 		if (explicitPr !== undefined) return [explicitPr];
+		// PRs with open tasks stay synced even when no longer observed (e.g. observe-pr stopped after
+		// a merge), so their tasks can't keep nudging from cached state
+		// (STALE ones too: they recover only through a sync that lists their thread again)
+		const tracked = manager
+			.getAllTasks()
+			.filter((t) => t.status !== "RESOLVED")
+			.map((t) => t.prNumber);
 		const observed = getObservedPRNumbers();
-		if (observed.length > 0) return observed;
-
-		const detected = await detectCurrentBranchPR(cwd);
-		if (detected) return [detected];
-		return [];
+		const current = observed.length > 0 ? observed : [await detectCurrentBranchPR(cwd)].filter((n): n is number => n !== undefined);
+		return [...new Set([...current, ...tracked])];
 	}
 
 	async function syncPR(prNumber: number, cwd: string): Promise<void> {
 		try {
-			const threads = await fetchReviewThreads(prNumber, cwd);
-			const { newTasks, unblockedTasks } = manager.syncFromGitHubThreads(prNumber, threads);
-
-			// Check for unblocked tasks that received user replies
-			for (const { task, latestReply } of unblockedTasks) {
-				const unblockMsg = `The task ${task.conversationId} you blocked received a reply from the user. use the **pr_task_detail** if you need more details about the task. ${latestReply.body}`;
-				sendAgentMessage(unblockMsg);
-			}
-
-			updateStatusUI();
+			await syncPROrThrow(prNumber, cwd);
 		} catch (err) {
-			console.error(`[pr_tasks] Failed to sync review threads for PR ${prNumber}:`, err);
+			console.error(`[pr_tasks] Failed to sync review threads for PR ${prNumber}: ${describeGhError(err)}`);
 		}
 	}
 
-	async function syncAllPRs(cwd: string, explicitPr?: number): Promise<void> {
-		if (isSyncing) return;
-		isSyncing = true;
+	async function syncPROrThrow(prNumber: number, cwd: string): Promise<void> {
+		// Syncs overlap (tools, turn_end, observe-pr polls): the tick lets the manager order them
+		const fetchedAt = manager.beginFetch();
+		const session = sessionId;
+		const threads = await fetchReviewThreads(prNumber, cwd);
+		// (thrown, so an action waiting on this refresh doesn't go on from discarded state)
+		if (session !== sessionId) throw new Error("the session shut down while syncing");
+		const { unblockedTasks, repostedTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt);
+
+		// Check for unblocked tasks that received user replies
+		for (const { task, latestReply } of unblockedTasks) {
+			const unblockMsg = `The task ${task.conversationId} you blocked received a reply from the user. use the **pr_task_detail** if you need more details about the task. ${latestReply.body}`;
+			// (dropped if the action held up meanwhile showed the agent that reply)
+			noticeAfterActions(task, unblockMsg, () => Boolean(task.seenReplies?.includes(latestReply.id)));
+		}
+		for (const task of repostedTasks) {
+			noticeAfterActions(
+				task,
+				`The task ${task.conversationId} you blocked was re-posted by the reviewer, so it is open again. use the **pr_task_detail** to see the comment.`,
+			);
+		}
+
+		updateStatusUI();
+	}
+
+	const taskLocks = new WeakMap<PRTask, Promise<unknown>>();
+	const heldNotices = new WeakMap<PRTask, Array<{ message: string; shown?: () => boolean }>>();
+
+	/**
+	 * Sends a notice about a task, holding it while an action on the task is in flight (e.g. the
+	 * reply of a /tasks resolve unblocking it): it is sent once the action is done, unless the task
+	 * ended up resolved or `shown` reports the action already showed the agent what it is about.
+	 */
+	function noticeAfterActions(task: PRTask, message: string, shown?: () => boolean): void {
+		if (taskLocks.has(task)) heldNotices.set(task, [...(heldNotices.get(task) || []), { message, shown }]);
+		else sendAgentMessage(message);
+	}
+	let suggestionEdits: Promise<void> = Promise.resolve();
+
+	/**
+	 * Runs actions on one task one at a time, so overlapping calls (parallel tool calls, or a
+	 * /tasks command during the agent's call) see each other's replies instead of both posting.
+	 */
+	async function withTaskLock<T>(task: PRTask, fn: () => Promise<T>): Promise<T> {
+		const run = (taskLocks.get(task) ?? Promise.resolve()).catch(() => {}).then(fn);
+		taskLocks.set(task, run);
 		try {
+			return await run;
+		} finally {
+			if (taskLocks.get(task) === run) {
+				taskLocks.delete(task);
+				const held = heldNotices.get(task) || [];
+				heldNotices.delete(task);
+				// (notices that a task is open again, so only while it still is)
+				if (task.status === "UNRESOLVED") {
+					for (const { message, shown } of held) if (!shown?.()) sendAgentMessage(message);
+				}
+			}
+		}
+	}
+
+	// gone: a resolved task whose thread is no longer listed (e.g. a STALE task the agent cleared)
+	type UpstreamState = "already_resolved" | "stale" | "gone";
+	type ThreadReplyOutcome = { kind: "replied"; comment: GitHubCommentNode } | { kind: UpstreamState };
+
+	/**
+	 * Source-of-truth check before acting on a task: re-syncs its PR so a conversation resolved
+	 * upstream, or a replaced thread node (e.g. after a PR merge), is reflected in the task.
+	 * Throws when GitHub can't be checked, so nothing is acted on from cached state.
+	 *
+	 * A task STALE on a thread ID GitHub rejected but still lists is not reported as "stale":
+	 * acting on it is a real attempt, which re-syncs and follows a replacement node if one is
+	 * listed by then (see withCurrentThread).
+	 */
+	async function refreshTask(task: PRTask, cwd: string): Promise<UpstreamState | undefined> {
+		try {
+			await syncPROrThrow(task.prNumber, cwd);
+		} catch (err) {
+			throw new Error(`could not check the conversation on GitHub: ${describeGhError(err)}`);
+		}
+		// (checked first: even /tasks reply, which may post to a resolved conversation, can't post there)
+		if (task.status === "RESOLVED" && !task.isListed) return "gone";
+		if (task.isResolvedUpstream) return "already_resolved";
+		if (task.status === "STALE" && !isListedDeadThread(task)) return "stale";
+		return undefined;
+	}
+
+	/**
+	 * Whether a refreshed task's upstream state rules out posting to its thread.
+	 */
+	function blocksPosting(state: UpstreamState, allowResolved = false): boolean {
+		return state === "stale" || state === "gone" || (state === "already_resolved" && !allowResolved);
+	}
+
+	type ThreadAttempt<T> = { ok: true; value: T } | { ok: false; state: UpstreamState | "dead"; error: unknown };
+
+	/**
+	 * Runs a mutation against the task's current thread ID. If GitHub rejects the ID as
+	 * unresolvable, re-syncs (preferring a live node for the same conversation) and retries once on
+	 * the re-linked thread. "dead" means GitHub still rejects the only thread the task can use.
+	 */
+	async function withCurrentThread<T>(
+		task: PRTask,
+		cwd: string,
+		op: (threadId: string) => Promise<T>,
+		{ allowResolved = false } = {},
+	): Promise<ThreadAttempt<T>> {
+		const staleThreadId = task.threadId;
+		let lastError: unknown;
+		const attempt = async (threadId: string): Promise<ThreadAttempt<T>> => {
+			const value = await op(threadId);
+			manager.threadAccepted(task, threadId);
+			return { ok: true, value };
+		};
+		try {
+			return await attempt(staleThreadId);
+		} catch (err) {
+			if (!isStaleNodeError(err)) throw err;
+			lastError = err;
+		}
+
+		// Flag the rejected ID first, so a re-sync that still lists it prefers the live node
+		manager.markDeadThread(task);
+		const upstream = await refreshTask(task, cwd);
+		if (upstream && blocksPosting(upstream, allowResolved)) return { ok: false, state: upstream, error: lastError };
+		if (task.threadId !== staleThreadId) {
+			try {
+				return await attempt(task.threadId);
+			} catch (err) {
+				if (!isStaleNodeError(err)) throw err;
+				lastError = err;
+			}
+		}
+		return { ok: false, state: "dead", error: lastError };
+	}
+
+	/**
+	 * Marks a task STALE because GitHub keeps rejecting its thread ID (a resolved task stays resolved).
+	 */
+	function markThreadDead(task: PRTask, error: unknown): UpstreamState {
+		if (task.status === "RESOLVED") return "gone";
+		manager.markStale(task, `Review thread ${task.threadId} no longer resolves on GitHub (${describeGhError(error)}).`, {
+			deadThread: true,
+		});
+		return "stale";
+	}
+
+	/**
+	 * Replies to the task's review thread, following a replaced thread node (see withCurrentThread)
+	 * and marking the task STALE when no usable thread is left. Call `refreshTask` first so upstream
+	 * state is checked before posting. `own: false` marks a reply written by the user (via
+	 * /tasks reply), which may unblock the task.
+	 */
+	async function replyToTaskThread(
+		task: PRTask,
+		body: string,
+		cwd: string,
+		{ allowResolved = false, own = true } = {},
+	): Promise<ThreadReplyOutcome> {
+		// A sync finishing before the reply call returns must not take the reply for a user's
+		const forget = own ? manager.expectOwnReply(task, body) : undefined;
+		let attempt: ThreadAttempt<GitHubCommentNode>;
+		try {
+			attempt = await withCurrentThread(task, cwd, (threadId) => replyToReviewThread(threadId, body, cwd), {
+				allowResolved,
+			});
+		} finally {
+			forget?.();
+		}
+		if (!attempt.ok) {
+			return { kind: attempt.state === "dead" ? markThreadDead(task, attempt.error) : attempt.state };
+		}
+
+		const comment = attempt.value;
+		// The agent's own replies are recorded so they never count as a user reply that unblocks the task
+		if (own) manager.addReply(task, toReply(comment));
+		return { kind: "replied", comment };
+	}
+
+	/**
+	 * Resolves the task's thread on GitHub (after its reply was posted) and marks the task resolved,
+	 * following a replaced thread node (see withCurrentThread).
+	 */
+	async function resolveTaskThread(task: PRTask, cwd: string): Promise<void> {
+		const alreadyPosted = " (the reply was already posted)";
+		let attempt: ThreadAttempt<boolean>;
+		try {
+			attempt = await withCurrentThread(task, cwd, (threadId) => resolveReviewThread(threadId, cwd));
+		} catch (err) {
+			throw new Error(`${describeGhError(err)}${alreadyPosted}`);
+		}
+
+		if (!attempt.ok) {
+			const state = attempt.state === "dead" ? markThreadDead(task, attempt.error) : attempt.state;
+			if (state === "already_resolved" || state === "gone") {
+				// (the sync already recorded GitHub's resolve, or the task was resolved locally meanwhile)
+				if (task.status !== "RESOLVED") manager.markResolved(task);
+				return;
+			}
+			throw new Error(`its review thread no longer exists on GitHub${alreadyPosted}`);
+		}
+		if (!attempt.value) throw new Error(`GitHub did not mark the review thread as resolved${alreadyPosted}`);
+		manager.markResolved(task, { upstream: true });
+	}
+
+	type ResolveResult = { kind: "resolved" | "skipped" | "error"; text: string };
+
+	/**
+	 * The resolve flow shared by pr_task_resolve and /tasks resolve: upstream check, optional code
+	 * suggestion, reply, and thread resolve. Retries are safe: a suggestion is applied to the file
+	 * once, and when the thread's latest reply already is this message (an earlier call posted it,
+	 * then resolving failed) only the resolve is retried.
+	 */
+	async function resolveTask(
+		task: PRTask,
+		message: string,
+		cwd: string,
+		options: { acceptSuggestion?: boolean; own?: boolean } = {},
+	): Promise<ResolveResult> {
+		return withTaskLock(task, () => resolveTaskLocked(task, message, cwd, options.acceptSuggestion ?? false, options.own ?? true));
+	}
+
+	/**
+	 * `own: false` marks the reply as the user's (/tasks resolve), which may unblock the task if
+	 * resolving it then fails.
+	 */
+	async function resolveTaskLocked(
+		task: PRTask,
+		message: string,
+		cwd: string,
+		acceptSuggestion: boolean,
+		own: boolean,
+	): Promise<ResolveResult> {
+		let appliedNow = false;
+		const replyBodyFor = (accept: boolean) =>
+			accept && !message.toLowerCase().includes("suggestion") ? `${message}\n\nApplied suggested changes.` : message;
+		const replyBody = replyBodyFor(acceptSuggestion);
+
+		// Check GitHub before touching the code: the conversation may already be closed upstream
+		const wasStale = task.status === "STALE";
+		const upstream = await refreshTask(task, cwd);
+		// (an earlier call may already have written the suggestion to disk)
+		const notApplied =
+			task.appliedSuggestion !== undefined
+				? "the suggestion had already been applied to the code by an earlier call"
+				: "the suggestion was not applied";
+		if (acceptSuggestion && upstream !== "already_resolved" && task.status === "STALE") {
+			// Its thread is likely gone, so the code change might have no conversation to acknowledge it
+			return {
+				kind: "error",
+				text: `Conversation ${task.conversationId} is STALE (${task.staleReason}); ${notApplied}. Resolve it without accept_suggestion to retry its thread or clear it.`,
+			};
+		}
+		if (upstream === "stale" && wasStale) {
+			// Resolving a task already known to be STALE clears it: there is no thread left to post to.
+			// (One whose rejected thread GitHub still lists gets a real attempt instead, and is never
+			// cleared while listed, in case the thread does exist.)
+			// (accept_suggestion was refused above)
+			manager.markResolved(task);
+			return {
+				kind: "resolved",
+				text: `Conversation ${task.conversationId} has no review thread on GitHub anymore, so nothing was posted; it is now marked as resolved.`,
+			};
+		}
+		if (upstream) {
+			const skipped = acceptSuggestion ? `No reply was posted, and ${notApplied}.` : "No reply was posted.";
+			return { kind: "skipped", text: describeUpstreamState(task, upstream, skipped) };
+		}
+
+		// Validated on the refreshed task: the reviewer may have added or removed the suggestion
+		if (acceptSuggestion && (!task.hasSuggestion || task.suggestion === undefined)) {
+			return {
+				kind: "error",
+				text: `Invalid resolution: Conversation ${task.conversationId} does not contain any code suggestion to accept.`,
+			};
+		}
+
+		// The exact reply an earlier resolve posted is still the thread's latest: only the resolve failed
+		const lastReply = task.replies[task.replies.length - 1];
+		// (matched by author and body, which survive GitHub re-issuing comment IDs for a replaced thread)
+		const posted = task.resolveReply;
+		const isRetry =
+			posted !== undefined &&
+			lastReply !== undefined &&
+			lastReply.author === posted.author &&
+			// (either form: a retry may drop or add accept_suggestion once the suggestion is on disk)
+			[replyBodyFor(true), replyBodyFor(false)].some((body) => sameReplyBody(lastReply.body, body)) &&
+			(!acceptSuggestion || task.appliedSuggestion === task.suggestion);
+
+		// (a retry too: the comment or its replies may have changed since the earlier call)
+		if (own && task.seenMessage !== undefined && !sameReplyBody(task.seenMessage, task.message)) {
+			// The reviewer edited the comment since the agent read it: show the new text first
+			manager.markShown(task);
+			return {
+				kind: "error",
+				text: `Conversation ${task.conversationId} was not resolved: its comment changed on GitHub since you last saw it. It now reads:\n${task.message}\nIf your resolution still fits, call **pr_task_resolve** again.`,
+			};
+		}
+		if (own) {
+			// Replies the agent hasn't seen may change the resolution: show them before closing the conversation
+			const unseen = showUnseenReplies(task, "resolved", "pr_task_resolve", "change your resolution");
+			if (unseen) return { kind: "error", text: unseen };
+		}
+
+		if (!isRetry) {
+			if (acceptSuggestion && task.appliedSuggestion !== task.suggestion) {
+				if (task.appliedSuggestion !== undefined) {
+					// Its lines now hold the earlier suggestion: applying the new one by line number could clobber code
+					return {
+						kind: "error",
+						text: `The code suggestion of conversation ${task.conversationId} changed on GitHub after an earlier version was already applied to the code; nothing more was applied. Update the code manually, then resolve without accept_suggestion.`,
+					};
+				}
+				if (task.isOutdated || task.isBaseSide || task.isFileLevel) {
+					const why = task.isOutdated
+						? "is outdated: the code changed since the comment"
+						: task.isBaseSide
+							? "is on the base side of the diff (old or deleted lines)"
+							: "is on the whole file, not on lines";
+					return {
+						kind: "error",
+						text: `Conversation ${task.conversationId} ${why}, so its suggestion can't be applied by line number. Apply it manually, then resolve without accept_suggestion.`,
+					};
+				}
+				// (the suggestion is part of the comment: the comment as last shown must still be current)
+				if (task.seenMessage === undefined || !sameReplyBody(task.seenMessage, task.message)) {
+					// Never apply code the agent hasn't been shown; showing it now makes a retry valid
+					const lead =
+						task.seenMessage === undefined
+							? `You haven't been shown the code suggestion of conversation ${task.conversationId} yet; nothing was applied.`
+							: `The code suggestion of conversation ${task.conversationId} changed on GitHub since you last saw it; nothing was applied.`;
+					manager.markShown(task);
+					return {
+						kind: "error",
+						text: `${lead} It is:\n\`\`\`\n${task.suggestion}\n\`\`\`\nCall again to apply it.`,
+					};
+				}
+				// (captured as checked: a sync while the edit waits may change the task)
+				const { suggestion, file, line } = task;
+				const startLine = task.startLine || line;
+				try {
+					// One edit at a time: two suggestions for the same file must not overwrite each other
+					const edit = suggestionEdits.then(() => applyCodeSuggestion(file, startLine, line, suggestion, cwd));
+					suggestionEdits = edit.catch(() => {});
+					await edit;
+				} catch (err: any) {
+					return { kind: "error", text: `Failed to apply code suggestion to ${task.file}: ${describeGhError(err)}` };
+				}
+				task.appliedSuggestion = suggestion;
+				appliedNow = true;
+			}
+
+			let outcome: ThreadReplyOutcome;
+			try {
+				outcome = await replyToTaskThread(task, replyBody, cwd, { own });
+			} catch (err) {
+				const note = acceptSuggestion ? " (the suggestion was already applied to the code; a retry won't apply it again)" : "";
+				throw new Error(`${describeGhError(err)}${note}`);
+			}
+			if (outcome.kind !== "replied") {
+				const suggestionNote = acceptSuggestion
+					? " The suggestion was already applied to the code; check whether that change should be kept."
+					: "";
+				return {
+					// The local code change no longer has a conversation to acknowledge it
+					kind: acceptSuggestion ? "error" : "skipped",
+					text: describeUpstreamState(task, outcome.kind, `No reply was posted.${suggestionNote}`),
+				};
+			}
+			task.resolveReply = { author: toReply(outcome.comment).author };
+		}
+
+		await resolveTaskThread(task, cwd);
+		const retryNote = isRetry ? " (the reply had already been posted by an earlier call)" : "";
+		// An applied suggestion is never applied again (its lines no longer hold the original code)
+		const suggestionNote = !acceptSuggestion
+			? ""
+			: appliedNow
+				? " Applied suggestion to code."
+				: " The suggestion had already been applied to the code by an earlier call, so it was not applied again; check the code still has it.";
+		return { kind: "resolved", text: `Conversation ${task.conversationId} resolved successfully${retryNote}.${suggestionNote}` };
+	}
+
+	/**
+	 * When the task has replies the agent hasn't been shown, shows them (marking them seen) and
+	 * returns the text declining the action, which calling again then performs.
+	 */
+	function showUnseenReplies(task: PRTask, action: string, tool: string, effect: string): string | undefined {
+		const unseen = manager.getUnseenReplies(task);
+		if (unseen.length === 0) return undefined;
+		// (only the replies: the suggestion isn't shown here, so it must not count as seen)
+		manager.markRepliesShown(task, unseen);
+		const shown = unseen.map((r) => `- ${r.author}: ${r.body}`).join("\n");
+		return `Conversation ${task.conversationId} was not ${action}: it has replies you haven't seen yet:\n${shown}\nIf they don't ${effect}, call **${tool}** again.`;
+	}
+
+	function describeUpstreamState(task: PRTask, state: UpstreamState, skipped: string): string {
+		if (state === "gone") {
+			return `Conversation ${task.conversationId} is resolved and has no review thread on GitHub anymore. ${skipped}`;
+		}
+		if (state === "already_resolved") {
+			return `Conversation ${task.conversationId} is already resolved. ${skipped}`;
+		}
+		return (
+			`Conversation ${task.conversationId} is now marked as STALE: its review thread no longer exists on GitHub ` +
+			`(replaced or deleted, e.g. after the PR was merged). ${skipped} It no longer counts as an open task. ` +
+			`Details: ${task.staleReason}`
+		);
+	}
+
+	/**
+	 * Finds a task, syncing the observed/current PRs once if it isn't tracked yet.
+	 */
+	async function findTaskSyncing(id: string | number, cwd: string): Promise<PRTask | undefined> {
+		const found = manager.findTask(id);
+		if (found) return found;
+		// (fresh: an in-flight sync may have fetched before the conversation existed)
+		await syncAllPRs(cwd, undefined, { fresh: true });
+		return manager.findTask(id);
+	}
+
+	async function syncAllPRs(cwd: string, explicitPr?: number, { fresh = false } = {}): Promise<void> {
+		// Concurrent callers wait for the running sync instead of returning before it finishes, and
+		// reuse it when it covers the same PRs (unless they need a fetch started after their call)
+		for (let inFlight = syncAllInFlight; inFlight; inFlight = syncAllInFlight) {
+			await inFlight.run;
+			if (!fresh && inFlight.cwd === cwd && inFlight.explicitPr === explicitPr) return;
+		}
+		const run = (async () => {
 			const prs = await getTargetPRNumbers(cwd, explicitPr);
 			for (const pr of prs) {
 				await syncPR(pr, cwd);
 			}
+		})();
+		const entry = { run, cwd, explicitPr };
+		syncAllInFlight = entry;
+		try {
+			await run;
 		} finally {
-			isSyncing = false;
+			if (syncAllInFlight === entry) syncAllInFlight = undefined;
 		}
 	}
 
-	// Register integration hook for observe-pr
+	// Register integration hooks for observe-pr
 	(globalThis as any).__PI_ON_PR_POLL__ = async (prNumber: number, cwd: string) => {
 		await syncPR(prNumber, cwd);
+	};
+	// A final sync when a PR is merged or closed, so its tasks reflect GitHub (merges can replace threads)
+	(globalThis as any).__PI_ON_PR_CLOSED__ = async (prNumber: number, _state: string, cwd?: string) => {
+		await syncPR(prNumber, cwd || lastCwd);
 	};
 
 	pi.on("session_start", async (_evt, ctx) => {
@@ -223,6 +664,7 @@ export default function (pi: ExtensionAPI) {
 			const loopMessage = formatLoopMessage(unresolvedTasks, totalTasks);
 			try {
 				pi.sendUserMessage(loopMessage, { deliverAs: "followUp" });
+				for (const t of unresolvedTasks) manager.markShown(t);
 			} catch (err) {
 				console.error("[pr_tasks] Failed to send settle loop message:", err);
 			}
@@ -255,6 +697,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_ON_PR_POLL__;
+		delete (globalThis as any).__PI_ON_PR_CLOSED__;
+		sessionId++;
+		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
 		manager.clear();
 	});
 
@@ -263,7 +708,7 @@ export default function (pi: ExtensionAPI) {
 		name: "pr_tasks_list",
 		label: "List PR Tasks",
 		description:
-			"Lists PR review conversation tasks. By default lists only open/unresolved tasks. Set show_all to true to include resolved tasks.",
+			"Lists PR review conversation tasks. By default lists only unresolved, blocked, and stale tasks. Set show_all to true to include resolved tasks.",
 		parameters: Type.Object({
 			pr_number: Type.Optional(
 				Type.Union([Type.Number(), Type.String()], {
@@ -273,7 +718,7 @@ export default function (pi: ExtensionAPI) {
 			show_all: Type.Optional(
 				Type.Boolean({
 					description:
-						"If true, shows all tasks including resolved ones. By default only unresolved/blocked tasks are shown.",
+						"If true, shows all tasks including resolved ones. By default only unresolved/blocked/stale tasks are shown.",
 				}),
 			),
 		}),
@@ -294,9 +739,10 @@ export default function (pi: ExtensionAPI) {
 
 			const showAll = Boolean((params as any)?.show_all ?? (params as any)?.showAll);
 			const allTasks = manager.getAllTasks(prNum);
-			const filteredTasks = showAll ? allTasks : manager.getOpenTasks(prNum);
+			const filteredTasks = showAll ? allTasks : manager.getVisibleTasks(prNum);
 
 			const formatted = formatTaskSummary(filteredTasks, allTasks.length);
+			for (const t of filteredTasks) manager.markShown(t);
 			return {
 				content: [{ type: "text", text: formatted }],
 			};
@@ -334,18 +780,14 @@ export default function (pi: ExtensionAPI) {
 				(params as any)?.accept_suggestion ?? (params as any)?.acceptSuggestion,
 			);
 
-			if (!rawId) {
+			if (!rawId || !message) {
 				return {
-					content: [{ type: "text", text: "Error: conversation_id is required." }],
+					content: [{ type: "text", text: "Error: conversation_id and message are required." }],
 					isError: true,
 				};
 			}
 
-			let task = manager.findTask(rawId);
-			if (!task) {
-				await syncAllPRs(ctx.cwd);
-				task = manager.findTask(rawId);
-			}
+			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
 				return {
@@ -354,69 +796,19 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			// Validate code suggestion requirement
-			if (acceptSuggestion) {
-				if (!task.hasSuggestion || task.suggestion === undefined) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Invalid resolution: Conversation ${task.conversationId} does not contain any code suggestion to accept.`,
-							},
-						],
-						isError: true,
-					};
-				}
-
-				try {
-					await applyCodeSuggestion(
-						task.file,
-						task.startLine || task.line,
-						task.line,
-						task.suggestion,
-						ctx.cwd,
-					);
-				} catch (err: any) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Failed to apply code suggestion to ${task.file}: ${err?.message || err}`,
-							},
-						],
-						isError: true,
-					};
-				}
-			}
-
-			// Send reply and resolve thread on GitHub
 			try {
-				let replyBody = message;
-				if (acceptSuggestion && !message.toLowerCase().includes("suggestion")) {
-					replyBody = `${message}\n\nApplied suggested changes.`;
-				}
-
-				await replyToReviewThread(task.threadId, replyBody, ctx.cwd);
-				await resolveReviewThread(task.threadId, ctx.cwd);
-
-				manager.markResolved(task.threadId);
+				const result = await resolveTask(task, message, ctx.cwd, { acceptSuggestion });
 				updateStatusUI(ctx.ui);
-
-				const suggestionNote = acceptSuggestion ? " Applied suggestion to code." : "";
 				return {
-					content: [
-						{
-							type: "text",
-							text: `Conversation ${task.conversationId} resolved successfully.${suggestionNote}`,
-						},
-					],
+					content: [{ type: "text", text: result.text }],
+					...(result.kind === "error" ? { isError: true } : {}),
 				};
 			} catch (err: any) {
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Error resolving conversation ${task.conversationId}: ${err?.message || err}`,
+							text: `Error resolving conversation ${task.conversationId}: ${describeGhError(err)}`,
 						},
 					],
 					isError: true,
@@ -441,11 +833,7 @@ export default function (pi: ExtensionAPI) {
 			lastCwd = ctx.cwd || lastCwd;
 
 			const rawId = (params as any)?.conversation_id ?? (params as any)?.conversationId;
-			let task = manager.findTask(rawId);
-			if (!task) {
-				await syncAllPRs(ctx.cwd);
-				task = manager.findTask(rawId);
-			}
+			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
 				return {
@@ -455,6 +843,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const formatted = formatTaskDetail(task);
+			manager.markShown(task, task.replies);
 			return {
 				content: [{ type: "text", text: formatted }],
 			};
@@ -490,11 +879,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			let task = manager.findTask(rawId);
-			if (!task) {
-				await syncAllPRs(ctx.cwd);
-				task = manager.findTask(rawId);
-			}
+			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
 				return {
@@ -503,25 +888,40 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			try {
-				const replyComment = await replyToReviewThread(task.threadId, reason, ctx.cwd);
-				manager.markBlocked(task.threadId, reason, replyComment.id);
+			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+			const upstreamResult = (state: UpstreamState, note: string) => {
 				updateStatusUI(ctx.ui);
+				return text(describeUpstreamState(task, state, note));
+			};
 
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Conversation ${task.conversationId} is now marked as Blocked. When a user replies to this conversation, it will be automatically unblocked.`,
-						},
-					],
-				};
+			try {
+				return await withTaskLock(task, async () => {
+					const upstream = await refreshTask(task, ctx.cwd);
+					if (upstream && blocksPosting(upstream)) return upstreamResult(upstream, "The blocked reason was not posted.");
+
+					// Those replies may already answer the question: show them instead of blocking
+					const unseen = showUnseenReplies(task, "blocked", "pr_task_blocked", "answer your question");
+					if (unseen) return { ...text(unseen), isError: true };
+
+					const outcome = await replyToTaskThread(task, reason, ctx.cwd);
+					if (outcome.kind !== "replied") return upstreamResult(outcome.kind, "The blocked reason was not posted.");
+					if (task.status === "RESOLVED" || task.status === "STALE") {
+						// A sync while the reply was being posted closed the conversation: don't override that
+						const state = task.status === "RESOLVED" ? "already_resolved" : "stale";
+						return upstreamResult(state, "The blocked reason was posted, but the task was not marked as blocked.");
+					}
+					manager.markBlocked(task, reason);
+					updateStatusUI(ctx.ui);
+					return text(
+						`Conversation ${task.conversationId} is now marked as Blocked. When a user replies to this conversation, it will be automatically unblocked.`,
+					);
+				});
 			} catch (err: any) {
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Error marking conversation ${task.conversationId} as blocked: ${err?.message || err}`,
+							text: `Error marking conversation ${task.conversationId} as blocked: ${describeGhError(err)}`,
 						},
 					],
 					isError: true,
@@ -539,8 +939,11 @@ export default function (pi: ExtensionAPI) {
 			const parts = trimmed.split(/\s+/);
 			const sub = parts[0]?.toLowerCase();
 
-			await syncAllPRs(ctx.cwd);
-			updateStatusUI(ctx.ui);
+			// resolve and reply refresh their task's PR themselves, so only sync up front for the rest
+			if (sub !== "resolve" && sub !== "reply") {
+				await syncAllPRs(ctx.cwd);
+				updateStatusUI(ctx.ui);
+			}
 
 			if (!sub || sub === "list") {
 				const showAll = parts[1]?.toLowerCase() === "all";
@@ -550,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 					});
 				} else {
 					const allTasks = manager.getAllTasks();
-					const tasks = showAll ? allTasks : manager.getOpenTasks();
+					const tasks = showAll ? allTasks : manager.getVisibleTasks();
 					const formatted = formatTaskSummary(tasks, allTasks.length);
 					ctx.ui.notify(formatted, "info");
 				}
@@ -582,20 +985,19 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				const task = manager.findTask(taskId);
+				const task = await findTaskSyncing(taskId, ctx.cwd);
 				if (!task) {
 					ctx.ui.notify(`Task #${taskId} not found.`, "warning");
 					return;
 				}
 
 				try {
-					await replyToReviewThread(task.threadId, reason, ctx.cwd);
-					await resolveReviewThread(task.threadId, ctx.cwd);
-					manager.markResolved(task.threadId);
+					const result = await resolveTask(task, reason, ctx.cwd, { own: false });
 					updateStatusUI(ctx.ui);
-					ctx.ui.notify(`Task #${task.conversationId} resolved successfully.`, "info");
+					const level = result.kind === "resolved" ? "info" : result.kind === "skipped" ? "warning" : "error";
+					ctx.ui.notify(result.text, level);
 				} catch (err: any) {
-					ctx.ui.notify(`Failed to resolve task #${taskId}: ${err?.message || err}`, "error");
+					ctx.ui.notify(`Failed to resolve task #${taskId}: ${describeGhError(err)}`, "error");
 				}
 				return;
 			}
@@ -610,19 +1012,30 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				const task = manager.findTask(taskId);
+				const task = await findTaskSyncing(taskId, ctx.cwd);
 				if (!task) {
 					ctx.ui.notify(`Task #${taskId} not found.`, "warning");
 					return;
 				}
 
 				try {
-					await replyToReviewThread(task.threadId, replyMsg, ctx.cwd);
-					await syncAllPRs(ctx.cwd);
+					// Replying to a resolved conversation is fine; only a stale thread is skipped. This is the
+					// user writing, so the reply can unblock the task.
+					const upstream = await refreshTask(task, ctx.cwd);
+					const outcome: ThreadReplyOutcome = upstream && blocksPosting(upstream, true)
+						? { kind: upstream }
+						: await replyToTaskThread(task, replyMsg, ctx.cwd, { allowResolved: true, own: false });
+					if (outcome.kind !== "replied") {
+						updateStatusUI(ctx.ui);
+						ctx.ui.notify(describeUpstreamState(task, outcome.kind, "No reply was posted."), "warning");
+						return;
+					}
+					// Pick up the reply now, so a BLOCKED task unblocks and the agent is notified right away
+					await syncPR(task.prNumber, ctx.cwd);
 					updateStatusUI(ctx.ui);
 					ctx.ui.notify(`Reply posted to task #${task.conversationId}.`, "info");
 				} catch (err: any) {
-					ctx.ui.notify(`Failed to reply to task #${taskId}: ${err?.message || err}`, "error");
+					ctx.ui.notify(`Failed to reply to task #${taskId}: ${describeGhError(err)}`, "error");
 				}
 				return;
 			}
