@@ -1343,16 +1343,19 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				meta.turnCompletedAt = Date.now();
 				meta.finishedAt = Date.now();
 				totalCompleted++;
+				persistSessionMeta(meta, true);
 
 				// Detect PR if worktree was created
 				let prSuffix = " No pullrequest was created";
-				const prNum = await detectPullRequest(targetCwd, task.worktreeBranch);
-				if (prNum) {
-					meta.detectedPrNumber = prNum;
-					prSuffix = ` The session created the pr #${prNum}`;
+				if (task.worktreePath) {
+					const prNum = await detectPullRequest(task.worktreePath, task.worktreeBranch);
+					if (prNum) {
+						meta.detectedPrNumber = prNum;
+						prSuffix = ` The session created the pr #${prNum}`;
+						persistSessionMeta(meta, true);
+					}
 				}
 
-				persistSessionMeta(meta, true);
 				persistState();
 				updateStatusUI();
 
@@ -1945,15 +1948,18 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					meta.status = "idle";
 					meta.turnCompletedAt = Date.now();
 					meta.finishedAt = Date.now();
+					persistSessionMeta(meta, true);
 
 					let prSuffix = " No pullrequest was created";
-					const prNum = await detectPullRequest(meta.worktreePath || baseDir, meta.worktreeBranch);
-					if (prNum) {
-						meta.detectedPrNumber = prNum;
-						prSuffix = ` The session created the pr #${prNum}`;
+					if (meta.worktreePath) {
+						const prNum = await detectPullRequest(meta.worktreePath, meta.worktreeBranch);
+						if (prNum) {
+							meta.detectedPrNumber = prNum;
+							prSuffix = ` The session created the pr #${prNum}`;
+							persistSessionMeta(meta, true);
+						}
 					}
 
-					persistSessionMeta(meta, true);
 					persistState();
 					updateStatusUI();
 
@@ -2346,6 +2352,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	(globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ = async (prNumber: number, state: string) => {
 		for (const [sId, meta] of sessions.entries()) {
 			if (!meta.worktreePath || meta.worktreeStatus !== "active") continue;
+			if (meta.status === "running" || meta.status === "stalled") {
+				logWarn(`Skipping worktree cleanup for active session ${sId} on PR #${prNumber} closed event`);
+				continue;
+			}
 
 			// Match by stored detectedPrNumber or query worktree PR dynamically
 			let matches = meta.detectedPrNumber === prNumber;
@@ -2353,16 +2363,13 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				const activePr = await detectPullRequest(meta.worktreePath, meta.worktreeBranch);
 				if (activePr === prNumber) {
 					meta.detectedPrNumber = activePr;
+					persistSessionMeta(meta, true);
 					matches = true;
 				}
 			}
 
 			if (matches) {
-				if (meta.status === "running" || meta.status === "stalled") {
-					logWarn(`Skipping worktree cleanup for active session ${sId} on PR #${prNumber} closed event`);
-					continue;
-				}
-				const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch);
+				const safety = await checkWorktreeSafety(meta.worktreePath, undefined);
 				if (!safety.safe) {
 					logWarn(`Cannot safely release worktree for PR #${prNumber} (session ${sId}): ${safety.reason}`);
 					continue;
