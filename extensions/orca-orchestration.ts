@@ -288,6 +288,22 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	let disposed = false;
 	let isReconciling = false;
 
+	// Keep the in-memory worker registry bounded: once it exceeds the cap, evict the
+	// oldest settled workers (running workers are never evicted). Without this, a
+	// long supervisory session accumulates every dispatched worker (with its spec
+	// text) forever — the map is otherwise only released on session_shutdown.
+	const MAX_OBSERVED_WORKERS = 50;
+	function evictSettledWorkers(): void {
+		if (observedWorkers.size <= MAX_OBSERVED_WORKERS) return;
+		const settled = Array.from(observedWorkers.values())
+			.filter((w) => w.status !== "running")
+			.sort((a, b) => (a.finishedAt ?? a.startedAt) - (b.finishedAt ?? b.startedAt));
+		for (const w of settled) {
+			if (observedWorkers.size <= MAX_OBSERVED_WORKERS) break;
+			observedWorkers.delete(w.dispatchId);
+		}
+	}
+
 	function getObserverInterval(): number {
 		const flagVal = pi.getFlag("orca-observer-interval");
 		const parsed = parseInt(String(flagVal || "30"), 10);
@@ -486,6 +502,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					});
 				}
 
+				evictSettledWorkers();
 				updateStatusUI();
 
 				const filesStr = filesModified.length > 0 ? `\nModified files: ${filesModified.join(", ")}` : "";
@@ -602,6 +619,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						}
 					}
 				}
+				evictSettledWorkers();
 				updateStatusUI();
 			}
 		} catch (err) {
@@ -691,6 +709,13 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			} catch {}
 			checkProcess = null;
 		}
+		// Release the per-session state: the worker registry (including every
+		// dispatched spec text) must not accumulate across sessions in one process,
+		// and the stale UI context must not be used by post-shutdown events.
+		observedWorkers.clear();
+		activeRunId = undefined;
+		activeObjective = undefined;
+		lastUIContext = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 	});
 
@@ -810,19 +835,21 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			const taskId = receipt.taskId || receipt.task?.id;
 			const terminalHandle = receipt.terminalHandle || receipt.agentTerminalHandle;
 
-			// Register in observer
+			// Register in observer. Only a bounded prefix of the spec is kept: the UIs
+			// render at most spec.slice(0, 35..50), and a full task spec is many KB.
 			const worker: ObservedWorker = {
 				dispatchId,
 				taskId,
 				runId: activeRunId,
 				status: "running",
-				spec: params.spec,
+				spec: params.spec.slice(0, 1024),
 				taskTitle: params.task_title,
 				agent: params.agent || "codex",
 				terminalHandle,
 				startedAt: Date.now(),
 			};
 			observedWorkers.set(dispatchId, worker);
+			evictSettledWorkers();
 			updateStatusUI(ctx.ui);
 
 			// Start check process if not running
@@ -931,6 +958,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 							activeRunId = rId;
 							startCheckProcess();
 						}
+						evictSettledWorkers();
 						updateStatusUI(ctx.ui);
 					}
 				}
@@ -1148,6 +1176,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						activeRunId = rId;
 						startCheckProcess();
 					}
+					evictSettledWorkers();
 					updateStatusUI(ctx.ui);
 				}
 

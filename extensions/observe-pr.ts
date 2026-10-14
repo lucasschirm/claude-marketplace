@@ -329,11 +329,16 @@ export default function (pi: ExtensionAPI) {
 
 		pr.runProcesses.set(runId, child);
 
+		// Keep only a rolling tail: the buffer is used for fallback heuristics
+		// (substring search for "failure"/"success" in the final output) only,
+		// and a long CI run can stream megabytes to gigabytes of logs — the
+		// previous full accumulation grew without bound for the run's duration.
+		const maxOutputTail = 65536;
 		child.stdout?.on("data", (chunk) => {
-			output += chunk.toString();
+			output = (output + chunk.toString()).slice(-maxOutputTail);
 		});
 		child.stderr?.on("data", (chunk) => {
-			output += chunk.toString();
+			output = (output + chunk.toString()).slice(-maxOutputTail);
 		});
 
 		child.on("close", async (exitCode) => {
@@ -635,6 +640,13 @@ export default function (pi: ExtensionAPI) {
 		for (const prNumber of Array.from(observedPRs.keys())) {
 			stopObserving(prNumber);
 		}
+
+		// Branch/PR bookkeeping is session-scoped: a new session re-detects from
+		// scratch. Without clearing, these accumulate across every session in one
+		// process (and re-announcing after a session switch is the desired behavior).
+		trackedBranchesByRepo.clear();
+		branchToPR.clear();
+		autoDetectedPRs.clear();
 	}
 
 	async function getRepoRoot(cwd: string): Promise<string | undefined> {
@@ -859,6 +871,7 @@ export default function (pi: ExtensionAPI) {
 		userTurnPending = false;
 		sessionHasRun = false;
 		startupCheck = undefined;
+		lastUIContext = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_OBSERVED_PRS__;
 		cleanupAll();

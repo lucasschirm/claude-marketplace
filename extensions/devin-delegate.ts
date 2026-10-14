@@ -19,6 +19,22 @@ import { removeOrcaWorktree, checkWorktreeSafety } from "./lib/orca-client.ts";
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
 
+// Process exit hooks are registered once per process (not per factory invocation —
+// a /reload re-runs the factory and would otherwise stack listeners that pin the
+// old generation's state until the first signal fires) and dispatch to the
+// current generation's cleanup. cleanupAllClients is idempotent, so repeated
+// signals are harmless.
+let currentProcessExitCleanup: (() => void) | undefined;
+let processExitHooksRegistered = false;
+function registerProcessExitHooks(): void {
+	if (processExitHooksRegistered) return;
+	processExitHooksRegistered = true;
+	const run = () => currentProcessExitCleanup?.();
+	process.on("exit", run);
+	process.on("SIGINT", run);
+	process.on("SIGTERM", run);
+}
+
 // --- Types ---
 
 interface QueuedTask {
@@ -92,6 +108,7 @@ class AcpClient {
 		{ resolve: (val: any) => void; reject: (err: any) => void; timer: NodeJS.Timeout | null }
 	>();
 	private logStream: fs.WriteStream | null = null;
+	private rl: readline.Interface | null = null;
 	private onUpdateCallback?: (update: any) => void;
 	private onExitCallback?: (code: number | null, signal: string | null) => void;
 	private isDisposed = false;
@@ -145,12 +162,12 @@ class AcpClient {
 			this.child.stdin.on("error", () => {});
 		}
 
-		const rl = readline.createInterface({
+		this.rl = readline.createInterface({
 			input: this.child.stdout!,
 			crlfDelay: Infinity,
 		});
 
-		rl.on("line", (line) => {
+		this.rl.on("line", (line) => {
 			if (!line.trim()) return;
 			this.logEvent("stdout", line);
 			try {
@@ -304,6 +321,25 @@ class AcpClient {
 						}
 					} catch {}
 				}, 1500).unref();
+			} catch {}
+		}
+
+		// Break the remaining reference chains so a silently-failed kill
+		// (detached process group) cannot pin the client — and the session state
+		// its callbacks reference — in memory. The child's 'error'/'exit' handlers
+		// are kept (both are no-ops once disposed) so delayed child errors keep
+		// being swallowed instead of crashing the host pi process.
+		this.onUpdateCallback = undefined;
+		this.onExitCallback = undefined;
+		try {
+			this.rl?.close();
+		} catch {}
+		this.rl = null;
+		if (this.child) {
+			this.child.stderr?.removeAllListeners();
+			this.child.stdin?.removeAllListeners();
+			try {
+				this.child.stdin?.destroy();
 			} catch {}
 		}
 		if (this.logStream) {
@@ -1577,13 +1613,33 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	}
 
 	// Release the load guard so a session switch (/resume, /new, /reload) re-registers the tools.
+	// Also drop the PR-closed hook so a stale closure can't pin this generation's state.
+	// Release all per-session state (maps, timers, buffers): a new pi session
+	// (/new, /resume of another session, /switch) must start clean and the previous
+	// session's state must be GC-able. On-disk state is untouched: recoverState
+	// re-anchors it via sessionDirs when the same pi session id resumes, so
+	// devin_restart still recovers those sessions. Timers are cleared directly —
+	// dispose() suppresses the child 'exit' callback, so the indirect stop path via
+	// the rejected prompt promise is not relied on.
+	// (Dropping lastUIContext: delayed diagnostics after shutdown fall back to
+	// console instead of calling notify on a dead context.)
 	pi.on("session_shutdown", () => {
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
-		// Drop the UI context so delayed diagnostics (watchdogs, debounced
-		// persists) after shutdown fall back to console instead of calling
-		// notify on a dead context while the alt-screen is still up.
+		delete (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__;
 		lastUIContext = undefined;
 		cleanupAllClients();
+		for (const t of stallTimers.values()) clearInterval(t);
+		stallTimers.clear();
+		for (const p of pendingMetaSaves.values()) clearTimeout(p.timer);
+		pendingMetaSaves.clear();
+		sessions.clear();
+		queue.length = 0;
+		sessionConfigOptions.clear();
+		sessionDirs.clear();
+		assistantBuffers.clear();
+		totalInvoked = 0;
+		totalCompleted = 0;
+		currentPiSessionId = "default";
 	});
 
 	// Block the agent from driving the devin CLI through bash/powershell (read-only subcommands stay allowed).
@@ -1597,10 +1653,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	});
 
 	// Register OS process exit hooks to prevent orphaned Devin processes
-	const onProcessExit = () => cleanupAllClients();
-	process.once("exit", onProcessExit);
-	process.once("SIGINT", onProcessExit);
-	process.once("SIGTERM", onProcessExit);
+	// (module-scope, registered once per process — see registerProcessExitHooks)
+	currentProcessExitCleanup = cleanupAllClients;
+	registerProcessExitHooks();
 
 	// --- Tool Registrations ---
 
