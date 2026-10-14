@@ -1140,14 +1140,41 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// --- PR Detection ---
 
 	async function detectPullRequest(cwd: string, branch?: string): Promise<number | undefined> {
-		if (!branch || !isCommandAvailable("gh")) return undefined;
+		if (!isCommandAvailable("gh")) return undefined;
+
+		// 1. Determine candidate branches: actual checked out branch in cwd, followed by provisioned worktree branch
+		const candidateBranches: string[] = [];
 		try {
-			const { stdout } = await execFileAsync("gh", ["pr", "view", branch, "--json", "number"], { cwd });
+			const { stdout } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
+			const currentBranch = stdout.trim();
+			if (currentBranch && currentBranch !== "HEAD") {
+				candidateBranches.push(currentBranch);
+			}
+		} catch {}
+
+		if (branch && !candidateBranches.includes(branch)) {
+			candidateBranches.push(branch);
+		}
+
+		for (const b of candidateBranches) {
+			try {
+				const { stdout } = await execFileAsync("gh", ["pr", "view", b, "--json", "number"], { cwd });
+				const parsed = JSON.parse(stdout);
+				if (parsed.number && typeof parsed.number === "number") {
+					return parsed.number;
+				}
+			} catch {}
+		}
+
+		// Fallback: gh pr view from worktree directory without branch selector
+		try {
+			const { stdout } = await execFileAsync("gh", ["pr", "view", "--json", "number"], { cwd });
 			const parsed = JSON.parse(stdout);
 			if (parsed.number && typeof parsed.number === "number") {
 				return parsed.number;
 			}
 		} catch {}
+
 		return undefined;
 	}
 
@@ -2318,7 +2345,19 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// Global PR closed hook to clean up worktrees whose PRs are merged or closed
 	(globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ = async (prNumber: number, state: string) => {
 		for (const [sId, meta] of sessions.entries()) {
-			if (meta.detectedPrNumber === prNumber && meta.worktreePath && meta.worktreeStatus === "active") {
+			if (!meta.worktreePath || meta.worktreeStatus !== "active") continue;
+
+			// Match by stored detectedPrNumber or query worktree PR dynamically
+			let matches = meta.detectedPrNumber === prNumber;
+			if (!matches && !meta.detectedPrNumber && fs.existsSync(meta.worktreePath)) {
+				const activePr = await detectPullRequest(meta.worktreePath, meta.worktreeBranch);
+				if (activePr === prNumber) {
+					meta.detectedPrNumber = activePr;
+					matches = true;
+				}
+			}
+
+			if (matches) {
 				if (meta.status === "running" || meta.status === "stalled") {
 					logWarn(`Skipping worktree cleanup for active session ${sId} on PR #${prNumber} closed event`);
 					continue;
