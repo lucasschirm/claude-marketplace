@@ -43,26 +43,32 @@ export default function (pi: any) {
   execFileSync("git", ["init", "-q", "-b", "feat"], { cwd: tmpDir });
 
   // `gh pr view <branch|7|8>` reports the PR selected via the branch_pr file (default 7);
-  // PR 7 always carries one stable comment. `gh run view`/`gh run watch` fail (exit 1) so
-  // the close handler falls back to its exit-code heuristic.
+  // PR 7 always carries one stable comment. If the rollup_42 file exists, the responses also
+  // advertise run 42 via statusCheckRollup (used by R5 to exercise real re-discovery).
+  // `gh run view`/`gh run watch` fail (exit 1) so the close handler falls back to its
+  // exit-code heuristic.
   fs.writeFileSync(
     path.join(binDir, "gh"),
     `#!/usr/bin/env bash
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  rollup="[]"
+  if [ -f "${tmpDir}/rollup_42" ]; then
+    rollup='[{"detailsUrl":"https://x/actions/runs/42"}]'
+  fi
   if [ "$3" = "feat" ] || [ "$3" = "branch" ]; then
     n=$(cat "${tmpDir}/branch_pr" 2>/dev/null || echo 7)
     if [ "$n" = "8" ]; then
-      echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":[]}'
+      echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":'$rollup'}'
     else
-      echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":[]}'
+      echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup'}'
     fi
     exit 0
   fi
   if [ "$3" = "8" ]; then
-    echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":[]}'
+    echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":'$rollup'}'
     exit 0
   fi
-  echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":[]}'
+  echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup'}'
   exit 0
 fi
 exit 1
@@ -112,7 +118,7 @@ exit 1
                 failedRuns: [],
                 completedRuns: ["111"],
                 knownComments: [{ id: "1", number: "1", updatedAt: "t1" }],
-                allPassedReported: false,
+                allPassedReported: true,
                 announced: true,
               },
             ],
@@ -133,6 +139,8 @@ exit 1
       );
       assert(observed()?.has(7), "R1: observed PR must be re-registered");
       assert(observed()?.get(7)?.knownComments?.size === 1, "R1: known comments must be restored");
+      assert(observed()?.get(7)?.pollTimer, "R1: poll timer must be running after restore");
+      assert(observed()?.get(7)?.checksProcess, "R1: checks process must be re-spawned after restore");
       assert(appended.length === 0, `R1: restore must not append a state entry, got ${appended.length}`);
       console.log("✓ R1 Passed: resume re-observes silently, no duplicate notice or comment spam.");
 
@@ -208,9 +216,13 @@ exit 1
       assert(!startEntry?.stopped?.includes(7), "R4: explicit start must clear stopped");
       console.log("✓ R4 Passed: explicit tool start/stop persist correctly.");
 
-      // ---- R5: re-watching a restored already-failed run does not re-notify
+      // ---- R5: a run reported failed in a previous process is re-discovered via the
+      // statusCheckRollup on resume, re-watched, and must not re-notify. The fixture is a
+      // realistic stale snapshot: the failure was recorded (failedRuns) but the run is
+      // re-discoverable (seenRuns does not pin it, activeRuns is empty).
       sent.length = 0;
       setBranchPr(7);
+      fs.writeFileSync(path.join(tmpDir, "rollup_42"), "1");
       handlers.session_start(
         { type: "session_start", reason: "resume" },
         makeCtx([
@@ -220,8 +232,8 @@ exit 1
               {
                 prNumber: 7,
                 cwd: tmpDir,
-                activeRuns: ["42"],
-                seenRuns: ["42"],
+                activeRuns: [],
+                seenRuns: [],
                 failedRuns: ["42"],
                 completedRuns: [],
                 knownComments: [],
@@ -234,6 +246,10 @@ exit 1
         ]),
       );
       await sleep(1500);
+      assert(
+        observed()?.get(7)?.activeRuns?.has("42") === false && observed()?.get(7)?.seenRuns?.has("42") === true,
+        `R5: run 42 must have been re-discovered via the rollup, got ${JSON.stringify({ active: [...observed()?.get(7)?.activeRuns ?? []], seen: [...observed()?.get(7)?.seenRuns ?? []] })}`,
+      );
       assert(
         sent.every((m) => !m.content.includes("The CI run 42 failed")),
         `R5: restored failed run must not re-notify, got ${JSON.stringify(sent.map((m) => m.content))}`,

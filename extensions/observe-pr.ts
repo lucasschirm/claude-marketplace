@@ -169,6 +169,9 @@ export default function (pi: ExtensionAPI) {
 	let lastUIContext: ExtensionUIContext | undefined;
 	let lastCwd: string = process.cwd();
 	let isCheckingBranches = false;
+	// Bumped by resetObserverState (shutdown/restore): an in-flight branch check from a previous
+	// session must not detect-and-persist into the new session's file.
+	let stateGeneration = 0;
 	// Announcements found by the session_start check; appended to the user's next message instead of
 	// being sent as a standalone follow-up that would trigger an agent turn on startup/resume.
 	const deferredAnnouncements = new Map<number, string>();
@@ -176,6 +179,11 @@ export default function (pi: ExtensionAPI) {
 	// updates that happen after it knows the PR is tracked. Released once the notice's turn starts.
 	let suppressUpdates = false;
 	let noticeAttached = false;
+	// The PRs whose notices the attached message actually contains; agent_start marks only these
+	// (a PR deferred in after the transform never rode the message and must not be marked).
+	let noticeAttachedFor: Set<number> | undefined;
+	// Set once a persist failure was logged; appendEntry failures are not spammed per change.
+	let persistFailureLogged = false;
 	// An idle user message has been received; the next agent run is that turn, even if no notice could be attached (e.g. a slash command).
 	let userTurnPending = false;
 	// Any agent run has started. A startup check finishing later than that falls back to the normal delayed announcement.
@@ -256,7 +264,10 @@ export default function (pi: ExtensionAPI) {
 			};
 			pi.appendEntry(STATE_CUSTOM_TYPE, state);
 		} catch (err) {
-			console.error("[observe_pr] Failed to persist observer state:", err);
+			if (!persistFailureLogged) {
+				persistFailureLogged = true;
+				console.error("[observe_pr] Failed to persist observer state (further failures suppressed):", err);
+			}
 		}
 	}
 
@@ -303,9 +314,14 @@ export default function (pi: ExtensionAPI) {
 		deferredAnnouncements.clear();
 		suppressUpdates = false;
 		noticeAttached = false;
+		noticeAttachedFor = undefined;
 		userTurnPending = false;
 		sessionHasRun = false;
 		startupCheck = undefined;
+		// Invalidate in-flight branch checks and clear the re-entry guard so the incoming
+		// session's own startup check is not skipped by a stale one.
+		stateGeneration++;
+		isCheckingBranches = false;
 	}
 
 	// Rebuild in-memory state from the session's latest pi_observe_pr_state entry (branch-aware,
@@ -339,7 +355,10 @@ export default function (pi: ExtensionAPI) {
 
 		let restored = 0;
 		for (const p of state.observed) {
-			if (!p || typeof p.prNumber !== "number" || typeof p.cwd !== "string") continue;
+			// Sanity guards: reject corrupt items; a PR in both lists keeps the stopped decision;
+			// a duplicate prNumber would orphan the first entry's timers.
+			if (!p || !(p.prNumber > 0) || typeof p.cwd !== "string") continue;
+			if (stoppedPRs.has(p.prNumber) || observedPRs.has(p.prNumber)) continue;
 			const pr: ObservedPR = {
 				prNumber: p.prNumber,
 				cwd: p.cwd,
@@ -468,15 +487,18 @@ export default function (pi: ExtensionAPI) {
 				if (!hasPending && !hasFailed && hasPassed) {
 					pr.allPassedReported = true;
 					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+					persistState();
 				}
 			} else if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+				persistState();
 			}
 		} catch {
 			if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+				persistState();
 			}
 		}
 	}
@@ -522,6 +544,9 @@ export default function (pi: ExtensionAPI) {
 			const currentPr = observedPRs.get(prNumber);
 			if (!currentPr) return;
 
+			// A killed-then-replaced watcher (resume, or in-process stop + re-observe) must not
+			// touch the live entry: its stale exit code would misclassify the replacement's run.
+			if (currentPr.runProcesses.get(runId) !== child) return;
 			currentPr.runProcesses.delete(runId);
 
 			// A run that was already reported (e.g. re-watched after a resume) keeps its
@@ -561,6 +586,8 @@ export default function (pi: ExtensionAPI) {
 					sendAgentMessage(
 						`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`,
 					);
+					// Persist the new failure so a resume does not re-watch + re-notify this run.
+					persistState();
 				}
 			} else {
 				currentPr.completedRuns.add(runId);
@@ -568,6 +595,9 @@ export default function (pi: ExtensionAPI) {
 				updateStatusUI();
 
 				await checkAllCIPassed(prNumber, currentPr);
+				// Persist the new completion so a resume does not re-notify (checkAllCIPassed
+				// persists itself when it flips allPassedReported).
+				if (!alreadyReported) persistState();
 			}
 		});
 	}
@@ -658,6 +688,8 @@ export default function (pi: ExtensionAPI) {
 
 				if (changedNumbers.length > 0) {
 					sendAgentMessage(`Comment ${changedNumbers.join(", ")} added or updated to the PR ${prNumber}.`);
+					// Persist the newly-seen comments so a resume does not re-announce them.
+					persistState();
 				}
 			}
 
@@ -723,11 +755,15 @@ export default function (pi: ExtensionAPI) {
 		checksProc.stderr?.on("data", handleData);
 
 		checksProc.on("close", async () => {
-			if (!observedPRs.has(prNumber)) return;
+			// Identity guard: a killed-then-replaced watcher (resetObserverState + restore, or an
+			// in-process stop + re-observe) must not poll or schedule a restart against the live
+			// entry — it would spawn a second, never-collected checks watcher lineage.
+			const current = observedPRs.get(prNumber);
+			if (!current || current.checksProcess !== checksProc) return;
 			await pollPR(prNumber);
-			// Re-resolve: a stop + re-observe between close and restart replaces the map entry.
+			// Re-check: a stop may have happened during the poll.
 			const currentPr = observedPRs.get(prNumber);
-			if (!currentPr) return;
+			if (!currentPr || currentPr.checksProcess !== checksProc) return;
 			// Restart after interval if PR is still observed
 			currentPr.restartTimer = setTimeout(() => {
 				const livePr = observedPRs.get(prNumber);
@@ -869,11 +905,16 @@ export default function (pi: ExtensionAPI) {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
 		if (!isEnabled) return;
 
+		// A check that outlives a session switch (resetObserverState bumps stateGeneration) must
+		// not complete its detection against the new session's state or persist into its file.
+		const gen = stateGeneration;
 		await recordCurrentBranch(cwd);
+		if (gen !== stateGeneration) return;
 		if (isCheckingBranches) return;
 		isCheckingBranches = true;
 		try {
 			const repoRoot = (await getRepoRoot(cwd)) || cwd;
+			if (gen !== stateGeneration) return;
 			const branches = trackedBranchesByRepo.get(repoRoot);
 			if (!branches) return;
 
@@ -891,6 +932,7 @@ export default function (pi: ExtensionAPI) {
 						{ cwd: repoRoot },
 					);
 					if (disposed) return;
+					if (gen !== stateGeneration) return;
 					const data = JSON.parse(stdout);
 					const prNumber = data.number;
 					const state = String(data.state || "").toUpperCase();
@@ -950,7 +992,9 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			console.error("[observe_pr] Error checking tracked branches:", err);
 		} finally {
-			isCheckingBranches = false;
+			// Only the current generation's check owns the re-entry guard; a stale one must not
+			// clear it out from under the incoming session's own startup check.
+			if (gen === stateGeneration) isCheckingBranches = false;
 		}
 	}
 
@@ -969,6 +1013,9 @@ export default function (pi: ExtensionAPI) {
 		// Rebuild in-memory state from this session's persisted entries before the branch check,
 		// so resumed observation is silent and stopped PRs stay stopped.
 		restoreState(ctx.sessionManager);
+		// Re-expose the observed map: session_shutdown deletes the global, and cross-extension
+		// readers (e.g. pr-tasks) need it to exist after an in-process session switch.
+		(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
 		updateStatusUI(ctx.ui);
 		startupCheck = checkTrackedBranches(lastCwd, true);
 		startBranchPollTimer();
@@ -1003,6 +1050,9 @@ export default function (pi: ExtensionAPI) {
 		// Keep the notice queued until the turn actually starts, so a prompt that fails is retried with it.
 		const notices = Array.from(deferredAnnouncements.values()).join("\n\n");
 		noticeAttached = true;
+		// Snapshot what this message actually carries; agent_start marks only these (a PR
+		// deferred in after the transform never rode the message and must not be marked).
+		noticeAttachedFor = new Set(deferredAnnouncements.keys());
 		return { action: "transform", text: `${event.text}\n\n${notices}`, images: event.images };
 	});
 
@@ -1011,9 +1061,10 @@ export default function (pi: ExtensionAPI) {
 		sessionHasRun = true;
 		if (!noticeAttached && !userTurnPending) return;
 		if (noticeAttached) {
-			// The notice rode on this turn: the agent has now been told about these PRs.
+			// The notice rode on this turn: the agent has now been told about the PRs it carried.
 			let changed = false;
-			for (const prNumber of deferredAnnouncements.keys()) {
+			const markedSource = noticeAttachedFor ?? new Set(deferredAnnouncements.keys());
+			for (const prNumber of markedSource) {
 				const pr = observedPRs.get(prNumber);
 				if (pr && !pr.announced) {
 					pr.announced = true;
@@ -1024,6 +1075,7 @@ export default function (pi: ExtensionAPI) {
 			if (changed) persistState();
 		}
 		noticeAttached = false;
+		noticeAttachedFor = undefined;
 		userTurnPending = false;
 		suppressUpdates = false;
 	});
@@ -1108,18 +1160,26 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			// If the PR was auto-detected and announcement is still pending delivery,
-			// cancel the announcement and return the usual start message without stopping observation.
-			// The tool result informs the agent, so the PR counts as announced from now on.
+			// If the PR was auto-detected and its notice is still pending delivery (delayed timer,
+			// or the startup notice queued for the next user message), cancel the notice and return
+			// the usual start message without stopping observation. The tool result informs the
+			// agent, so the PR counts as announced from now on.
 			const pending = pendingAnnouncements.get(prNumber);
-			if (pending && !pending.delivered) {
-				clearTimeout(pending.timer);
-				pendingAnnouncements.delete(prNumber);
+			const deferred = deferredAnnouncements.has(prNumber);
+			if ((pending && !pending.delivered) || deferred) {
+				if (pending) {
+					clearTimeout(pending.timer);
+					pendingAnnouncements.delete(prNumber);
+				}
+				if (deferred) {
+					deferredAnnouncements.delete(prNumber);
+					if (deferredAnnouncements.size === 0 && !noticeAttached) suppressUpdates = false;
+				}
 				const pr = observedPRs.get(prNumber);
 				if (pr && !pr.announced) {
 					pr.announced = true;
-					persistState();
 				}
+				persistState();
 				return {
 					content: [
 						{
