@@ -128,3 +128,11 @@ Sequence: **1 → (4 scaffold) → 2 → 3**, one PR per phase (2+3 may combine 
 6. **403 rate limit ≠ auth** (risk): `isGhAuthError` excludes rate-limit text first, so a 403 rate limit keeps the silent+auto-start path instead of surfacing as an auth error.
 7. **`pendingAutoStart` reconciliation** (risk): deleted on the tool's explicit start/stop paths and skipped for already-observed PRs in `settlePendingAutoStarts` — no duplicate `startObserving` (timer/process leak + double announcement).
 8. **`session_shutdown` resets the shared state** (plan deviation): both extensions call `ghHealth.reset()` so a pending timer / wedged slot never carries into the next session.
+
+### Review round 2 — fixes applied
+
+1. **CI-result exit respawn loop** (new bug, introduced by the round-1 stderr-tail fix): the checks-watcher restart delay was keyed on `code !== 0` alone — a CI-failure exit (1/8, no availability text) recorded nothing, so `nextRetryInMs()` was 0 and the watcher respawned at 1 s. The delay (and the record) now key on `ghDown` — a real availability error in the stderr tail — or a degraded state; every other exit restarts at the normal interval. The same guard was applied to the non-availability spawn-error path.
+2. **`/pr_observer stop <pr>` command path** now deletes `pendingAutoStart` (a pending auto-start no longer re-observes a command-stopped PR on recovery).
+3. **T5 E2E coverage** (new): a `gh pr checks --watch` mock that exits 1 with a CI-failure table (no availability text) — asserts the respawn paces at the observer interval (2 s), not 1 s, and that no false "All CI passed" is sent. T3's fast-gap assertion relaxed to ≥2 (timing-sensitive; the pacing proof is the min-gap + slow-tier gap).
+
+Carried/accepted (not fixed): `release()` is not ownership-checked (a stale release can clear another holder's slot — impact limited to a >30 s healthy-held call spanning an ungated failure; token-based acquire/release would make it airtight); the 2 KB stderr tail can miss an error emitted >2 KB later; `pollAllObservedPRs` deterministically starves later PRs while degraded (harmless in a real outage — all calls fail alike; commented).

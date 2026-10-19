@@ -104,11 +104,18 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
 fi
 if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
   if [ "$3" = "--watch" ]; then
-    if offline; then
-      echo "gh: failed to connect: i/o timeout" >&2
-      exit 1
-    fi
-    sleep 5
+    # (check offline/ci_fail every second: the test can flip state mid-watch)
+    for i in 1 2 3 4 5; do
+      if offline; then
+        echo "gh: failed to connect: i/o timeout" >&2
+        exit 1
+      fi
+      if [ -f "$GH_STATE_DIR/ci_fail" ]; then
+        echo "GH: 1 of 2 checks failed for the PR" >&2
+        exit 1
+      fi
+      sleep 1
+    done
     exit 0
   fi
   if offline; then
@@ -248,7 +255,9 @@ exit 0
 			const minGap = Math.min(...gaps);
 			assert(minGap >= 800, `T3: calls were not paced (min gap ${minGap} ms < 800 ms)`);
 			const fastGaps = gaps.filter((g) => g >= 800 && g < 4000);
-			assert(fastGaps.length >= 3, `T3: expected at least 3 fast-cadence gaps (1.5 s), got ${fastGaps.length}`);
+			// (>= 2: slots can be claimed by non-`pr view` ops too — the pacing proof
+			// is the min-gap + the slow-tier gap, the fast-gap count is a sanity check)
+			assert(fastGaps.length >= 2, `T3: expected at least 2 fast-cadence gaps (1.5 s), got ${fastGaps.length}`);
 			const maxGap = Math.max(...gaps);
 			assert(maxGap >= 5000, `T3: expected a slow-cadence gap (8 s) after 5 fast failures, max gap was ${maxGap} ms`);
 			console.log(`✓ T3: gh calls paced — ${pvTs.length} attempts, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`);
@@ -284,6 +293,27 @@ exit 0
 				"PR 202 auto-start after recovery",
 			);
 			console.log("✓ T4: pending observe_pr(202) auto-started after recovery");
+
+			// T5: a CI-failure exit of `gh pr checks --watch` (exit 1, no availability
+			// error) must NOT be recorded as a GitHub failure and must NOT respawn at
+			// 1 s — the restart follows the normal 2 s interval
+				fs.writeFileSync(path.join(tmpDir, "ci_fail"), "1");
+				const ciFailTs = Date.now();
+				await sleep(15000);
+				const watchSpawns = fs
+					.readFileSync(path.join(tmpDir, "gh-calls.log"), "utf8")
+					.split("\n")
+					.filter((l) => l.includes(" pr checks 101 ") && l.includes(" --watch ")) // (PR 101 only: the other observed PR's watcher interleaves)
+					.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10))
+					.filter((ts) => ts >= ciFailTs - 2000);
+				assert(watchSpawns.length >= 2, `T5: expected the checks watcher to keep cycling, got ${watchSpawns.length} spawns`);
+				const wGaps: number[] = [];
+				for (let i = 1; i < watchSpawns.length; i++) wGaps.push(watchSpawns[i] - watchSpawns[i - 1]);
+				const wMinGap = Math.min(...wGaps);
+				assert(wMinGap >= 1500, `T5: the checks watcher respawned at ~1 s (min gap ${wMinGap} ms) — a CI-failure exit was misclassified as a GitHub failure`);
+				const falsePassed2 = sentMessages.filter((m) => m.includes("All CI passed") && m.includes("101"));
+				assert(falsePassed2.length === 1, `T5: a failing CI must not produce 'All CI passed' (saw ${falsePassed2.length})`);
+				console.log(`✓ T5: a CI-failure exit of the checks watcher is not a GitHub failure (respawn min gap ${wMinGap} ms = the 2 s interval)`);
 
 			// Final silence check (recovery path must also be quiet)
 			const noisyAfter = [...consoleErrors, ...consoleWarns].filter((c) => c.includes("observe_pr"));

@@ -678,12 +678,15 @@ export default function (pi: ExtensionAPI) {
 				});
 			} catch (err) {
 				if (slotHeld) ghHealth.release();
-				// A missing gh binary is an availability-class error: silent + paced restart
-				if (isGhAvailabilityError(err)) ghHealth.recordFailure();
+				// A missing gh binary is an availability-class error: silent + paced restart.
+				// (a non-availability spawn error while healthy restarts at the normal
+				// interval — 1 s would be a respawn loop)
+				const ghDown = isGhAvailabilityError(err);
+				if (ghDown) ghHealth.recordFailure();
 				else logInternal(`Error spawning gh pr checks for PR ${prNumber}`, err);
 				pr.restartTimer = setTimeout(() => {
 					if (observedPRs.has(prNumber)) startChecksProcess();
-				}, Math.max(ghHealth.nextRetryInMs(), 1000));
+				}, ghDown || ghHealth.status === "degraded" ? Math.max(ghHealth.nextRetryInMs(), 1000) : interval * 1000);
 				return;
 			}
 
@@ -730,17 +733,16 @@ export default function (pi: ExtensionAPI) {
 				if (slotHeld) ghHealth.release();
 				if (!observedPRs.has(prNumber)) return;
 				// (code === null: the process was killed by signal, e.g. our own stop —
-				// not a GitHub failure; gh exits 1/8 for failed/pending checks — those are
+				// not a GitHub failure. gh exits 1/8 for failed/pending checks — those are
 				// CI results, not availability: only a real availability error in the
-				// stderr tail records a failure, and the restart follows the shared
-				// backoff instead of the fixed interval)
-				if (code !== null && code !== 0 && isGhAvailabilityError({ code, message: errTail })) {
-					ghHealth.recordFailure();
-				}
+				// stderr tail records a failure and paces the restart; every other exit
+				// restarts at the normal interval, never at 1 s)
+				const ghDown = code !== null && code !== 0 && isGhAvailabilityError({ code, message: errTail });
+				if (ghDown) ghHealth.recordFailure();
 				void pollPR(prNumber);
 				if (!observedPRs.has(prNumber)) return;
 				const delay =
-					code !== 0 || ghHealth.status === "degraded"
+					ghDown || ghHealth.status === "degraded"
 						? Math.max(ghHealth.nextRetryInMs(), 1000)
 						: interval * 1000;
 				pr.restartTimer = setTimeout(() => {
@@ -1286,6 +1288,9 @@ export default function (pi: ExtensionAPI) {
 					clearTimeout(pending.timer);
 					pendingAnnouncements.delete(targetPr);
 				}
+				// (delete the pending auto-start unconditionally: a pending-but-not-yet-observed PR
+				// must stay stopped on recovery too — the user's intent is "don't observe this PR")
+				pendingAutoStart.delete(targetPr);
 				if (observedPRs.has(targetPr)) {
 					stopObserving(targetPr);
 					ctx.ui.notify(`Stopped observing PR #${targetPr}.`, "info");
