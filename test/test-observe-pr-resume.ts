@@ -55,13 +55,21 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   if [ -f "${tmpDir}/rollup_42" ]; then
     rollup='[{"detailsUrl":"https://x/actions/runs/42"}]'
   fi
-  if [ "$3" = "feat" ] || [ "$3" = "branch" ]; then
+  if [ "$3" = "feat" ] || [ "$3" = "branch" ] || [ "$3" = "feat2" ]; then
     n=$(cat "${tmpDir}/branch_pr" 2>/dev/null || echo 7)
+    if [ "$3" = "feat2" ]; then
+      echo '{"number":60,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":[]}'
+      exit 0
+    fi
     if [ "$n" = "8" ]; then
       echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":'$rollup'}'
     else
       echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup'}'
     fi
+    exit 0
+  fi
+  if [ "$3" = "60" ]; then
+    echo '{"number":60,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":[]}'
     exit 0
   fi
   if [ "$3" = "8" ]; then
@@ -255,6 +263,78 @@ exit 1
         `R5: restored failed run must not re-notify, got ${JSON.stringify(sent.map((m) => m.content))}`,
       );
       console.log("✓ R5 Passed: re-watched restored runs do not re-notify.");
+
+      // ---- R6: a notice deferred in AFTER the attached-notice snapshot must survive to the
+      // next idle input (agent_start must not wipe deferredAnnouncements wholesale).
+      appended.length = 0;
+      sent.length = 0;
+      process.env.PI_OBSERVE_PR_DELIVERY_DELAY = "400";
+      setBranchPr(7);
+      ext(mockPi as any);
+      handlers.session_start(
+        { type: "session_start", reason: "resume" },
+        makeCtx([
+          stateEntry({
+            v: 1,
+            observed: [
+              {
+                prNumber: 7,
+                cwd: tmpDir,
+                activeRuns: [],
+                seenRuns: [],
+                failedRuns: ["42"],
+                completedRuns: [],
+                knownComments: [{ id: "1", number: "1", updatedAt: "t1" }],
+                allPassedReported: false,
+                announced: false,
+              },
+            ],
+            stopped: [],
+          }),
+        ]),
+      );
+      await sleep(1200);
+      assert(appended.length === 0, `R6a: restore must not append a state entry, got ${appended.length}`);
+
+      // Detect PR 60 on a second branch: its announcement timer fires inside the
+      // attached-notice window (400ms delay, well after the input transform below).
+      execFileSync("git", ["checkout", "-q", "-b", "feat2"], { cwd: tmpDir });
+      await handlers.turn_end({ type: "turn_end" }, makeCtx());
+      assert(observed()?.has(60), "R6b: 60 must be auto-observed on feat2");
+
+      // Idle input while 60's timer is still pending: only 7's (restored, pending)
+      // notice is attached, so the snapshot is {7}.
+      const res6a = await handlers.input({ text: "go", source: "interactive" });
+      assert(
+        res6a.text?.includes("The PR 7 is now being observed"),
+        `R6c: 7's pending notice must ride the message, got ${JSON.stringify(res6a)}`,
+      );
+      assert(
+        !res6a.text?.includes("The PR 60"),
+        `R6c: 60 must not be attached yet (timer pending), got ${res6a.text}`,
+      );
+
+      // 60's announcement timer fires while suppressUpdates is true (7's notice is
+      // still deferred) -> 60 lands in deferredAnnouncements AFTER the snapshot.
+      await sleep(800);
+
+      // Turn start: only the snapshot's PRs are marked delivered; 60 must survive.
+      handlers.agent_start();
+      assert(observed()?.get(7)?.announced === true, "R6d: 7 must be marked announced");
+      assert(
+        observed()?.get(60)?.announced === false,
+        "R6d: 60 must NOT be marked announced (its notice did not ride the message)",
+      );
+
+      // The next idle input carries 60's notice; its turn start marks it delivered.
+      const res6b = await handlers.input({ text: "again", source: "interactive" });
+      assert(
+        res6b.text?.includes("The PR 60 is now being observed"),
+        `R6e: 60's notice must survive to the next input, got ${JSON.stringify(res6b)}`,
+      );
+      handlers.agent_start();
+      assert(observed()?.get(60)?.announced === true, "R6f: 60 must be marked announced after delivery");
+      console.log("✓ R6 Passed: a notice deferred in after the attached-notice snapshot survives to the next input.");
 
       console.log("✓ All observe-pr resume tests passed successfully!");
       try {

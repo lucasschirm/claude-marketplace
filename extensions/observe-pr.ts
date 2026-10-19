@@ -355,9 +355,10 @@ export default function (pi: ExtensionAPI) {
 
 		let restored = 0;
 		for (const p of state.observed) {
-			// Sanity guards: reject corrupt items; a PR in both lists keeps the stopped decision;
-			// a duplicate prNumber would orphan the first entry's timers.
-			if (!p || !(p.prNumber > 0) || typeof p.cwd !== "string") continue;
+			// Sanity guards: reject corrupt items (including non-integer prNumbers, which would
+			// bypass the type-strict Set.has dedup); a PR in both lists keeps the stopped
+			// decision; a duplicate prNumber would orphan the first entry's timers.
+			if (!p || typeof p.prNumber !== "number" || !Number.isInteger(p.prNumber) || p.prNumber <= 0 || typeof p.cwd !== "string") continue;
 			if (stoppedPRs.has(p.prNumber) || observedPRs.has(p.prNumber)) continue;
 			const pr: ObservedPR = {
 				prNumber: p.prNumber,
@@ -576,6 +577,10 @@ export default function (pi: ExtensionAPI) {
 				conclusion === "startup_failure" ||
 				(exitCode !== 0 && conclusion !== "success" && conclusion !== "neutral" && conclusion !== "skipped");
 
+			// Re-check: a stop or a resume-restore during the gh await must not let this stale
+			// close mutate (or notify through) the replacement entry.
+			if (observedPRs.get(prNumber) !== currentPr) return;
+
 			if (isFailure) {
 				currentPr.failedRuns.add(runId);
 				currentPr.activeRuns.delete(runId);
@@ -583,6 +588,7 @@ export default function (pi: ExtensionAPI) {
 
 				if (!alreadyReported) {
 					const errorSummary = await getRunErrorSummary(runId, cwd);
+					if (observedPRs.get(prNumber) !== currentPr) return;
 					sendAgentMessage(
 						`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`,
 					);
@@ -627,6 +633,9 @@ export default function (pi: ExtensionAPI) {
 				["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup"],
 				{ cwd: pr.cwd },
 			);
+			// A stop or a resume-restore during the gh await must not let this stale poll mutate
+			// the replacement entry (or persist into the new session's file).
+			if (observedPRs.get(prNumber) !== pr) return;
 			const data = JSON.parse(stdout);
 
 			const state = String(data.state || "").toUpperCase();
@@ -883,21 +892,17 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function recordCurrentBranch(cwd: string) {
+	async function recordCurrentBranch(cwd: string): Promise<{ repoRoot: string; branch: string } | undefined> {
 		try {
 			const repoRoot = (await getRepoRoot(cwd)) || cwd;
 			const { stdout } = await execFileAsync("git", ["branch", "--show-current"], { cwd });
 			const branch = stdout.trim();
-			if (branch) {
-				let branches = trackedBranchesByRepo.get(repoRoot);
-				if (!branches) {
-					branches = new Set();
-					trackedBranchesByRepo.set(repoRoot, branches);
-				}
-				branches.add(branch);
-			}
+			// Read-only: the caller commits the branch to trackedBranchesByRepo only after its
+			// generation check, so a stale check cannot inject into a reset session.
+			return { repoRoot, branch };
 		} catch {
 			// Ignore if not a git repository or detached HEAD
+			return undefined;
 		}
 	}
 
@@ -908,13 +913,20 @@ export default function (pi: ExtensionAPI) {
 		// A check that outlives a session switch (resetObserverState bumps stateGeneration) must
 		// not complete its detection against the new session's state or persist into its file.
 		const gen = stateGeneration;
-		await recordCurrentBranch(cwd);
+		const rec = await recordCurrentBranch(cwd);
 		if (gen !== stateGeneration) return;
+		if (rec && rec.branch) {
+			let branches = trackedBranchesByRepo.get(rec.repoRoot);
+			if (!branches) {
+				branches = new Set();
+				trackedBranchesByRepo.set(rec.repoRoot, branches);
+			}
+			branches.add(rec.branch);
+		}
 		if (isCheckingBranches) return;
 		isCheckingBranches = true;
 		try {
-			const repoRoot = (await getRepoRoot(cwd)) || cwd;
-			if (gen !== stateGeneration) return;
+			const repoRoot = rec?.repoRoot || cwd;
 			const branches = trackedBranchesByRepo.get(repoRoot);
 			if (!branches) return;
 
@@ -1071,7 +1083,10 @@ export default function (pi: ExtensionAPI) {
 					changed = true;
 				}
 			}
-			deferredAnnouncements.clear();
+			// Delete only the notices this turn delivered. A PR deferred in after the snapshot
+			// (e.g. a suppressed announcement timer firing in this window) did not ride the
+			// message and must survive to the next idle input.
+			for (const prNumber of markedSource) deferredAnnouncements.delete(prNumber);
 			if (changed) persistState();
 		}
 		noticeAttached = false;
