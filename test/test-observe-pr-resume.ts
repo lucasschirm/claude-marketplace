@@ -270,7 +270,10 @@ exit 1
       sent.length = 0;
       process.env.PI_OBSERVE_PR_DELIVERY_DELAY = "400";
       setBranchPr(7);
-      ext(mockPi as any);
+      // No ext() re-registration: the global guard makes a second call a no-op, so R6
+      // reuses the suite's single instance — which means this session_start exercises the
+      // in-process session-switch path (resetObserverState + restoreState) in addition to
+      // the cross-process resume the fixture simulates.
       handlers.session_start(
         { type: "session_start", reason: "resume" },
         makeCtx([

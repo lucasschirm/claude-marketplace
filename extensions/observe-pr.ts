@@ -465,6 +465,9 @@ export default function (pi: ExtensionAPI) {
 			const { stdout } = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
 				cwd: pr.cwd,
 			});
+			// A stop or a resume-restore during the gh await must not let this stale call
+			// deliver "All CI passed" through the replacement entry's turn.
+			if (observedPRs.get(prNumber) !== pr) return;
 			const checks = JSON.parse(stdout);
 			if (Array.isArray(checks) && checks.length > 0) {
 				const hasPending = checks.some(
@@ -496,6 +499,7 @@ export default function (pi: ExtensionAPI) {
 				persistState();
 			}
 		} catch {
+			if (observedPRs.get(prNumber) !== pr) return;
 			if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
@@ -741,6 +745,9 @@ export default function (pi: ExtensionAPI) {
 
 		let lineBuffer = "";
 		const handleData = (chunk: Buffer) => {
+			// Identity guard: buffered output from a killed-then-replaced checks process must not
+			// spawn duplicate run watchers against the live replacement entry.
+			if (observedPRs.get(prNumber)?.checksProcess !== checksProc) return;
 			lineBuffer += chunk.toString();
 			const lines = lineBuffer.split("\n");
 			lineBuffer = lines.pop() || "";
@@ -895,13 +902,18 @@ export default function (pi: ExtensionAPI) {
 	async function recordCurrentBranch(cwd: string): Promise<{ repoRoot: string; branch: string } | undefined> {
 		try {
 			const repoRoot = (await getRepoRoot(cwd)) || cwd;
-			const { stdout } = await execFileAsync("git", ["branch", "--show-current"], { cwd });
-			const branch = stdout.trim();
-			// Read-only: the caller commits the branch to trackedBranchesByRepo only after its
-			// generation check, so a stale check cannot inject into a reset session.
-			return { repoRoot, branch };
+			try {
+				const { stdout } = await execFileAsync("git", ["branch", "--show-current"], { cwd });
+				// Read-only: the caller commits the branch to trackedBranchesByRepo only after its
+				// generation check, so a stale check cannot inject into a reset session.
+				return { repoRoot, branch: stdout.trim() };
+			} catch {
+				// The branch command can fail (transient git error) in a valid repo: keep the
+				// resolved repoRoot so the caller can proceed; an empty branch is not committed.
+				return { repoRoot, branch: "" };
+			}
 		} catch {
-			// Ignore if not a git repository or detached HEAD
+			// Ignore if not a git repository
 			return undefined;
 		}
 	}
@@ -1085,14 +1097,18 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Delete only the notices this turn delivered. A PR deferred in after the snapshot
 			// (e.g. a suppressed announcement timer firing in this window) did not ride the
-			// message and must survive to the next idle input.
+			// message: keep suppressing until it rides the next idle input.
 			for (const prNumber of markedSource) deferredAnnouncements.delete(prNumber);
+			suppressUpdates = deferredAnnouncements.size > 0;
 			if (changed) persistState();
+		} else {
+			// A turn that started without carrying the notice (e.g. a slash command): release
+			// suppression so updates flow; any pending notice stays queued for the next idle input.
+			suppressUpdates = false;
 		}
 		noticeAttached = false;
 		noticeAttachedFor = undefined;
 		userTurnPending = false;
-		suppressUpdates = false;
 	});
 
 	async function pollAllObservedPRs() {
