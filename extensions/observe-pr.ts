@@ -1144,6 +1144,10 @@ export default function (pi: ExtensionAPI) {
 		"- Is OK to end your work and wait for the updates from the CI if there are no other pending tasks until the PR is done or state changes.";
 
 	pi.on("before_agent_start", (event) => {
+		// A run started by a custom message (pi.sendMessage(..., { triggerTurn: true })) fires no
+		// input event: if a notice is still armed, the armed prompt must have died, and this
+		// run must not consume the arm (same stale-arm class as the input-side interposition).
+		if (event.messageType === "custom" && noticeAttached) noticeAttachBroken = true;
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
 		if (!isEnabled) {
 			if (event.systemPromptOptions?.sections?.pr_auto_tracking) {
