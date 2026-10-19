@@ -1,5 +1,7 @@
 # claude-marketplace
 
+[![CI](https://github.com/lucasschirm/claude-marketplace/actions/workflows/ci.yml/badge.svg)](https://github.com/lucasschirm/claude-marketplace/actions/workflows/ci.yml)
+
 My collection of Claude Code plugins and Pi extensions — skills, agents, hooks, and extensions I reuse across projects.
 
 ## Add this marketplace to Claude Code
@@ -281,3 +283,26 @@ pi -e git:github.com/lucasschirm/claude-marketplace
 # or locally:
 pi -e ./extensions/observe-pr.ts
 ```
+
+---
+
+## Tests & CI
+
+Every pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml), which also runs on pushes to `main` and can be triggered manually from the Actions tab.
+
+| Job | What it runs |
+|---|---|
+| **Manifests & unit tests** | `node scripts/validate-marketplace.mjs` (marketplace/plugin/Pi manifests + skill & agent frontmatter) and `node --test` on the standalone unit tests |
+| **Pi extension tests** | one matrix job per suite: `observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools` — each installs Pi (`@earendil-works/pi-coding-agent`) and runs the suite inside the Pi runtime with mocked `gh` and `--offline`, so no model credentials are needed |
+
+Run the same suites locally (Node >= 23.6 is required — `node --test` runs the TypeScript tests directly):
+
+```bash
+npm test                     # every CI suite
+npm run validate             # manifests only
+npm run test:unit            # standalone node:test suites only
+bash test/run.sh --list      # list suite names
+bash test/run.sh pr-tasks    # run one suite
+```
+
+Suites deliberately **not** in CI: `test/test-devin-delegate.ts` and `test/test-devin-delegate-lifecycle.ts` start real Devin sessions, and `test/test-orca-orchestration.sh` needs a live Orca backend. Run those by hand.

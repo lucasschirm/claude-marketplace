@@ -16,6 +16,9 @@ plugins/<plugin-name>/
   agents/<agent-name>.md            # subagent definitions (optional, add as needed)
   commands/<command-name>.md        # slash commands (optional, add as needed)
   hooks/hooks.json                  # hook definitions (optional, add as needed)
+test/<name>.ts | test/<name>.sh     # tests; `bash test/run.sh` runs the CI suites
+scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
+.github/workflows/ci.yml            # CI: manifests, unit tests, Pi extension suites
 ```
 
 - `.claude-plugin/marketplace.json` is the root manifest. Each entry in its `plugins` array has `name`, `source` (relative path to the plugin directory), and `description`, and must match a real plugin under `plugins/`.
@@ -31,7 +34,7 @@ plugins/<plugin-name>/
 
 ## Validating changes
 
-There's no build/lint/test tooling — validate manually:
-- Check JSON manifests parse: `jq . .claude-plugin/marketplace.json` and `jq . plugins/*/.claude-plugin/plugin.json`
-- Confirm every `source` path in `marketplace.json` resolves to a directory containing a `.claude-plugin/plugin.json`.
+- `npm run validate` (`node scripts/validate-marketplace.mjs`) replaces the manual manifest checks: JSON manifests parse, every `source` resolves to a directory containing `.claude-plugin/plugin.json`, names match between `marketplace.json` and `plugin.json`, no `plugins/*` directory is missing from the manifest, and every `SKILL.md` / `agents/*.md` has `name` + `description` frontmatter.
+- `npm test` (`bash test/run.sh`) runs every CI suite; `bash test/run.sh --list` lists suite names and `npm run test:unit` runs only the standalone `node --test` files. Node >= 23.6 is required (it runs TypeScript directly).
+- CI (`.github/workflows/ci.yml`) runs on every pull request, on pushes to `main`, and manually: a manifests + unit-test job, plus a matrix job per Pi extension suite (`observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`). It installs Pi from npm and needs no model credentials — the suites mock `gh`/Pi APIs and run `--offline`.
 - To smoke-test a plugin locally in Claude Code, add this repo as a marketplace (`/plugin marketplace add <path-to-this-repo>`) and install the plugin to confirm skills/agents load correctly.
