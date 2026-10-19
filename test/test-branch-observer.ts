@@ -143,7 +143,7 @@ exit 0
 
       // Wait 1.5s (longer than 1000ms) to ensure the pending announcement was cancelled and NOT sent
       await new Promise((r) => setTimeout(r, 1500));
-      if (sentMessages.some((m) => m.includes("The PR 101 recently created is now being observed"))) {
+      if (sentMessages.some((m) => m.includes("The PR 101 is now being observed"))) {
         throw new Error("Pending announcement for 101 was NOT cancelled!");
       }
       console.log("✓ Test 1 Passed: Announcement was cancelled, agent received usual start message, PR remained observed.");
@@ -187,7 +187,7 @@ exit 0
 
       // Wait 1.5s for PR #202 announcement to be delivered to agent
       await new Promise((r) => setTimeout(r, 1500));
-      const expectedAutoMsg = "The PR 202 recently created is now being observed and you will get all updates for the PR. Calling the \"observe_pr\" tool will stop the tracking for the PR and automatic updates";
+      const expectedAutoMsg = "The PR 202 is now being observed and you will get all updates for the PR. Calling the \"observe_pr\" tool will stop the tracking for the PR and automatic updates";
       if (!sentMessages.includes(expectedAutoMsg)) {
         throw new Error(`Expected announcement message "${expectedAutoMsg}", sentMessages: ${JSON.stringify(sentMessages)}`);
       }

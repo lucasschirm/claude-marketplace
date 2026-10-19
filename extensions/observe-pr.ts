@@ -37,6 +37,32 @@ interface ObservedPR {
 	restartTimer?: NodeJS.Timeout;
 	knownComments: Map<string, CommentInfo>;
 	allPassedReported?: boolean;
+	/** The agent has already been told this PR is observed (notice delivered, or the observation
+	 * was explicitly started via the tool, whose result is the notification). */
+	announced?: boolean;
+}
+
+const STATE_CUSTOM_TYPE = "pi_observe_pr_state";
+
+interface PersistedObservedPR {
+	prNumber: number;
+	cwd: string;
+	activeRuns: string[];
+	seenRuns: string[];
+	failedRuns: string[];
+	completedRuns: string[];
+	// Comment bodies are omitted to keep session entries small; updatedAt-based edit detection
+	// still works after a restore (pollPR tolerates a missing body on the stored entry).
+	knownComments: Array<{ id: string; number: string; updatedAt?: string }>;
+	allPassedReported: boolean;
+	announced: boolean;
+}
+
+interface PersistedObserverState {
+	v: 1;
+	observed: PersistedObservedPR[];
+	// PRs explicitly stopped (tool re-call, /pr_observer stop) or auto-stopped (merged/closed).
+	stopped: number[];
 }
 
 interface PRObserverStats {
@@ -135,7 +161,9 @@ export default function (pi: ExtensionAPI) {
 	(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
 	const trackedBranchesByRepo = new Map<string, Set<string>>();
 	const branchToPR = new Map<string, number>();
-	const autoDetectedPRs = new Set<number>();
+	// PRs that must not be auto-observed again: stopped by the agent (/pr_observer stop, second
+	// observe_pr call) or auto-stopped (merged/closed). Restored from the session on resume.
+	const stoppedPRs = new Set<number>();
 	const pendingAnnouncements = new Map<number, { timer: NodeJS.Timeout; delivered: boolean; prNumber: number }>();
 	let branchPollTimer: NodeJS.Timeout | undefined;
 	let lastUIContext: ExtensionUIContext | undefined;
@@ -200,7 +228,156 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function getTrackingAnnouncement(prNumber: number): string {
-		return `The PR ${prNumber} recently created is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`;
+		return `The PR ${prNumber} is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`;
+	}
+
+	// Persist the full observer state as a session custom entry (last entry wins on restore).
+	// Never participates in LLM context; degrades to in-process-only state if the append fails.
+	function persistState() {
+		try {
+			const state: PersistedObserverState = {
+				v: 1,
+				observed: Array.from(observedPRs.values()).map((p) => ({
+					prNumber: p.prNumber,
+					cwd: p.cwd,
+					activeRuns: Array.from(p.activeRuns),
+					seenRuns: Array.from(p.seenRuns),
+					failedRuns: Array.from(p.failedRuns),
+					completedRuns: Array.from(p.completedRuns),
+					knownComments: Array.from(p.knownComments.values()).map((c) => ({
+						id: c.id,
+						number: c.number,
+						updatedAt: c.updatedAt,
+					})),
+					allPassedReported: Boolean(p.allPassedReported),
+					announced: Boolean(p.announced),
+				})),
+				stopped: Array.from(stoppedPRs),
+			};
+			pi.appendEntry(STATE_CUSTOM_TYPE, state);
+		} catch (err) {
+			console.error("[observe_pr] Failed to persist observer state:", err);
+		}
+	}
+
+	// Stop all watchers and clear every in-memory container without emitting a state entry.
+	// Used on session_shutdown (state was already persisted at the last real change) and as the
+	// first step of restoreState() (the incoming session's entries are the source of truth).
+	function resetObserverState() {
+		if (branchPollTimer) {
+			clearInterval(branchPollTimer);
+			branchPollTimer = undefined;
+		}
+
+		for (const pending of pendingAnnouncements.values()) {
+			clearTimeout(pending.timer);
+		}
+		pendingAnnouncements.clear();
+
+		for (const pr of observedPRs.values()) {
+			if (pr.pollTimer) {
+				clearInterval(pr.pollTimer);
+			}
+			if (pr.restartTimer) {
+				clearTimeout(pr.restartTimer);
+			}
+			if (pr.checksProcess) {
+				try {
+					pr.checksProcess.kill("SIGTERM");
+				} catch {}
+			}
+			for (const proc of pr.runProcesses.values()) {
+				try {
+					proc.kill("SIGTERM");
+				} catch {}
+			}
+			pr.runProcesses.clear();
+		}
+		observedPRs.clear();
+
+		// Branch/PR bookkeeping is session-scoped: a fresh session re-detects from scratch, a
+		// resumed session is rebuilt by restoreState() from its persisted entries.
+		stoppedPRs.clear();
+		trackedBranchesByRepo.clear();
+		branchToPR.clear();
+		deferredAnnouncements.clear();
+		suppressUpdates = false;
+		noticeAttached = false;
+		userTurnPending = false;
+		sessionHasRun = false;
+		startupCheck = undefined;
+	}
+
+	// Rebuild in-memory state from the session's latest pi_observe_pr_state entry (branch-aware,
+	// so forked/navigated sessions restore the state of their own history). Observed PRs are
+	// re-observed silently — the agent already knows about them — except PRs whose notice was
+	// still pending when the session ended, which ride the first plain idle user message again.
+	function restoreState(sessionManager?: { getBranch?: () => unknown[] }) {
+		resetObserverState();
+
+		let entries: unknown[] = [];
+		try {
+			entries = sessionManager?.getBranch?.() ?? [];
+		} catch (err) {
+			console.error("[observe_pr] Failed to read session branch for state restore:", err);
+		}
+
+		let latest: any;
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const e = entries[i] as any;
+			if (e && e.type === "custom" && e.customType === STATE_CUSTOM_TYPE) {
+				latest = e;
+				break;
+			}
+		}
+		const state = latest?.data as PersistedObserverState | undefined;
+		if (!state || state.v !== 1 || !Array.isArray(state.observed)) return;
+
+		for (const n of Array.isArray(state.stopped) ? state.stopped : []) {
+			if (typeof n === "number" && n > 0) stoppedPRs.add(n);
+		}
+
+		let restored = 0;
+		for (const p of state.observed) {
+			if (!p || typeof p.prNumber !== "number" || typeof p.cwd !== "string") continue;
+			const pr: ObservedPR = {
+				prNumber: p.prNumber,
+				cwd: p.cwd,
+				activeRuns: new Set(Array.isArray(p.activeRuns) ? p.activeRuns : []),
+				seenRuns: new Set(Array.isArray(p.seenRuns) ? p.seenRuns : []),
+				failedRuns: new Set(Array.isArray(p.failedRuns) ? p.failedRuns : []),
+				completedRuns: new Set(Array.isArray(p.completedRuns) ? p.completedRuns : []),
+				runProcesses: new Map(),
+				knownComments: new Map(
+					(Array.isArray(p.knownComments) ? p.knownComments : []).map((c: any) => [
+						String(c?.id),
+						{ id: String(c?.id), number: String(c?.number), updatedAt: c?.updatedAt },
+					]),
+				),
+				allPassedReported: Boolean(p.allPassedReported),
+				announced: Boolean(p.announced),
+			};
+
+			observedPRs.set(pr.prNumber, pr);
+			startChecksProcess(pr);
+			pr.pollTimer = setInterval(() => {
+				pollPR(pr.prNumber);
+			}, getObserverInterval() * 1000);
+			// In-flight runs survive the restart: re-watching is silent for already-reported runs
+			// (the watchRun close handler dedups on failedRuns/completedRuns).
+			for (const runId of pr.activeRuns) {
+				watchRun(pr.prNumber, runId, pr.cwd);
+			}
+
+			if (!pr.announced) {
+				deferredAnnouncements.set(pr.prNumber, getTrackingAnnouncement(pr.prNumber));
+				suppressUpdates = true;
+			}
+			restored++;
+		}
+		if (restored > 0) {
+			updateStatusUI();
+		}
 	}
 
 	function getStats(): PRObserverStats {
@@ -347,6 +524,10 @@ export default function (pi: ExtensionAPI) {
 
 			currentPr.runProcesses.delete(runId);
 
+			// A run that was already reported (e.g. re-watched after a resume) keeps its
+			// bookkeeping and UI state but must not notify the agent twice.
+			const alreadyReported = currentPr.failedRuns.has(runId) || currentPr.completedRuns.has(runId);
+
 			let conclusion = "unknown";
 			try {
 				const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status"], {
@@ -375,10 +556,12 @@ export default function (pi: ExtensionAPI) {
 				currentPr.activeRuns.delete(runId);
 				updateStatusUI();
 
-				const errorSummary = await getRunErrorSummary(runId, cwd);
-				sendAgentMessage(
-					`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`,
-				);
+				if (!alreadyReported) {
+					const errorSummary = await getRunErrorSummary(runId, cwd);
+					sendAgentMessage(
+						`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`,
+					);
+				}
 			} else {
 				currentPr.completedRuns.add(runId);
 				currentPr.activeRuns.delete(runId);
@@ -491,7 +674,77 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function startObserving(prNumber: number, initialComments: any[], cwd: string, ui?: ExtensionUIContext) {
+	function startChecksProcess(pr: ObservedPR) {
+		const prNumber = pr.prNumber;
+		if (!observedPRs.has(prNumber)) return;
+
+		const interval = getObserverInterval();
+		const intervalStr = String(interval);
+
+		let checksProc: ChildProcess;
+		try {
+			checksProc = spawn("gh", ["pr", "checks", String(prNumber), "--watch", "--interval", intervalStr], {
+				cwd: pr.cwd,
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+		} catch (err) {
+			console.error(`[observe_pr] Error spawning gh pr checks for PR ${prNumber}:`, err);
+			return;
+		}
+
+		checksProc.on("error", (err) => {
+			console.error(`[observe_pr] Error in gh pr checks process for PR ${prNumber}:`, err);
+		});
+
+		pr.checksProcess = checksProc;
+
+		let lineBuffer = "";
+		const handleData = (chunk: Buffer) => {
+			lineBuffer += chunk.toString();
+			const lines = lineBuffer.split("\n");
+			lineBuffer = lines.pop() || "";
+
+			for (const line of lines) {
+				const runRegex = /\/actions\/runs\/(\d+)/g;
+				let match: RegExpExecArray | null;
+				while ((match = runRegex.exec(line)) !== null) {
+					const runId = match[1];
+					if (!pr.seenRuns.has(runId)) {
+						pr.seenRuns.add(runId);
+						pr.activeRuns.add(runId);
+						updateStatusUI();
+						watchRun(prNumber, runId, pr.cwd);
+					}
+				}
+			}
+		};
+
+		checksProc.stdout?.on("data", handleData);
+		checksProc.stderr?.on("data", handleData);
+
+		checksProc.on("close", async () => {
+			if (!observedPRs.has(prNumber)) return;
+			await pollPR(prNumber);
+			// Re-resolve: a stop + re-observe between close and restart replaces the map entry.
+			const currentPr = observedPRs.get(prNumber);
+			if (!currentPr) return;
+			// Restart after interval if PR is still observed
+			currentPr.restartTimer = setTimeout(() => {
+				const livePr = observedPRs.get(prNumber);
+				if (livePr) {
+					startChecksProcess(livePr);
+				}
+			}, interval * 1000);
+		});
+	}
+
+	function startObserving(
+		prNumber: number,
+		initialComments: any[],
+		cwd: string,
+		ui?: ExtensionUIContext,
+		options?: { explicit?: boolean },
+	) {
 		if (ui) {
 			lastUIContext = ui;
 		}
@@ -506,6 +759,7 @@ export default function (pi: ExtensionAPI) {
 			runProcesses: new Map(),
 			knownComments: new Map(),
 			allPassedReported: false,
+			announced: false,
 		};
 
 		if (Array.isArray(initialComments)) {
@@ -515,74 +769,26 @@ export default function (pi: ExtensionAPI) {
 			});
 		}
 
+		// An explicit tool call informs the agent via its result, so no separate notice is due;
+		// an explicit start also overrides a prior stop for this PR.
+		if (options?.explicit) {
+			pr.announced = true;
+			stoppedPRs.delete(prNumber);
+		}
+
 		observedPRs.set(prNumber, pr);
 		updateStatusUI(ui);
 
+		startChecksProcess(pr);
+
 		const interval = getObserverInterval();
-		const intervalStr = String(interval);
-
-		function startChecksProcess() {
-			if (!observedPRs.has(prNumber)) return;
-
-			let checksProc: ChildProcess;
-			try {
-				checksProc = spawn("gh", ["pr", "checks", String(prNumber), "--watch", "--interval", intervalStr], {
-					cwd,
-					stdio: ["ignore", "pipe", "pipe"],
-				});
-			} catch (err) {
-				console.error(`[observe_pr] Error spawning gh pr checks for PR ${prNumber}:`, err);
-				return;
-			}
-
-			checksProc.on("error", (err) => {
-				console.error(`[observe_pr] Error in gh pr checks process for PR ${prNumber}:`, err);
-			});
-
-			pr.checksProcess = checksProc;
-
-			let lineBuffer = "";
-			const handleData = (chunk: Buffer) => {
-				lineBuffer += chunk.toString();
-				const lines = lineBuffer.split("\n");
-				lineBuffer = lines.pop() || "";
-
-				for (const line of lines) {
-					const runRegex = /\/actions\/runs\/(\d+)/g;
-					let match: RegExpExecArray | null;
-					while ((match = runRegex.exec(line)) !== null) {
-						const runId = match[1];
-						if (!pr.seenRuns.has(runId)) {
-							pr.seenRuns.add(runId);
-							pr.activeRuns.add(runId);
-							updateStatusUI();
-							watchRun(prNumber, runId, cwd);
-						}
-					}
-				}
-			};
-
-			checksProc.stdout?.on("data", handleData);
-			checksProc.stderr?.on("data", handleData);
-
-			checksProc.on("close", async () => {
-				if (!observedPRs.has(prNumber)) return;
-				await pollPR(prNumber);
-				if (!observedPRs.has(prNumber)) return;
-				// Restart after interval if PR is still observed
-				pr.restartTimer = setTimeout(() => {
-					if (observedPRs.has(prNumber)) {
-						startChecksProcess();
-					}
-				}, interval * 1000);
-			});
-		}
-
-		startChecksProcess();
-
 		pr.pollTimer = setInterval(() => {
 			pollPR(prNumber);
 		}, interval * 1000);
+
+		// Restore re-registers observed PRs directly (seeding the dedup sets) without going
+		// through startObserving, so every call here is a real state change worth persisting.
+		persistState();
 	}
 
 	function stopObserving(prNumber: number) {
@@ -596,10 +802,14 @@ export default function (pi: ExtensionAPI) {
 			pendingAnnouncements.delete(prNumber);
 		}
 
-		autoDetectedPRs.add(prNumber);
+		stoppedPRs.add(prNumber);
 
 		const pr = observedPRs.get(prNumber);
-		if (!pr) return;
+		if (!pr) {
+			// Not actively observed, but the stop is still a state change worth recording.
+			persistState();
+			return;
+		}
 
 		if (pr.pollTimer) {
 			clearInterval(pr.pollTimer);
@@ -624,29 +834,7 @@ export default function (pi: ExtensionAPI) {
 		pr.runProcesses.clear();
 		observedPRs.delete(prNumber);
 		updateStatusUI();
-	}
-
-	function cleanupAll() {
-		if (branchPollTimer) {
-			clearInterval(branchPollTimer);
-			branchPollTimer = undefined;
-		}
-
-		for (const pending of pendingAnnouncements.values()) {
-			clearTimeout(pending.timer);
-		}
-		pendingAnnouncements.clear();
-
-		for (const prNumber of Array.from(observedPRs.keys())) {
-			stopObserving(prNumber);
-		}
-
-		// Branch/PR bookkeeping is session-scoped: a new session re-detects from
-		// scratch. Without clearing, these accumulate across every session in one
-		// process (and re-announcing after a session switch is the desired behavior).
-		trackedBranchesByRepo.clear();
-		branchToPR.clear();
-		autoDetectedPRs.clear();
+		persistState();
 	}
 
 	async function getRepoRoot(cwd: string): Promise<string | undefined> {
@@ -692,7 +880,7 @@ export default function (pi: ExtensionAPI) {
 			for (const branch of Array.from(branches)) {
 				const cacheKey = `${repoRoot}:${branch}`;
 				const knownPr = branchToPR.get(cacheKey);
-				if (knownPr && (observedPRs.has(knownPr) || autoDetectedPRs.has(knownPr))) {
+				if (knownPr && (observedPRs.has(knownPr) || stoppedPRs.has(knownPr))) {
 					continue;
 				}
 
@@ -717,9 +905,8 @@ export default function (pi: ExtensionAPI) {
 						!isDraft &&
 						prNumber &&
 						!observedPRs.has(prNumber) &&
-						!autoDetectedPRs.has(prNumber)
+						!stoppedPRs.has(prNumber)
 					) {
-						autoDetectedPRs.add(prNumber);
 						startObserving(prNumber, data.comments || [], repoRoot, lastUIContext);
 
 						if (deferAnnouncements && !sessionHasRun) {
@@ -738,6 +925,15 @@ export default function (pi: ExtensionAPI) {
 								pending.delivered = true;
 								pendingAnnouncements.delete(prNumber);
 								announceTracking(prNumber);
+								// If announceTracking deferred the notice (startup suppression),
+								// agent_start marks it announced instead.
+								if (!suppressUpdates) {
+									const pr = observedPRs.get(prNumber);
+									if (pr && !pr.announced) {
+										pr.announced = true;
+										persistState();
+									}
+								}
 							}
 						}, delay);
 
@@ -769,8 +965,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_evt, ctx) => {
 		lastUIContext = ctx.ui;
 		lastCwd = ctx.cwd || process.cwd();
-		updateStatusUI(ctx.ui);
 		disposed = false;
+		// Rebuild in-memory state from this session's persisted entries before the branch check,
+		// so resumed observation is silent and stopped PRs stay stopped.
+		restoreState(ctx.sessionManager);
+		updateStatusUI(ctx.ui);
 		startupCheck = checkTrackedBranches(lastCwd, true);
 		startBranchPollTimer();
 	});
@@ -811,7 +1010,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", () => {
 		sessionHasRun = true;
 		if (!noticeAttached && !userTurnPending) return;
-		if (noticeAttached) deferredAnnouncements.clear();
+		if (noticeAttached) {
+			// The notice rode on this turn: the agent has now been told about these PRs.
+			let changed = false;
+			for (const prNumber of deferredAnnouncements.keys()) {
+				const pr = observedPRs.get(prNumber);
+				if (pr && !pr.announced) {
+					pr.announced = true;
+					changed = true;
+				}
+			}
+			deferredAnnouncements.clear();
+			if (changed) persistState();
+		}
 		noticeAttached = false;
 		userTurnPending = false;
 		suppressUpdates = false;
@@ -865,16 +1076,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		disposed = true;
-		deferredAnnouncements.clear();
-		suppressUpdates = false;
-		noticeAttached = false;
-		userTurnPending = false;
-		sessionHasRun = false;
-		startupCheck = undefined;
+		// State was already persisted at the moment of the last change; reset without appending
+		// another entry to the session that is shutting down.
+		resetObserverState();
 		lastUIContext = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_OBSERVED_PRS__;
-		cleanupAll();
 	});
 
 	pi.registerTool({
@@ -902,11 +1109,17 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// If the PR was auto-detected and announcement is still pending delivery,
-			// cancel the announcement and return the usual start message without stopping observation
+			// cancel the announcement and return the usual start message without stopping observation.
+			// The tool result informs the agent, so the PR counts as announced from now on.
 			const pending = pendingAnnouncements.get(prNumber);
 			if (pending && !pending.delivered) {
 				clearTimeout(pending.timer);
 				pendingAnnouncements.delete(prNumber);
+				const pr = observedPRs.get(prNumber);
+				if (pr && !pr.announced) {
+					pr.announced = true;
+					persistState();
+				}
 				return {
 					content: [
 						{
@@ -971,7 +1184,7 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 
-			startObserving(prNumber, prData.comments || [], ctx.cwd, ctx.ui);
+			startObserving(prNumber, prData.comments || [], ctx.cwd, ctx.ui, { explicit: true });
 
 			return {
 				content: [

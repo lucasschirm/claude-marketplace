@@ -8,13 +8,17 @@ import * as os from "node:os";
 // PR updates are discarded until that turn starts, and notifications use steer delivery.
 export default function (pi: any) {
   const handlers: Record<string, Function> = {};
+  const tools: Record<string, any> = {};
   const sent: { content: string; opts: any }[] = [];
+  const appended: Array<{ customType: string; data: any }> = [];
 
   const mockPi = {
     on(event: string, handler: Function) {
       handlers[event] = handler;
     },
-    registerTool() {},
+    registerTool(t: any) {
+      tools[t.name] = t;
+    },
     registerCommand() {},
     registerFlag() {},
     getFlag(name: string) {
@@ -24,6 +28,9 @@ export default function (pi: any) {
     setActiveTools() {},
     sendUserMessage(content: string, opts: any) {
       sent.push({ content, opts });
+    },
+    appendEntry(customType: string, data: any) {
+      appended.push({ customType, data });
     },
   };
 
@@ -52,12 +59,17 @@ exit 1
 
   ext(mockPi as any);
 
-  const ctx = { cwd: tmpDir, ui: { setStatus() {}, notify() {} }, hasUI: false };
+  const ctx = {
+    cwd: tmpDir,
+    ui: { setStatus() {}, notify() {} },
+    hasUI: false,
+    sessionManager: { getBranch: () => [] },
+  };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const assert = (cond: unknown, msg: string) => {
     if (!cond) throw new Error(msg);
   };
-  const NOTICE = "The PR 7 recently created is now being observed";
+  const NOTICE = "The PR 7 is now being observed";
 
   pi.on("session_start", async () => {
     try {
