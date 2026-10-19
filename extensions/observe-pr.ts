@@ -57,6 +57,16 @@ interface PRObserverStats {
 	github: { status: "healthy" | "degraded"; consecutiveFailures: number; nextRetryInMs: number };
 }
 
+/** Human-readable duration for the dashboard / status ("45s", "1m 30s"). */
+function formatMs(ms: number): string {
+	if (ms <= 0) return "now";
+	const s = Math.ceil(ms / 1000);
+	if (s < 60) return `${s}s`;
+	const m = Math.floor(s / 60);
+	const rs = s % 60;
+	return rs > 0 ? `${m}m ${rs}s` : `${m}m`;
+}
+
 class PRObserverDashboardComponent {
 	private theme: any;
 	private getStats: () => PRObserverStats;
@@ -188,15 +198,6 @@ export default function (pi: ExtensionAPI) {
 				lastUIContext.notify(msg, "warning");
 			} catch {}
 		}
-	}
-
-	function formatMs(ms: number): string {
-		if (ms <= 0) return "now";
-		const s = Math.ceil(ms / 1000);
-		if (s < 60) return `${s}s`;
-		const m = Math.floor(s / 60);
-		const rs = s % 60;
-		return rs > 0 ? `${m}m ${rs}s` : `${m}m`;
 	}
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
@@ -715,16 +716,27 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			checksProc.stdout?.on("data", handleData);
+			// A short stderr tail so the close handler can classify the exit (a CI failure
+			// must not be recorded as a GitHub failure; only a real availability error is)
+			let errTail = "";
+			checksProc.stderr?.on("data", (chunk: Buffer) => {
+				errTail = (errTail + chunk.toString()).slice(-2000);
+			});
 			checksProc.stderr?.on("data", handleData);
 
 			checksProc.on("close", (code) => {
-				if (!observedPRs.has(prNumber)) return;
+				// (release before the removal check: a stop/shutdown mid-outage must not
+				// wedge the shared slot — the singleton outlives this observation)
 				if (slotHeld) ghHealth.release();
-				// A non-zero exit is a gh error (network, auth, or crash): silent, and the
-				// restart follows the shared backoff instead of the fixed interval.
+				if (!observedPRs.has(prNumber)) return;
 				// (code === null: the process was killed by signal, e.g. our own stop —
-				// not a GitHub failure)
-				if (code !== null && code !== 0) ghHealth.recordFailure();
+				// not a GitHub failure; gh exits 1/8 for failed/pending checks — those are
+				// CI results, not availability: only a real availability error in the
+				// stderr tail records a failure, and the restart follows the shared
+				// backoff instead of the fixed interval)
+				if (code !== null && code !== 0 && isGhAvailabilityError({ code, message: errTail })) {
+					ghHealth.recordFailure();
+				}
 				void pollPR(prNumber);
 				if (!observedPRs.has(prNumber)) return;
 				const delay =
@@ -1005,6 +1017,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function pollAllObservedPRs() {
+		// (degraded: at most one PR gets the slot per backoff slot — a long outage
+		// starves later PRs deterministically; harmless, since all calls fail alike)
 		for (const prNumber of Array.from(observedPRs.keys())) {
 			await pollPR(prNumber);
 		}
@@ -1013,6 +1027,11 @@ export default function (pi: ExtensionAPI) {
 	async function settlePendingAutoStarts() {
 		if (pendingAutoStart.size === 0) return;
 		for (const [prNumber, entry] of Array.from(pendingAutoStart.entries())) {
+			// (already observed through another path in the meantime: cancel it)
+			if (observedPRs.has(prNumber)) {
+				pendingAutoStart.delete(prNumber);
+				continue;
+			}
 			if (!ghHealth.acquireSlot()) return; // The slot is busy; the next one settles it
 			let ghErr: unknown;
 			let data: any;
@@ -1098,6 +1117,9 @@ export default function (pi: ExtensionAPI) {
 		disposed = true;
 		deferredAnnouncements.clear();
 		pendingAutoStart.clear();
+		// (the singleton outlives the session: a pending retry timer or a wedged slot
+		// must not carry into the next session in the same process)
+		ghHealth.reset();
 		suppressUpdates = false;
 		noticeAttached = false;
 		userTurnPending = false;
@@ -1152,6 +1174,8 @@ export default function (pi: ExtensionAPI) {
 			// If the agent calls the same tool for the same PR, stop observing
 			if (observedPRs.has(prNumber)) {
 				stopObserving(prNumber);
+				// (a stopped observation cancels its pending auto-start too)
+				pendingAutoStart.delete(prNumber);
 				return {
 					content: [
 						{
@@ -1228,6 +1252,9 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			startObserving(prNumber, prData.comments || [], ctx.cwd, ctx.ui);
+			// (the observation started through this explicit path: the pending
+			// auto-start, if any, must not start it a second time on the next slot)
+			pendingAutoStart.delete(prNumber);
 
 			return {
 				content: [

@@ -112,6 +112,11 @@ export class GhHealth {
 	release(): void {
 		if (!this.inFlight) return;
 		this.inFlight = false;
+		// The consumed window ends with the holder's work: a holder that recorded
+		// neither success nor failure (e.g. a 404-class or no-op call) must not burn
+		// the window — the next caller (or the pendingWhileBusy re-fire below) claims it.
+		// recordFailure still blocks re-claims via slotDue; recordSuccess via failures===0.
+		this.windowUsed = false;
 		if (this.pendingWhileBusy) {
 			this.pendingWhileBusy = false;
 			this.fireHooks();
@@ -195,13 +200,20 @@ const AVAILABILITY_CODES = new Set([
 	"ENOTFOUND",
 	"ETIMEDOUT",
 	"EPIPE",
+	// spawn failure: the gh binary is missing from PATH (a broken environment, not a
+	// per-PR error) — pacing it keeps the extensions from respawning at 1 Hz
+	"ENOENT",
 ]);
 
+// Rate limits self-resolve: they must not be classified as auth errors (which
+// surface on explicit calls and skip the auto-start)
+const RATE_LIMIT_PATTERNS = /rate limit|too many requests|429\b/i;
+
 const AVAILABILITY_PATTERNS =
-	/\b(timed? ?out|failed to connect|connection (reset|refused|aborted|closed)|dial tcp|tls handshake|no route to host|network is unreachable|unauthorized|authentication failed|token expired|bad credentials|rate limit|too many requests|http\s?502|http\s?503|http\s?500|http 429)\b/i;
+	/\b(timed? ?out|failed to connect|connection (reset|refused|aborted|closed)|dial tcp|tls handshake|no route to host|network is unreachable|unexpected eof|enoent|context deadline exceeded|unauthorized|authentication failed|token expired|bad credentials|auth login|rate limit|too many requests|http\s?502|http\s?503|http\s?500|http 429)\b/i;
 
 const AUTH_PATTERNS =
-	/(unauthorized|authentication failed|token expired|bad credentials|401|403)\b/i;
+	/(unauthorized|authentication failed|token expired|bad credentials|auth login|\b401\b|\b403\b)/i;
 
 /**
  * Whether a failed `gh` call is an authentication problem (token expired, bad
@@ -219,6 +231,7 @@ export function isGhAuthError(err: unknown): boolean {
 	const text = [e.stderr, e.stdout, e.message]
 		.filter((v): v is string => typeof v === "string" && v.length > 0)
 		.join("\n");
+	if (RATE_LIMIT_PATTERNS.test(text)) return false; // a 403 rate limit is self-resolving, not an auth problem
 	return AUTH_PATTERNS.test(text);
 }
 

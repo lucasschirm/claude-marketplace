@@ -104,8 +104,11 @@ test("single-flight: one claim per slot, pending work re-fires the hooks on rele
 	health.release();
 	assert.strictEqual(hooks.length, 2, "releasing a held slot that is still due re-fires the hooks");
 
-	// The window stays consumed even though the slot was due: no double run
-	assert.strictEqual(health.acquireSlot(), false);
+	// The release was record-less: the consumed window ends with the holder's work,
+	// so the still-due slot is claimable again (no burned window / permanent stall)
+	assert.strictEqual(health.acquireSlot(), true, "record-less release leaves the slot claimable");
+	assert.strictEqual(health.acquireSlot(), false, "while held: no double claim");
+	health.release();
 });
 
 test("a 404-class error never touches the health state", () => {
@@ -150,4 +153,45 @@ test("auth errors are classified (and are also availability errors)", () => {
 	assert.strictEqual(isGhAuthError({ stderr: "failed to connect: dial tcp 1.2.3.4:443: i/o timeout" }), false, "a plain network failure is not an auth error");
 	assert.strictEqual(isGhAuthError({ stderr: "Could not resolve to a PullRequest with the number 999" }), false);
 	assert.strictEqual(isGhAuthError("HTTP 502 Bad Gateway"), false);
+});
+
+test("a holder that records nothing does not burn the slot (no permanent stall)", () => {
+	const { health, clock } = makeHealth();
+	health.recordFailure(); // degraded, slot due at +30 s
+	clock.advance(30_000);
+	assert.strictEqual(health.acquireSlot(), true);
+	// the caller makes a 404-class (or no) call: records neither success nor failure
+	health.release();
+	// the slot is due with no timer pending: a new caller must be able to claim it
+	// (the old code burned the window here and stalled all gated work permanently)
+	assert.strictEqual(health.acquireSlot(), true, "no stall: the slot stays claimable after a record-less release");
+	health.release();
+});
+
+test("a release while the slot became due re-fires the hooks (pendingWhileBusy)", () => {
+	const { health, clock, hooks } = makeHealth();
+	health.recordFailure();
+	clock.advance(30_000); // timer fires -> hook #1
+	assert.strictEqual(hooks.length, 1);
+	assert.strictEqual(health.acquireSlot(), true);
+	clock.advance(30_000); // a next slot became due while the holder is still running
+	assert.strictEqual(health.acquireSlot(), false, "in flight: no claim");
+	health.release(); // records nothing
+	assert.strictEqual(hooks.length, 2, "the pending slot re-fires the hooks on release");
+});
+
+test("common gh network error strings are classified", () => {
+	assert.strictEqual(isGhAvailabilityError({ stderr: 'Get "https://api.github.com/...": context deadline exceeded' }), true, "Go HTTP client timeout");
+	assert.strictEqual(isGhAvailabilityError({ stderr: "streaming response: unexpected EOF" }), true, "dropped mid-response");
+	assert.strictEqual(isGhAvailabilityError({ code: "ENOENT" }), true, "missing gh binary paces (no 1 Hz respawn loop)");
+	assert.strictEqual(isGhAvailabilityError(new Error("spawn gh ENOENT")), true);
+	assert.strictEqual(isGhAvailabilityError({ stderr: "To auth to GitHub with gh, run: gh auth login" }), true, "not-logged-in paces the background");
+	assert.strictEqual(isGhAuthError({ stderr: "To auth to GitHub with gh, run: gh auth login" }), true, "not-logged-in surfaces on explicit calls");
+});
+
+test("a 403 rate limit is availability, not an auth error", () => {
+	const err = { stderr: "gh: HTTP 403: You have exceeded a secondary rate limit" };
+	assert.strictEqual(isGhAuthError(err), false, "a self-resolving rate limit must not take the auth path (which skips the auto-start)");
+	assert.strictEqual(isGhAvailabilityError(err), true, "but it still paces the background retries");
+	assert.strictEqual(isGhAuthError({ stderr: "HTTP 429: Too Many Requests" }), false);
 });

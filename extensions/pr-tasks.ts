@@ -865,6 +865,9 @@ export default function (pi: ExtensionAPI) {
 		delete (globalThis as any).__PI_ON_PR_CLOSED__;
 		sessionId++;
 		prTasksShutdown = true;
+		// (the singleton outlives the session: a pending retry timer or a wedged slot
+		// must not carry into the next session in the same process)
+		ghHealth.reset();
 		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
 		lastNudgeSignature = "";
 		identicalNudgeCount = 0;
