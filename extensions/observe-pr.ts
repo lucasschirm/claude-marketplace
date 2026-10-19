@@ -186,6 +186,10 @@ export default function (pi: ExtensionAPI) {
 	let persistFailureLogged = false;
 	// An idle user message has been received; the next agent run is that turn, even if no notice could be attached (e.g. a slash command).
 	let userTurnPending = false;
+	// A non-carrying input (slash, extension, queued) arrived while a notice was armed: the
+	// armed prompt likely failed before its turn started, so the next agent_start does not
+	// belong to the armed message and must not mark its notice delivered.
+	let noticeAttachBroken = false;
 	// Any agent run has started. A startup check finishing later than that falls back to the normal delayed announcement.
 	let sessionHasRun = false;
 	let disposed = false;
@@ -316,6 +320,7 @@ export default function (pi: ExtensionAPI) {
 		noticeAttached = false;
 		noticeAttachedFor = undefined;
 		userTurnPending = false;
+		noticeAttachBroken = false;
 		sessionHasRun = false;
 		startupCheck = undefined;
 		// Invalidate in-flight branch checks and clear the re-entry guard so the incoming
@@ -1048,11 +1053,13 @@ export default function (pi: ExtensionAPI) {
 	pi.on("input", async (event) => {
 		// Skill/template commands are expanded after this event, so appending text would corrupt them.
 		if (event.source === "extension") {
+			if (noticeAttached) noticeAttachBroken = true;
 			return { action: "continue" };
 		}
 		const idle = event.streamingBehavior === undefined;
 		if (idle) userTurnPending = true;
 		if (event.text.startsWith("/")) {
+			if (noticeAttached) noticeAttachBroken = true;
 			return { action: "continue" };
 		}
 		if (startupCheck) {
@@ -1069,11 +1076,14 @@ export default function (pi: ExtensionAPI) {
 		}
 		// A message queued while the agent is streaming starts no new turn, so keep the notice for an idle one.
 		if (!idle || deferredAnnouncements.size === 0) {
+			if (noticeAttached) noticeAttachBroken = true;
 			return { action: "continue" };
 		}
 		// Keep the notice queued until the turn actually starts, so a prompt that fails is retried with it.
 		const notices = Array.from(deferredAnnouncements.values()).join("\n\n");
 		noticeAttached = true;
+		// A fresh arm supersedes any interposition recorded before it.
+		noticeAttachBroken = false;
 		// Snapshot what this message actually carries; agent_start marks only these (a PR
 		// deferred in after the transform never rode the message and must not be marked).
 		noticeAttachedFor = new Set(deferredAnnouncements.keys());
@@ -1084,7 +1094,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", () => {
 		sessionHasRun = true;
 		if (!noticeAttached && !userTurnPending) return;
-		if (noticeAttached) {
+		if (noticeAttached && !noticeAttachBroken) {
 			// The notice rode on this turn: the agent has now been told about the PRs it carried.
 			let changed = false;
 			const markedSource = noticeAttachedFor ?? new Set(deferredAnnouncements.keys());
@@ -1102,13 +1112,15 @@ export default function (pi: ExtensionAPI) {
 			suppressUpdates = deferredAnnouncements.size > 0;
 			if (changed) persistState();
 		} else {
-			// A turn that started without carrying the notice (e.g. a slash command): release
-			// suppression so updates flow; any pending notice stays queued for the next idle input.
+			// A turn that started without carrying the notice (e.g. a slash command, or the armed
+			// prompt failed and a non-carrying turn started instead): release suppression so
+			// updates flow; any pending notice stays queued for the next idle input.
 			suppressUpdates = false;
 		}
 		noticeAttached = false;
 		noticeAttachedFor = undefined;
 		userTurnPending = false;
+		noticeAttachBroken = false;
 	});
 
 	async function pollAllObservedPRs() {

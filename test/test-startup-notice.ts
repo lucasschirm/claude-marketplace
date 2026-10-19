@@ -93,7 +93,25 @@ exit 1
       assert(afterSlash > 0 && sent.every((m) => m.opts?.deliverAs === "steer"), `updates must flow with deliverAs steer, got: ${JSON.stringify(sent)}`);
       console.log("✓ Test 3 Passed: notifications are delivered with steer.");
 
-      // The notice was never attached, so the next plain message carries it.
+      // An idle input arms the notice; its prompt then fails (no agent_start) and a slash
+      // command starts the next turn. The stale arm must not mark the undelivered notice.
+      const armed = await handlers.input({ text: "hello", source: "interactive" });
+      assert(
+        armed.action === "transform" && armed.text.includes(NOTICE),
+        `armed message must carry the notice, got ${JSON.stringify(armed)}`,
+      );
+      assert(
+        (await handlers.input({ text: "/skill:bar", source: "interactive" })).action === "continue",
+        "slash input must pass through unchanged",
+      );
+      handlers.agent_start({ type: "agent_start" });
+      const pr7 = ((globalThis as any).__PI_OBSERVED_PRS__ as Map<number, any> | undefined)?.get(7);
+      assert(pr7?.announced === false, "an undelivered notice must not be marked announced by the interposed turn");
+      await sleep(2200);
+      assert(sent.length > afterSlash && sent.every((m) => m.opts?.deliverAs === "steer"), `the slash turn must release suppression, got ${JSON.stringify(sent)}`);
+      console.log("✓ Test 4 Passed: a failed prompt followed by a slash turn does not consume the armed notice.");
+
+      // The notice was never delivered, so the next plain message re-arms and carries it.
       const res = await handlers.input({ text: "hello", source: "interactive" });
       assert(res.action === "transform" && res.text.startsWith("hello\n\n") && res.text.includes(NOTICE), `plain input must carry the notice, got: ${JSON.stringify(res)}`);
       // A failed prompt (no agent_start) must not lose the notice.
@@ -102,7 +120,7 @@ exit 1
       handlers.agent_start({ type: "agent_start" });
       const after = await handlers.input({ text: "later", source: "interactive" });
       assert(after.action === "continue", "notice must be delivered only once");
-      console.log("✓ Test 4 Passed: notice rides on the plain message, survives a failed prompt, and is delivered once.");
+      console.log("✓ Test 5 Passed: notice rides on the plain message, survives a failed prompt, and is delivered once.");
 
       console.log("✓ All startup notice tests passed successfully!");
       fs.rmSync(tmpDir, { recursive: true, force: true });
