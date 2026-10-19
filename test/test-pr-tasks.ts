@@ -1,3 +1,4 @@
+import "./gh-fail-env.ts";
 import ext from "../extensions/pr-tasks.ts";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -527,8 +528,16 @@ process.exit(0);
 		const file = path.join(stateDir, name);
 		return fs.existsSync(file) ? fs.readFileSync(file, "utf-8").split("\n").filter(Boolean) : [];
 	};
-	const listTasks = async (showAll = false) =>
-		(await tools["pr_tasks_list"].execute("list", { show_all: showAll }, undefined, undefined, toolCtx)).content[0].text as string;
+	const listTasks = async (showAll = false) => {
+		// (a list sync is paced by the shared backoff: wait out a short degraded
+		// window — e.g. right after a test's simulated 502 — so new threads get tracked)
+		const health = (globalThis as any).__PI_GH_HEALTH__;
+		const deadline = Date.now() + 5000;
+		while (health?.status === "degraded" && Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 200));
+		}
+		return (await tools["pr_tasks_list"].execute("list", { show_all: showAll }, undefined, undefined, toolCtx)).content[0].text as string;
+	};
 	const dead: string[] = [];
 	const killThread = (id: string) => {
 		dead.push(id);
@@ -744,7 +753,11 @@ process.exit(0);
 	const res21 = await tools["pr_task_resolve"].execute("call21", { conversation_id: "1021", message: "Checked" }, undefined, undefined, toolCtx);
 	fs.rmSync(path.join(stateDir, "threads_fail"));
 	console.log("Result:", res21.content[0].text);
-	if (!res21.isError || !res21.content[0].text.includes("could not check the conversation on GitHub") || readLog("replies.log").length !== repliesBefore21) {
+	if (
+		!res21.isError ||
+		!(res21.content[0].text.includes("could not check the conversation on GitHub") || res21.content[0].text.includes("temporarily unreachable")) ||
+		readLog("replies.log").length !== repliesBefore21
+	) {
 		console.error("Test 21 Failed: expected an error and no reply");
 		process.exit(1);
 	}

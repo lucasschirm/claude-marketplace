@@ -15,6 +15,7 @@ import {
 	FETCH_TIMEOUT_MS,
 	type GitHubCommentNode,
 } from "./lib/github-review-threads.ts";
+import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import {
 	PRTasksManager,
 	formatTaskSummary,
@@ -121,6 +122,7 @@ export default function (pi: ExtensionAPI) {
 	let lastNudgeSignature = "";
 	let identicalNudgeCount = 0;
 	let sessionId = 0; // bumped on shutdown, so a sync still in flight then is dropped
+	let prTasksShutdown = false; // a retry must not outlive the session's shutdown
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
 		const targetUI = ui || lastUIContext;
@@ -138,11 +140,21 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// TUI-safe log for non-GitHub internal errors. GitHub availability failures are
+	// handled by ghHealth (silent + paced retry) and never logged here.
+	function logInternal(msg: string) {
+		if (lastUIContext) {
+			try {
+				lastUIContext.notify(msg, "warning");
+			} catch {}
+		}
+	}
+
 	function sendAgentMessage(content: string) {
 		try {
 			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
-			console.error("[pr_tasks] Failed to send message to agent:", err);
+			logInternal(`[pr_tasks] Failed to send message to agent: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
@@ -161,12 +173,21 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function detectCurrentBranchPR(cwd: string): Promise<number | undefined> {
+		if (!ghHealth.acquireSlot()) return undefined;
+		let ghErr: unknown;
+		let number: number | undefined;
 		try {
 			const { stdout } = await execFileAsync("gh", ["pr", "view", "--json", "number"], { cwd, timeout: FETCH_TIMEOUT_MS });
 			const parsed = JSON.parse(stdout);
-			if (parsed?.number) return parsed.number;
-		} catch {}
-		return undefined;
+			if (parsed?.number) number = parsed.number;
+		} catch (err) {
+			ghErr = err;
+		} finally {
+			if (ghErr === undefined) ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			ghHealth.release();
+		}
+		return number;
 	}
 
 	async function getTargetPRs(cwd: string, explicitPr?: number): Promise<SyncTarget[]> {
@@ -194,6 +215,8 @@ export default function (pi: ExtensionAPI) {
 		if (target.cwd && existsSync(target.cwd)) return target.cwd;
 		// (a removed folder of unknown repository, e.g. an observed PR's, may be any repo: never replaced)
 		if (!target.repo) return target.cwd ? undefined : fallback;
+		// (degraded: a cold `gh repo view` would wait out its timeout; the retry covers it)
+		if (ghHealth.status === "degraded") return undefined;
 		try {
 			const coords = await getRepoCoordinates(fallback);
 			return `${coords.owner}/${coords.repo}` === target.repo ? fallback : undefined;
@@ -212,10 +235,24 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function syncPR(prNumber: number, cwd: string): Promise<void> {
+		// Paced by the shared GitHub health state: while degraded with the retry slot
+		// not yet due, the sync is skipped (the scheduled retry covers it) instead of
+		// waiting out 60 s per PR.
+		if (!ghHealth.acquireSlot()) return;
+		let ghErr: unknown;
 		try {
 			await syncPROrThrow(prNumber, cwd);
 		} catch (err) {
-			console.error(`[pr_tasks] Failed to sync review threads for PR ${prNumber}: ${describeGhError(err)}`);
+			ghErr = err;
+			// A GitHub-availability failure is silent; the backoff retry re-syncs. A
+			// non-GitHub error is still worth a TUI-safe warning.
+			if (!isGhAvailabilityError(err)) {
+				logInternal(`[pr_tasks] Failed to sync review threads for PR ${prNumber}: ${describeGhError(err)}`);
+			}
+		} finally {
+			if (ghErr === undefined) ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			ghHealth.release();
 		}
 	}
 
@@ -301,10 +338,28 @@ export default function (pi: ExtensionAPI) {
 	 * listed by then (see withCurrentThread).
 	 */
 	async function refreshTask(task: PRTask, cwd: string): Promise<UpstreamState | undefined> {
-		try {
-			await syncPROrThrow(task.prNumber, cwd);
-		} catch (err) {
-			throw new Error(`could not check the conversation on GitHub: ${describeGhError(err)}`);
+		// (degraded with the slot not yet due: use the cached state — at most one
+		// backoff interval old; the background retry re-syncs, and the mutation's own
+		// gh call is the connectivity test then)
+		if (ghHealth.acquireSlot()) {
+			try {
+				await syncPROrThrow(task.prNumber, cwd);
+				ghHealth.recordSuccess();
+			} catch (err) {
+				if (isGhAuthError(err)) {
+					// (not self-resolving: surface it instead of a "temporarily unreachable" note)
+					ghHealth.recordFailure();
+					throw new Error(`GitHub authentication failed: ${describeGhError(err)}`);
+				}
+				if (isGhAvailabilityError(err)) {
+					// Silent for the failure itself; the caller shows the concise message
+					ghHealth.recordFailure();
+					throw new Error("GitHub is temporarily unreachable, so the conversation state could not be checked (the extension is retrying in the background); try again later");
+				}
+				throw new Error(`could not check the conversation on GitHub: ${describeGhError(err)}`);
+			} finally {
+				ghHealth.release();
+			}
 		}
 		// (checked first: even /tasks reply, which may post to a resolved conversation, can't post there)
 		if (task.status === "RESOLVED" && !task.isListed) return "gone";
@@ -649,6 +704,22 @@ export default function (pi: ExtensionAPI) {
 		return manager.findTask(id);
 	}
 
+	// (degraded: a not-tracked conversation can't be fetched — say so instead of "not found",
+	// so a transient outage is not mistaken for a missing conversation)
+	function notFoundResult(rawId: string | number): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+		if (ghHealth.status === "degraded") {
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Conversation ${rawId} is not tracked and GitHub is temporarily unreachable, so it could not be fetched (the extension is retrying in the background); try again later.`,
+					},
+				],
+			};
+		}
+		return { content: [{ type: "text", text: `Error: Conversation ${rawId} not found.` }], isError: true };
+	}
+
 	async function syncAllPRs(cwd: string, explicitPr?: number, { fresh = false } = {}): Promise<void> {
 		// Concurrent callers wait for the running sync instead of returning before it finishes, and
 		// reuse it when it covers the same PRs (unless they need a fetch started after their call)
@@ -676,6 +747,8 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	// (test/debug hook: inspect the shared GitHub health state)
+	(globalThis as any).__PI_GH_HEALTH__ = ghHealth;
 	// Register integration hooks for observe-pr
 	(globalThis as any).__PI_ON_PR_POLL__ = async (prNumber: number, cwd: string) => {
 		await syncPR(prNumber, cwd);
@@ -685,7 +758,15 @@ export default function (pi: ExtensionAPI) {
 		await syncPR(prNumber, cwd || lastCwd);
 	};
 
+	// A backoff retry slot: re-sync all targets (each syncPR paces itself via the shared
+	// health state). No-op after a session shutdown.
+	ghHealth.registerRetryHook(() => {
+		if (prTasksShutdown) return;
+		void syncAllPRs(lastCwd);
+	});
+
 	pi.on("session_start", async (_evt, ctx) => {
+		prTasksShutdown = false;
 		lastUIContext = ctx.ui;
 		lastCwd = ctx.cwd || process.cwd();
 		await syncAllPRs(lastCwd);
@@ -742,7 +823,7 @@ export default function (pi: ExtensionAPI) {
 				pi.sendUserMessage(loopMessage, { deliverAs: "followUp" });
 				for (const t of unresolvedTasks) manager.markShown(t);
 			} catch (err) {
-				console.error("[pr_tasks] Failed to send settle loop message:", err);
+				logInternal(`[pr_tasks] Failed to send settle loop message: ${err instanceof Error ? err.message : String(err)}`);
 			}
 			return { continue: true };
 		}
@@ -783,6 +864,7 @@ export default function (pi: ExtensionAPI) {
 		delete (globalThis as any).__PI_ON_PR_POLL__;
 		delete (globalThis as any).__PI_ON_PR_CLOSED__;
 		sessionId++;
+		prTasksShutdown = true;
 		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
 		lastNudgeSignature = "";
 		identicalNudgeCount = 0;
@@ -829,8 +911,13 @@ export default function (pi: ExtensionAPI) {
 
 			const formatted = formatTaskSummary(filteredTasks, allTasks.length);
 			for (const t of filteredTasks) manager.markShown(t);
+			// (degraded: the list could not be refreshed — the cached state is valid but may be stale)
+			const staleNote =
+				ghHealth.status === "degraded"
+					? "\n(GitHub is temporarily unreachable, so this list could not be refreshed; the extension is retrying in the background.)"
+					: "";
 			return {
-				content: [{ type: "text", text: formatted }],
+				content: [{ type: "text", text: formatted + staleNote }],
 			};
 		},
 	});
@@ -876,10 +963,7 @@ export default function (pi: ExtensionAPI) {
 			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
-				return {
-					content: [{ type: "text", text: `Error: Conversation ${rawId} not found.` }],
-					isError: true,
-				};
+				return notFoundResult(rawId);
 			}
 
 			try {
@@ -894,7 +978,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `Error resolving conversation ${task.conversationId}: ${describeGhError(err)}`,
+							text: `Error resolving conversation ${task.conversationId}: ${mutationErrorText(err)}`,
 						},
 					],
 					isError: true,
@@ -902,6 +986,18 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 	});
+
+	/**
+	 * Text for a failed agent-initiated mutation: a GitHub-availability failure is shown
+	 * concisely (no raw stderr — the background retry covers the reconnect); anything else
+	 * keeps the detailed gh error.
+	 */
+	function mutationErrorText(err: unknown): string {
+		if (isGhAvailabilityError(err)) {
+			return "GitHub is temporarily unreachable (the extension is retrying in the background); try again later";
+		}
+		return describeGhError(err);
+	}
 
 	// Tool 3: pr_task_detail
 	pi.registerTool({
@@ -922,10 +1018,7 @@ export default function (pi: ExtensionAPI) {
 			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
-				return {
-					content: [{ type: "text", text: `Error: Conversation ${rawId} not found.` }],
-					isError: true,
-				};
+				return notFoundResult(rawId);
 			}
 
 			const formatted = formatTaskDetail(task);
@@ -968,10 +1061,7 @@ export default function (pi: ExtensionAPI) {
 			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
-				return {
-					content: [{ type: "text", text: `Error: Conversation ${rawId} not found.` }],
-					isError: true,
-				};
+				return notFoundResult(rawId);
 			}
 
 			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
@@ -1008,7 +1098,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `Error marking conversation ${task.conversationId} as blocked: ${describeGhError(err)}`,
+							text: `Error marking conversation ${task.conversationId} as blocked: ${mutationErrorText(err)}`,
 						},
 					],
 					isError: true,

@@ -3,9 +3,12 @@ import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
+import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
+// A hung gh call (network) must not wedge a poll loop or the serialized branch check
+const GH_TIMEOUT_MS = 60_000;
 
 function isCommandAvailable(cmd: string): boolean {
 	try {
@@ -33,6 +36,7 @@ interface ObservedPR {
 	failedRuns: Set<string>;
 	completedRuns: Set<string>;
 	runProcesses: Map<string, ChildProcess>;
+	rewatchTimers: Map<string, NodeJS.Timeout>;
 	pollTimer?: NodeJS.Timeout;
 	restartTimer?: NodeJS.Timeout;
 	knownComments: Map<string, CommentInfo>;
@@ -50,6 +54,7 @@ interface PRObserverStats {
 		commentsCount: number;
 	}>;
 	trackedBranches: string[];
+	github: { status: "healthy" | "degraded"; consecutiveFailures: number; nextRetryInMs: number };
 }
 
 class PRObserverDashboardComponent {
@@ -83,6 +88,13 @@ class PRObserverDashboardComponent {
 
 		const toolStatus = stats.isEnabled ? th.fg("success", "● Enabled") : th.fg("error", "○ Disabled");
 		lines.push(truncateToWidth(`  Tool status: ${toolStatus}  (Interval: ${stats.interval}s)`, width));
+		lines.push("");
+		const gh = stats.github;
+		const ghText =
+			gh.status === "degraded"
+				? `unreachable — ${gh.consecutiveFailures} consecutive failure(s), next retry in ${formatMs(gh.nextRetryInMs)}`
+				: "ok";
+		lines.push(truncateToWidth(`  GitHub: ${th.fg(gh.status === "degraded" ? "warning" : "success", ghText)}`, width));
 		lines.push("");
 
 		if (stats.trackedBranches && stats.trackedBranches.length > 0) {
@@ -137,6 +149,10 @@ export default function (pi: ExtensionAPI) {
 	const branchToPR = new Map<string, number>();
 	const autoDetectedPRs = new Set<number>();
 	const pendingAnnouncements = new Map<number, { timer: NodeJS.Timeout; delivered: boolean; prNumber: number }>();
+	// PRs whose observe_pr call raced a GitHub outage: the pre-check failed for
+	// availability reasons, and observation starts automatically on the first
+	// successful backoff retry (which re-checks the state).
+	const pendingAutoStart = new Map<number, { cwd: string }>();
 	let branchPollTimer: NodeJS.Timeout | undefined;
 	let lastUIContext: ExtensionUIContext | undefined;
 	let lastCwd: string = process.cwd();
@@ -163,6 +179,26 @@ export default function (pi: ExtensionAPI) {
 		return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
 	}
 
+	// TUI-safe log for non-GitHub internal errors. GitHub availability failures are
+	// handled by ghHealth (silent + paced retry) and never logged here.
+	function logInternal(what: string, err: unknown) {
+		const msg = `[observe_pr] ${what}: ${err instanceof Error ? err.message : String(err)}`;
+		if (lastUIContext) {
+			try {
+				lastUIContext.notify(msg, "warning");
+			} catch {}
+		}
+	}
+
+	function formatMs(ms: number): string {
+		if (ms <= 0) return "now";
+		const s = Math.ceil(ms / 1000);
+		if (s < 60) return `${s}s`;
+		const m = Math.floor(s / 60);
+		const rs = s % 60;
+		return rs > 0 ? `${m}m ${rs}s` : `${m}m`;
+	}
+
 	function updateStatusUI(ui?: ExtensionUIContext) {
 		const targetUI = ui || lastUIContext;
 		if (!targetUI) return;
@@ -186,7 +222,7 @@ export default function (pi: ExtensionAPI) {
 			// "steer" lands after the current turn's tool calls; "followUp" would wait until the agent stops calling tools.
 			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
-			console.error("[observe_pr] Failed to send message to agent:", err);
+			logInternal("Failed to send message to agent", err);
 		}
 	}
 
@@ -213,6 +249,12 @@ export default function (pi: ExtensionAPI) {
 			failedCount: p.failedRuns.size,
 			commentsCount: p.knownComments.size,
 		}));
+		const github = {
+			status: ghHealth.status,
+			consecutiveFailures: ghHealth.consecutiveFailures,
+			// (0 while a retry is in flight: the in-flight call is the retry)
+			nextRetryInMs: ghHealth.nextRetryInMs(),
+		};
 
 		const allBranches = new Set<string>();
 		for (const branches of trackedBranchesByRepo.values()) {
@@ -226,6 +268,7 @@ export default function (pi: ExtensionAPI) {
 			interval: getObserverInterval(),
 			prs,
 			trackedBranches: Array.from(allBranches),
+			github,
 		};
 	}
 
@@ -234,6 +277,7 @@ export default function (pi: ExtensionAPI) {
 			const { stdout, stderr } = await execFileAsync("gh", ["run", "view", runId, "--log-failed"], {
 				cwd,
 				maxBuffer: 2 * 1024 * 1024,
+				timeout: GH_TIMEOUT_MS,
 			});
 			const output = (stdout || stderr || "").trim();
 			if (output && !output.includes("log not found")) {
@@ -248,6 +292,7 @@ export default function (pi: ExtensionAPI) {
 			const { stdout, stderr } = await execFileAsync("gh", ["run", "view", runId], {
 				cwd,
 				maxBuffer: 1024 * 1024,
+				timeout: GH_TIMEOUT_MS,
 			});
 			const output = (stdout || stderr || "").trim();
 			if (output) {
@@ -263,45 +308,86 @@ export default function (pi: ExtensionAPI) {
 	async function checkAllCIPassed(prNumber: number, pr: ObservedPR) {
 		if (pr.activeRuns.size !== 0) return;
 		if (pr.allPassedReported) return;
+		if (!ghHealth.acquireSlot()) return;
 
+		let stdout: string | undefined;
+		let ghErr: unknown;
 		try {
-			const { stdout } = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
+			const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
 				cwd: pr.cwd,
+				timeout: GH_TIMEOUT_MS,
 			});
-			const checks = JSON.parse(stdout);
-			if (Array.isArray(checks) && checks.length > 0) {
-				const hasPending = checks.some(
-					(c: any) =>
-						c.bucket === "pending" ||
-						["PENDING", "IN_PROGRESS", "QUEUED"].includes(String(c.state || c.status || "").toUpperCase()),
-				);
-				const hasFailed = checks.some(
-					(c: any) =>
-						["fail", "cancel"].includes(c.bucket) ||
-						["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(
-							String(c.state || c.conclusion || "").toUpperCase(),
-						),
-				);
-				const hasPassed = checks.every(
-					(c: any) =>
-						["pass", "skipping"].includes(c.bucket) ||
-						["SUCCESS", "SKIPPED", "NEUTRAL"].includes(String(c.state || c.conclusion || "").toUpperCase()),
-				);
+			stdout = res.stdout;
+		} catch (err) {
+			ghErr = err;
+		}
+		try {
+			if (stdout !== undefined) {
+				const checks = JSON.parse(stdout);
+				if (Array.isArray(checks) && checks.length > 0) {
+					const hasPending = checks.some(
+						(c: any) =>
+							c.bucket === "pending" ||
+							["PENDING", "IN_PROGRESS", "QUEUED"].includes(String(c.state || c.status || "").toUpperCase()),
+					);
+					const hasFailed = checks.some(
+						(c: any) =>
+							["fail", "cancel"].includes(c.bucket) ||
+							["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(
+								String(c.state || c.conclusion || "").toUpperCase(),
+							),
+					);
+					const hasPassed = checks.every(
+						(c: any) =>
+							["pass", "skipping"].includes(c.bucket) ||
+							["SUCCESS", "SKIPPED", "NEUTRAL"].includes(String(c.state || c.conclusion || "").toUpperCase()),
+					);
 
-				if (!hasPending && !hasFailed && hasPassed) {
+					if (!hasPending && !hasFailed && hasPassed) {
+						pr.allPassedReported = true;
+						sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+					}
+				} else if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
 					pr.allPassedReported = true;
 					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
 				}
-			} else if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
-				pr.allPassedReported = true;
-				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+			} else if (ghErr !== undefined && !isGhAvailabilityError(ghErr)) {
+				// A non-GitHub gh failure: the run bookkeeping fallback is still meaningful
+				if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
+					pr.allPassedReported = true;
+					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+				}
+				logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
 			}
-		} catch {
+			// A GitHub-availability failure is silent: no verdict, no message — the
+			// backoff retry re-checks the state.
+		} catch (err) {
+			// Malformed gh output: the run bookkeeping fallback is still meaningful
 			if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
 			}
+			logInternal(`Error checking CI status for PR ${prNumber}`, err);
+		} finally {
+			if (ghErr === undefined) ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			ghHealth.release();
 		}
+	}
+
+	// A run whose watcher died on a GitHub-availability error is re-watched on the next
+	// backoff slot (one timer per run, spaced by the shared health state).
+	function scheduleRewatch(prNumber: number, runId: string, cwd: string) {
+		const pr = observedPRs.get(prNumber);
+		if (!pr || pr.rewatchTimers.has(runId)) return;
+		pr.rewatchTimers.set(
+			runId,
+			setTimeout(() => {
+				pr.rewatchTimers.delete(runId);
+				const current = observedPRs.get(prNumber);
+				if (current && current.activeRuns.has(runId)) watchRun(prNumber, runId, cwd);
+			}, Math.max(ghHealth.nextRetryInMs(), 1000)),
+		);
 	}
 
 	async function watchRun(prNumber: number, runId: string, cwd: string) {
@@ -319,12 +405,17 @@ export default function (pi: ExtensionAPI) {
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 		} catch (err) {
-			console.error(`[observe_pr] Error spawning gh run watch ${runId}:`, err);
+			// A missing gh binary is an availability-class error: silent + paced retry
+			if (isGhAvailabilityError(err)) ghHealth.recordFailure();
+			else logInternal(`Error spawning gh run watch ${runId}`, err);
+			scheduleRewatch(prNumber, runId, cwd);
 			return;
 		}
 
 		child.on("error", (err) => {
-			console.error(`[observe_pr] Error in gh run watch process for run ${runId}:`, err);
+			if (isGhAvailabilityError(err)) ghHealth.recordFailure();
+			else logInternal(`Error in gh run watch process for run ${runId}`, err);
+			scheduleRewatch(prNumber, runId, cwd);
 		});
 
 		pr.runProcesses.set(runId, child);
@@ -347,18 +438,43 @@ export default function (pi: ExtensionAPI) {
 
 			currentPr.runProcesses.delete(runId);
 
+			// A timed-out / errored `gh run view` must never be mistaken for a CI
+			// failure: on a GitHub-availability error we stay silent and re-watch on
+			// the next backoff slot instead of reporting a verdict.
 			let conclusion = "unknown";
-			try {
-				const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status"], {
-					cwd,
-				});
-				const parsed = JSON.parse(stdout);
-				conclusion = String(parsed.conclusion || "").toLowerCase();
-			} catch {
-				if (exitCode !== 0 || output.includes("failure") || output.includes("cancelled")) {
-					conclusion = "failure";
-				} else if (output.includes("success") || exitCode === 0) {
-					conclusion = "success";
+			let viewError: unknown;
+			let viewDone = false;
+			if (ghHealth.acquireSlot()) {
+				try {
+					const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status"], {
+						cwd,
+						timeout: GH_TIMEOUT_MS,
+					});
+					const parsed = JSON.parse(stdout);
+					conclusion = String(parsed.conclusion || "").toLowerCase();
+					viewDone = true;
+				} catch (err) {
+					viewError = err;
+				} finally {
+					if (viewError === undefined) ghHealth.recordSuccess();
+					else if (isGhAvailabilityError(viewError)) ghHealth.recordFailure();
+					ghHealth.release();
+				}
+			}
+			if (!viewDone) {
+				if (viewError !== undefined && !isGhAvailabilityError(viewError)) {
+					// A non-availability gh failure: fall back to the output heuristics
+					if (exitCode !== 0 || output.includes("failure") || output.includes("cancelled")) {
+						conclusion = "failure";
+					} else if (output.includes("success") || exitCode === 0) {
+						conclusion = "success";
+					}
+					logInternal(`Error viewing run ${runId}`, viewError);
+				} else {
+					// A GitHub-availability failure (or the slot was not due while
+					// degraded): no verdict, silent — re-watch on the next backoff slot
+					scheduleRewatch(prNumber, runId, cwd);
+					return;
 				}
 			}
 
@@ -407,14 +523,27 @@ export default function (pi: ExtensionAPI) {
 	async function pollPR(prNumber: number) {
 		const pr = observedPRs.get(prNumber);
 		if (!pr) return;
+		if (!ghHealth.acquireSlot()) return;
 
+		let data: any;
+		let ghErr: unknown;
 		try {
 			const { stdout } = await execFileAsync(
 				"gh",
 				["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup"],
-				{ cwd: pr.cwd },
+				{ cwd: pr.cwd, timeout: GH_TIMEOUT_MS },
 			);
-			const data = JSON.parse(stdout);
+			data = JSON.parse(stdout);
+		} catch (err) {
+			ghErr = err;
+		}
+		try {
+			if (ghErr !== undefined) {
+				// A GitHub-availability failure is silent: no log, no agent message —
+				// the shared backoff retry re-polls on the next slot.
+				if (!isGhAvailabilityError(ghErr)) logInternal(`Error polling PR ${prNumber}`, ghErr);
+				return;
+			}
 
 			const state = String(data.state || "").toUpperCase();
 			if (state === "MERGED" || state === "CLOSED") {
@@ -484,10 +613,12 @@ export default function (pi: ExtensionAPI) {
 				} catch {}
 			}
 
-			// Verify if all runs and checks passed
+			// Verify if all runs and checks passed (gated on its own slot)
 			await checkAllCIPassed(prNumber, pr);
-		} catch (err) {
-			console.error(`[observe_pr] Error polling PR ${prNumber}:`, err);
+		} finally {
+			if (ghErr === undefined) ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			ghHealth.release();
 		}
 	}
 
@@ -504,6 +635,7 @@ export default function (pi: ExtensionAPI) {
 			failedRuns: new Set(),
 			completedRuns: new Set(),
 			runProcesses: new Map(),
+			rewatchTimers: new Map(),
 			knownComments: new Map(),
 			allPassedReported: false,
 		};
@@ -524,6 +656,19 @@ export default function (pi: ExtensionAPI) {
 		function startChecksProcess() {
 			if (!observedPRs.has(prNumber)) return;
 
+			// While degraded, the spawn itself holds the slot (released on close), so
+			// the watcher cannot run ahead of the shared backoff pacing.
+			let slotHeld = false;
+			if (ghHealth.status === "degraded") {
+				if (!ghHealth.acquireSlot()) {
+					pr.restartTimer = setTimeout(() => {
+						if (observedPRs.has(prNumber)) startChecksProcess();
+					}, Math.max(ghHealth.nextRetryInMs(), 1000));
+					return;
+				}
+				slotHeld = true;
+			}
+
 			let checksProc: ChildProcess;
 			try {
 				checksProc = spawn("gh", ["pr", "checks", String(prNumber), "--watch", "--interval", intervalStr], {
@@ -531,12 +676,19 @@ export default function (pi: ExtensionAPI) {
 					stdio: ["ignore", "pipe", "pipe"],
 				});
 			} catch (err) {
-				console.error(`[observe_pr] Error spawning gh pr checks for PR ${prNumber}:`, err);
+				if (slotHeld) ghHealth.release();
+				// A missing gh binary is an availability-class error: silent + paced restart
+				if (isGhAvailabilityError(err)) ghHealth.recordFailure();
+				else logInternal(`Error spawning gh pr checks for PR ${prNumber}`, err);
+				pr.restartTimer = setTimeout(() => {
+					if (observedPRs.has(prNumber)) startChecksProcess();
+				}, Math.max(ghHealth.nextRetryInMs(), 1000));
 				return;
 			}
 
 			checksProc.on("error", (err) => {
-				console.error(`[observe_pr] Error in gh pr checks process for PR ${prNumber}:`, err);
+				if (isGhAvailabilityError(err)) ghHealth.recordFailure();
+				else logInternal(`Error in gh pr checks process for PR ${prNumber}`, err);
 			});
 
 			pr.checksProcess = checksProc;
@@ -565,16 +717,25 @@ export default function (pi: ExtensionAPI) {
 			checksProc.stdout?.on("data", handleData);
 			checksProc.stderr?.on("data", handleData);
 
-			checksProc.on("close", async () => {
+			checksProc.on("close", (code) => {
 				if (!observedPRs.has(prNumber)) return;
-				await pollPR(prNumber);
+				if (slotHeld) ghHealth.release();
+				// A non-zero exit is a gh error (network, auth, or crash): silent, and the
+				// restart follows the shared backoff instead of the fixed interval.
+				// (code === null: the process was killed by signal, e.g. our own stop —
+				// not a GitHub failure)
+				if (code !== null && code !== 0) ghHealth.recordFailure();
+				void pollPR(prNumber);
 				if (!observedPRs.has(prNumber)) return;
-				// Restart after interval if PR is still observed
+				const delay =
+					code !== 0 || ghHealth.status === "degraded"
+						? Math.max(ghHealth.nextRetryInMs(), 1000)
+						: interval * 1000;
 				pr.restartTimer = setTimeout(() => {
 					if (observedPRs.has(prNumber)) {
 						startChecksProcess();
 					}
-				}, interval * 1000);
+				}, delay);
 			});
 		}
 
@@ -620,6 +781,11 @@ export default function (pi: ExtensionAPI) {
 				proc.kill("SIGTERM");
 			} catch {}
 		}
+
+		for (const timer of pr.rewatchTimers.values()) {
+			clearTimeout(timer);
+		}
+		pr.rewatchTimers.clear();
 
 		pr.runProcesses.clear();
 		observedPRs.delete(prNumber);
@@ -681,9 +847,13 @@ export default function (pi: ExtensionAPI) {
 		const isEnabled = pi.getActiveTools().includes("observe_pr");
 		if (!isEnabled) return;
 
+		// (a local git call — always runs, even when the gh check below is skipped or paced)
 		await recordCurrentBranch(cwd);
 		if (isCheckingBranches) return;
+		if (!ghHealth.acquireSlot()) return;
 		isCheckingBranches = true;
+		let ghErr: unknown;
+		let ghCallMade = false;
 		try {
 			const repoRoot = (await getRepoRoot(cwd)) || cwd;
 			const branches = trackedBranchesByRepo.get(repoRoot);
@@ -697,10 +867,11 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				try {
+					ghCallMade = true;
 					const { stdout } = await execFileAsync(
 						"gh",
 						["pr", "view", branch, "--json", "number,state,isDraft,comments,statusCheckRollup"],
-						{ cwd: repoRoot },
+						{ cwd: repoRoot, timeout: GH_TIMEOUT_MS },
 					);
 					if (disposed) return;
 					const data = JSON.parse(stdout);
@@ -747,14 +918,30 @@ export default function (pi: ExtensionAPI) {
 							delivered: false,
 						});
 					}
-				} catch {
-					// No PR found for branch or gh error, ignore
+				} catch (err) {
+					// A GitHub-availability failure stops the loop (the other calls would fail
+					// the same way): silent, handled by the backoff retry.
+					if (isGhAvailabilityError(err)) {
+						ghErr = err;
+						break;
+					}
+					// No PR found for branch or per-PR gh error: ignore
 				}
 			}
 		} catch (err) {
-			console.error("[observe_pr] Error checking tracked branches:", err);
+			if (ghErr === undefined) ghErr = err;
+			// GitHub-availability failures are silent; anything else is an internal error
+			if (!isGhAvailabilityError(err)) logInternal("Error checking tracked branches", err);
 		} finally {
 			isCheckingBranches = false;
+			// (only a real gh response proves reachability — a no-op check must not
+			// reset the shared backoff state)
+			if (ghErr !== undefined) {
+				if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			} else if (ghCallMade) {
+				ghHealth.recordSuccess();
+			}
+			ghHealth.release();
 		}
 	}
 
@@ -823,6 +1010,50 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function settlePendingAutoStarts() {
+		if (pendingAutoStart.size === 0) return;
+		for (const [prNumber, entry] of Array.from(pendingAutoStart.entries())) {
+			if (!ghHealth.acquireSlot()) return; // The slot is busy; the next one settles it
+			let ghErr: unknown;
+			let data: any;
+			try {
+				const { stdout } = await execFileAsync(
+					"gh",
+					["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"],
+					{ cwd: entry.cwd, timeout: GH_TIMEOUT_MS },
+				);
+				data = JSON.parse(stdout);
+			} catch (err) {
+				ghErr = err;
+			}
+			if (ghErr === undefined) {
+				ghHealth.recordSuccess();
+				const state = String(data.state || "").toUpperCase();
+				pendingAutoStart.delete(prNumber);
+				if (state === "OPEN" && !data.isDraft) {
+					startObserving(prNumber, data.comments || [], entry.cwd, lastUIContext);
+					announceTracking(prNumber);
+				}
+				// (closed/draft: nothing to observe; dropped silently)
+			} else if (isGhAvailabilityError(ghErr)) {
+				ghHealth.recordFailure(); // silent; the next slot retries
+			} else {
+				pendingAutoStart.delete(prNumber); // 404 and friends: nothing to observe
+			}
+			ghHealth.release();
+		}
+	}
+
+	// A backoff retry slot: settle pending auto-starts first (an explicit
+	// agent/user request), then poll and branch-check. Each operation acquires its
+	// own slot, so at most one extension's work runs per slot.
+	ghHealth.registerRetryHook(() => {
+		if (disposed) return;
+		void settlePendingAutoStarts();
+		void pollAllObservedPRs();
+		void checkTrackedBranches(lastCwd);
+	});
+
 	pi.on("turn_end", async (_evt, ctx) => {
 		if (ctx?.cwd) lastCwd = ctx.cwd;
 		if (ctx?.ui) lastUIContext = ctx.ui;
@@ -866,6 +1097,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => {
 		disposed = true;
 		deferredAnnouncements.clear();
+		pendingAutoStart.clear();
 		suppressUpdates = false;
 		noticeAttached = false;
 		userTurnPending = false;
@@ -936,10 +1168,34 @@ export default function (pi: ExtensionAPI) {
 				const { stdout } = await execFileAsync(
 					"gh",
 					["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments,statusCheckRollup"],
-					{ cwd: ctx.cwd },
+					{ cwd: ctx.cwd, timeout: GH_TIMEOUT_MS },
 				);
 				prData = JSON.parse(stdout);
 			} catch (err: any) {
+				// An auth problem is not self-resolving: surface it (the shared backoff
+				// still paces the retry). No auto-start: a permanently failing
+				// auto-start would claim every backoff slot and starve the polling.
+				if (isGhAuthError(err)) {
+					ghHealth.recordFailure();
+					const authStderr = err?.stderr || err?.message || "";
+					return {
+						content: [{ type: "text", text: `Error inspecting PR ${prNumber}: ${authStderr}` }],
+					};
+				}
+				// A GitHub-availability failure is not reported as an error: the
+				// observation starts automatically on the first successful retry.
+				if (isGhAvailabilityError(err)) {
+					ghHealth.recordFailure();
+					pendingAutoStart.set(prNumber, { cwd: ctx.cwd });
+					return {
+						content: [
+							{
+								type: "text",
+								text: `GitHub is temporarily unreachable, so PR ${prNumber} could not be inspected. Observation will start automatically once the connection recovers.`,
+							},
+						],
+					};
+				}
 				const stderr = err?.stderr || err?.message || "";
 				if (
 					stderr.includes("Could not resolve") ||
@@ -1022,7 +1278,9 @@ export default function (pi: ExtensionAPI) {
 					const stats = getStats();
 					const branchesStr =
 						stats.trackedBranches.length > 0 ? ` | Branches: ${stats.trackedBranches.join(", ")}` : "";
-					const statusText = `PR Observer: ${stats.isEnabled ? "Enabled" : "Disabled"} | ${stats.prs.length} PR(s) observed${branchesStr} (Interval: ${stats.interval}s)`;
+					const statusText =
+						`PR Observer: ${stats.isEnabled ? "Enabled" : "Disabled"} | ${stats.prs.length} PR(s) observed${branchesStr} (Interval: ${stats.interval}s) | ` +
+						`GitHub: ${stats.github.status === "degraded" ? `unreachable (next retry in ${formatMs(stats.github.nextRetryInMs)})` : "ok"}`;
 					ctx.ui.notify(statusText, "info");
 				}
 				return;
