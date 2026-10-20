@@ -51,6 +51,9 @@
  *   compressed. Also available as the CLI flag `pi --keep-recent-tool-results 8` and as
  *   the argument of `/compact-recovery 8` (argument wins, then flag, then settings).
  *   `maxResultChars` — cap for text returned by `ctx_memory`.
+ *   `compactionInstructions` — custom instructions appended to the compaction prompt when
+ *   the recovery re-runs compaction. Default: a token-cap-aware summary directive (the
+ *   previous summary hit the output cap, so this one must stay small).
  *
  * Debugging: run with `PI_EXTENSION_DEBUG=1` (or `PI_COMPACTION_RECOVERY_DEBUG=1`) to
  * trace the recovery flow in `~/.pi/agent/logs/compaction-recovery.jsonl`: each
@@ -491,6 +494,31 @@ async function runCompressionPass(
 // Extension factory
 // ---------------------------------------------------------------------------
 
+/**
+ * The default custom instructions appended to the compaction prompt on a recovery
+ * re-run: the previous summary hit the token cap, so this one must stay small.
+ * pi replaces its generic "preserve tool call ids" fallback line with custom
+ * instructions, so this is self-contained (it re-states that guidance).
+ */
+export const DEFAULT_COMPACT_INSTRUCTIONS =
+	"The previous compaction attempt failed because the summary generation hit the token cap and was incomplete. " +
+	"Keep this summary strictly compact: short bullet points only, no paragraphs, at most 60 bullets. " +
+	"Preserve: the user's original request and any explicit constraints; decisions made with a one-line rationale; " +
+	"file paths and exact commands that were run; the current pending state and next steps. " +
+	"The most recent tool call results are kept verbatim in context after the summary - do not re-summarize them. " +
+	"When the summary mentions a tool call, preserve the tool call id and reference the full results via the provided tool ids.";
+
+/**
+ * Custom instructions appended to the compaction prompt for a recovery re-run.
+ * `compactionRecovery.compactionInstructions` wins over the built-in default.
+ */
+export function resolveCompactionInstructions(settings: unknown): string {
+	const raw = (settings as { compactionRecovery?: { compactionInstructions?: unknown } } | undefined)?.compactionRecovery;
+	const custom = raw?.compactionInstructions;
+	if (typeof custom === "string" && custom.trim().length > 0) return custom.trim();
+	return DEFAULT_COMPACT_INSTRUCTIONS;
+}
+
 export default function compactionFailRecovery(pi: ExtensionAPI) {
 	// The ctx_memory tool is registered below; the recovery flow lives in
 	// session_compact_failed (see the header for the full sequence).
@@ -581,9 +609,10 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 				`Compressed ${result.compressed} tool call responses (~${result.freedTokens.toLocaleString()} tokens freed)`,
 				"info",
 			);
-			// Re-run pi's compaction so it decides what stays in context.
+			// Re-run pi's compaction so it decides what stays in context, with the
+			// recovery's token-cap-aware custom instructions.
 			ctx.ui.notify("Running compaction so it decides what to keep in context...", "info");
-			ctx.compact();
+			ctx.compact({ customInstructions: resolveCompactionInstructions(pi.getSettings()) });
 		},
 	});
 
@@ -628,8 +657,11 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 			// verbatim and summarizes the rest. When called from an interrupted run this
 			// aborts that run and runs once the session is idle; on success the prompt
 			// that overflowed is resent. If the summarization hits the token cap again,
-			// the next failure event compresses what remains and re-runs.
+			// the next failure event compresses what remains and re-runs. The recovery
+			// appends custom instructions: the previous summary hit the cap, so this
+			// one must stay small (see resolveCompactionInstructions).
 			ctx.compact({
+				customInstructions: resolveCompactionInstructions(pi.getSettings()),
 				onComplete: () => {
 					logDebug(LOG_SCOPE, "compact-retried-success", { lastPrompt: Boolean(lastPrompt) });
 					if (!lastPrompt) return;

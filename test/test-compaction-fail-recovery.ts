@@ -3,6 +3,7 @@ import { test } from "node:test";
 import * as assert from "node:assert";
 import {
 	DEFAULTS,
+	DEFAULT_COMPACT_INSTRUCTIONS,
 	buildCompressionPlaceholder,
 	contentChars,
 	estimateContextTokens,
@@ -12,6 +13,7 @@ import {
 	isRecoverableCompactionFailure,
 	lastUserPromptText,
 	planCompression,
+	resolveCompactionInstructions,
 	resolveRecoverySettings,
 	resolveReserveTokens,
 	type ToolResultInput,
@@ -198,6 +200,18 @@ test("findOriginalToolResult reads the raw (pre-compression) entry", () => {
 	assert.strictEqual(findOriginalToolResult({ getEntry: () => ({ type: "compaction" }) }, "a1"), undefined);
 });
 
+test("resolveCompactionInstructions: settings override the token-cap-aware default", () => {
+	assert.strictEqual(resolveCompactionInstructions({}), DEFAULT_COMPACT_INSTRUCTIONS);
+	assert.match(DEFAULT_COMPACT_INSTRUCTIONS, /token cap/);
+	assert.match(DEFAULT_COMPACT_INSTRUCTIONS, /tool call id/);
+	assert.strictEqual(
+		resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: "  Keep only the task goal.  " } }),
+		"Keep only the task goal.",
+	);
+	assert.strictEqual(resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: "   " } }), DEFAULT_COMPACT_INSTRUCTIONS);
+	assert.strictEqual(resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: 42 } }), DEFAULT_COMPACT_INSTRUCTIONS);
+});
+
 test("lastUserPromptText returns the most recent user prompt", () => {
 	assert.strictEqual(
 		lastUserPromptText([
@@ -245,6 +259,7 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 	type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
 	const handlers = new Map<string, Handler>();
 	let compactCallCount = 0;
+	let compactInstructions: string | undefined;
 	let compactOptions: { onComplete?: () => void } | undefined;
 	const resent: string[] = [];
 	const extension = (await import("../extensions/compaction-fail-recovery.ts")).default;
@@ -266,8 +281,9 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 		ui: { notify: () => {} },
 		sessionManager: sm,
 		model: { provider: "anthropic", id: "claude-sonnet", contextWindow: 200_000 }, // target 184k; estimate ~113k
-		compact: (options?: { onComplete?: () => void }) => {
+		compact: (options?: { customInstructions?: string; onComplete?: () => void }) => {
 			compactCallCount++;
+			compactInstructions = options?.customInstructions;
 			compactOptions = options;
 		},
 	} as never;
@@ -289,6 +305,7 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 	);
 	assert.strictEqual(placeholders.length, 3, "the 3 oldest candidates are compressed (last 5 kept)");
 	assert.ok(compactOptions, "pi's compaction must be re-run after the compression");
+	assert.strictEqual(compactInstructions, DEFAULT_COMPACT_INSTRUCTIONS, "the recovery appends the token-cap-aware instructions to the compaction prompt");
 
 	// The real runtime runs the compaction once idle; on success the handler resends the prompt.
 	compactOptions?.onComplete?.();
