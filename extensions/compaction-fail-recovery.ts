@@ -23,13 +23,20 @@
  *
  * Recovery flow (for every recoverable compaction failure):
  * 1. Compress the largest old tool call responses (append-only context edits).
- * 2. Re-run pi's compaction (`ctx.compact()`): it decides what stays verbatim
- *    (keepRecentTokens) and summarizes the rest. If the summarization hits the
- *    token cap again, the next failure event compresses the next-largest batch
- *    and re-runs compaction - bounded, because the most recent N responses are
- *    never compressed.
+ * 2. Re-run pi's compaction (`ctx.compact()`), DEFERRED to a macrotask: a failed
+ *    re-run emits session_compact_failed from inside compact()'s catch block, and a
+ *    synchronous nested compact() gets its abort controller cleared by the outer
+ *    compact()'s finally (its failure path then crashes and the TUI sticks on a
+ *    compaction that never finishes). It decides what stays verbatim and summarizes
+ *    the rest, with custom instructions appended (see configuration). If the
+ *    summarization hits the token cap again, the next failure event compresses what
+ *    remains and re-runs - bounded by `maxRecoveryRounds` (default 2), after which
+ *    recovery stops and suggests raising compaction.reserveTokens or a bigger-context
+ *    model.
  * 3. Overflow recovery: the failed run is aborted by the compaction; when the
- *    compaction succeeds, the prompt that overflowed is resent automatically.
+ *    compaction succeeds, the prompt that overflowed is resent automatically - only
+ *    while the session is still idle, so it never aborts a run the user already
+ *    started or duplicates a prompt the user already retried.
  *
  * The `ctx_memory` tool retrieves the original content of a compressed response by its
  * session entry id. It reads the session JSONL through the session manager: context
@@ -43,7 +50,8 @@
  *     "compactionRecovery": {
  *       "enabled": true,
  *       "keepRecentToolResults": 5,
- *       "maxResultChars": 100000
+ *       "maxResultChars": 100000,
+ *       "maxRecoveryRounds": 2
  *     }
  *   }
  *
@@ -51,6 +59,9 @@
  *   compressed. Also available as the CLI flag `pi --keep-recent-tool-results 8` and as
  *   the argument of `/compact-recovery 8` (argument wins, then flag, then settings).
  *   `maxResultChars` — cap for text returned by `ctx_memory`.
+ *   `maxRecoveryRounds` — maximum automatic recovery rounds per session (each round
+ *   compresses the remaining candidates and re-runs compaction; the budget resets per
+ *   session).
  *   `compactionInstructions` — custom instructions appended to the compaction prompt when
  *   the recovery re-runs compaction. Default: a token-cap-aware summary directive (the
  *   previous summary hit the output cap, so this one must stay small).
@@ -78,6 +89,12 @@ export const DEFAULTS = {
 	keepRecentToolResults: 5,
 	minCompressChars: 1000,
 	maxResultChars: 100_000,
+	/**
+	 * Maximum automatic recovery rounds per session. Each round compresses the
+	 * remaining candidates and re-runs compaction; the cap stops the loop when
+	 * the context is too large for the summarization to ever fit.
+	 */
+	maxRecoveryRounds: 2,
 } as const;
 
 const KEEP_RECENT_FLAG = "keep-recent-tool-results";
@@ -310,6 +327,7 @@ export interface ResolvedRecoverySettings {
 	enabled: boolean;
 	keepRecentToolResults: number;
 	maxResultChars: number;
+	maxRecoveryRounds: number;
 }
 
 function parseNonNegInt(value: string | undefined): number | undefined {
@@ -344,7 +362,11 @@ export function resolveRecoverySettings(input: {
 		typeof block?.maxResultChars === "number" && Number.isSafeInteger(block.maxResultChars) && block.maxResultChars > 0
 			? block.maxResultChars
 			: DEFAULTS.maxResultChars;
-	return { enabled, keepRecentToolResults: keep, maxResultChars };
+	const maxRecoveryRounds =
+		typeof block?.maxRecoveryRounds === "number" && Number.isFinite(block.maxRecoveryRounds) && block.maxRecoveryRounds >= 1
+			? Math.floor(block.maxRecoveryRounds)
+			: DEFAULTS.maxRecoveryRounds;
+	return { enabled, keepRecentToolResults: keep, maxResultChars, maxRecoveryRounds };
 }
 
 /**
@@ -524,6 +546,15 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 	// session_compact_failed (see the header for the full sequence).
 	logDebug(LOG_SCOPE, "extension-loaded");
 
+	// Per-session recovery budget. A fresh session gets a fresh budget; reload and
+	// resume continue the same conversation, so its budget survives them.
+	let recoveryRounds = 0;
+	pi.on("session_start", (event) => {
+		if (event.reason === "reload" || event.reason === "resume") return;
+		recoveryRounds = 0;
+		logDebug(LOG_SCOPE, "session-start-reset", { reason: event.reason });
+	});
+
 	pi.registerTool({
 		name: "ctx_memory",
 		label: "Context Memory",
@@ -631,6 +662,20 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 				logDebug(LOG_SCOPE, "skipped-disabled");
 				return;
 			}
+			if (recoveryRounds >= settings.maxRecoveryRounds) {
+				logDebug(LOG_SCOPE, "recovery-rounds-exhausted", {
+					recoveryRounds,
+					maxRecoveryRounds: settings.maxRecoveryRounds,
+				});
+				logWarn(LOG_SCOPE, "recovery-rounds-exhausted");
+				ctx.ui.notify(
+					`Compaction keeps hitting the token cap and the ${settings.maxRecoveryRounds} recovery rounds are exhausted. ` +
+						"Raise compaction.reserveTokens, use a larger-context model, or start a new session - " +
+						"compressed results stay available via ctx_memory.",
+					"warning",
+				);
+				return;
+			}
 			// For interrupted runs (overflow recovery, mid-run threshold compaction) the
 			// prompt that was in flight is resent once the recovery compaction succeeds.
 			// A manual /compact failure has no prompt to resend.
@@ -653,26 +698,56 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 				`Compaction failed - compressed ${result.compressed} tool call responses (~${result.freedTokens.toLocaleString()} tokens freed), running compaction again...`,
 				"info",
 			);
+			recoveryRounds++;
 			// Re-run pi's compaction on the compressed context: it decides what stays
-			// verbatim and summarizes the rest. When called from an interrupted run this
-			// aborts that run and runs once the session is idle; on success the prompt
-			// that overflowed is resent. If the summarization hits the token cap again,
-			// the next failure event compresses what remains and re-runs. The recovery
-			// appends custom instructions: the previous summary hit the cap, so this
-			// one must stay small (see resolveCompactionInstructions).
-			ctx.compact({
-				customInstructions: resolveCompactionInstructions(pi.getSettings()),
-				onComplete: () => {
-					logDebug(LOG_SCOPE, "compact-retried-success", { lastPrompt: Boolean(lastPrompt) });
-					if (!lastPrompt) return;
-					ctx.ui.notify("Compaction succeeded - resending the last prompt", "info");
-					pi.sendUserMessage(lastPrompt);
-				},
-				onError: (error) => {
-					logError(LOG_SCOPE, "compact-retry-failed", error);
-					ctx.ui.notify(`Recovery compaction failed: ${error.message}`, "warning");
-				},
-			});
+			// verbatim and summarizes the rest. It appends custom instructions: the
+			// previous summary hit the cap, so this one must stay small (see
+			// resolveCompactionInstructions).
+			//
+			// DEFERRED (macrotask): never call ctx.compact() inside this handler. A
+			// failed re-run emits session_compact_failed from inside compact()'s catch
+			// block, and a synchronous nested compact() gets its abort controller
+			// cleared by the outer compact()'s finally - its own failure path then
+			// crashes with a TypeError before emitting compaction_end / 
+			// session_compact_failed, leaving the TUI stuck on a compaction that never
+			// finishes. A macrotask runs only after the previous compact() has fully
+			// unwound (and the interrupted run has settled), so the new compact()
+			// starts clean.
+			setTimeout(() => {
+				try {
+					ctx.compact({
+						customInstructions: resolveCompactionInstructions(pi.getSettings()),
+						onComplete: () => {
+							logDebug(LOG_SCOPE, "compact-retried-success", { lastPrompt: Boolean(lastPrompt) });
+							if (!lastPrompt) return;
+							// Resend only while nothing else has started: a resend now would
+							// abort the run the user already started (compact() aborts
+							// first), and duplicating a prompt the user already retried
+							// is worse than leaving it to them.
+							if (!ctx.isIdle()) {
+								logDebug(LOG_SCOPE, "resend-skipped-not-idle");
+								return;
+							}
+							ctx.ui.notify("Compaction succeeded - resending the last prompt", "info");
+							pi.sendUserMessage(lastPrompt);
+						},
+						onError: (error) => {
+							logError(LOG_SCOPE, "compact-retry-failed", error);
+							ctx.ui.notify(
+								`Recovery compaction failed: ${error.message}. The session is recoverable - ` +
+									"run /compact-recovery to compress more, or start a new session (compressed originals are available via ctx_memory).",
+								"warning",
+							);
+						},
+					});
+				} catch (error) {
+					logError(LOG_SCOPE, "compact-schedule-failed", error);
+					ctx.ui.notify(
+						`Recovery compaction could not start: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				}
+			}, 0);
 		} catch (error) {
 			logError(LOG_SCOPE, "handler-failed", error);
 			ctx.ui.notify(`compaction-fail-recovery: ${error instanceof Error ? error.message : String(error)}`, "error");
