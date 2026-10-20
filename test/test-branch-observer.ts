@@ -1,3 +1,4 @@
+import "./gh-fast-env.ts";
 import ext from "../extensions/observe-pr.ts";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -330,7 +331,8 @@ exit 0
       for (const h of eventHandlers["turn_end"] || []) {
         await h({ type: "turn_end" }, mockCtx);
       }
-      await new Promise((r) => setTimeout(r, 200));
+      // (wait out the shared backoff slot: test 5's auth failure paces this poll)
+      await new Promise((r) => setTimeout(r, 1500));
 
       const expectedMergeMsg = "Stoping observing the pr 303. The PR was merged. You will no longer receive updates about this PR.";
       if (!sentMessages.includes(expectedMergeMsg)) {
