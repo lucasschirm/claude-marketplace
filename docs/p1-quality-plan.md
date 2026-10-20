@@ -51,7 +51,7 @@ turned on explicitly (17 call sites today).
 | `exec`/`spawn` call sites | **44** | of which **28 have no timeout** in the call: `devin-delegate.ts` 11, `lib/orca-client.ts` 10, `observe-pr.ts` 7 |
 | `JSON.parse(` | **27** | `devin-delegate.ts` 9, `lib/github-review-threads.ts` 6, `observe-pr.ts` 6, `lib/orca-client.ts` 3, 1 each elsewhere |
 | functions with cognitive complexity > 20 | **51** | `devin-delegate` 15, `observe-pr` 13, `orca-orchestration` 10, `pr-tasks` 4, `lib/devin-bash-guard` 3, `tools` 3, `lib/pr-tasks-manager` 2, `lib/orca-client` 1 |
-| `globalThis` writes | **15** | 5 registration guards + 5 shared keys (below) |
+| `globalThis` writes | **20** (11 assignments + 9 `delete`) | 5 registration guards + 5 shared keys; the 5 `if ((globalThis …)[K])` reads are **not** writes. (The first draft of this plan said 15, which counted reads and deletes loosely — `check-quality` is the source of truth.) |
 
 ### 0.4 Duplication inventory (measured, current line numbers)
 
@@ -541,12 +541,59 @@ containing the §6 table — the format #36 used.
 
 ## 12. Execution record
 
-Filled in as implemented — one block per PR, with the deviations and the false claims that were
-corrected, exactly as §9 of `p0-quality-plan.md` did for P0.
+Filled in as implemented — the P0 habit that made #36 reviewable: every deviation and every claim that
+turned out to be wrong is written down here rather than discovered later.
+
+## C1 — Deterministic gates (implemented)
+
+**Decisions taken:** D1 **(a)** — the full format sweep landed as its own commit (`style: apply biome
+format`), followed by `.git-blame-ignore-revs` carrying that SHA. D2 **(b)** ratcheted per-file line
+budgets. D3 **(b)** `noExcessiveCognitiveComplexity` at 20, warned by biome and counted by the ratchet.
+
+**Measured sweep cost (whole included tree, not just `extensions/`):** 32 files, +2,442/−2,031 —
+extensions 12 files (+698/−758), test 18 files (+1,562/−1,091, mostly 2-space → tab), scripts 1 file
+(+105/−105). `biome format .` is now a no-op, so CI gates formatting of the whole tree rather than only
+changed files. Lint counts were identical before and after (0 errors / 237 warnings / 7 infos) and all
+suites passed, so the sweep proved itself to be whitespace-only.
+
+**Biome API facts learned the hard way (the plan's snippet was wrong in three places):**
+- `biome.json` is parsed as **strict JSON**: the rationale comments require the name `biome.jsonc`.
+- `overrides` is a **top-level** key in biome 2.x, not `linter.overrides`.
+- `noUnusedParameters` does not exist; the rule is `correctness.noUnusedFunctionParameters`
+  (`noUnusedVariables` also lives in `correctness`, not `style`).
+- `--reporter=json` puts diagnostics on stdout (and an experimental notice on stderr); the JSON's field
+  is `category`, e.g. `lint/suspicious/noExplicitAny`.
+
+**Baseline captured** (`scripts/quality-baseline.json`, 20 metrics + 13 file budgets):
+`execLocation` 27, `execTimeout` 28, `jsonParseLocation` 27, `emptyCatch` 49, `globalThisOwnership` 20,
+`mutationResultChecked`/`noStdioWrites`/`piExtensionsMatchDisk`/`noUnusedLibs`/`wiredTests`/`frontmatter`
+0; `biome.suspicious/noExplicitAny` 147, `biome.complexity/noExcessiveCognitiveComplexity` 51,
+`biome.suspicious/noConsole` 17, `biome.suspicious/noGlobalIsNan` 8, `biome.style/noNonNullAssertion` 6,
+`biome.complexity/useOptionalChain` 6, `biome.style/useTemplate` 7, `biome.correctness/noUnusedImports` 1,
+`biome.correctness/noUnusedFunctionParameters` 1.
+
+**Proof the gate bites:** 15 fixtures run against the working tree — each invariant gets a minimal
+violation and must fail naming itself, plus the biome ratchet, the refusal to raise without `--reason`,
+and the `notes` entry `--reason` writes. All 15 behaved; the harness was temporary and is not committed.
+
+**Corrections found while implementing:**
+- §0.3's `globalThis` count (15) was loose — see the corrected row: 20 write/delete sites, and the
+  detector had to be rewritten (the first version missed `(globalThis as any).KEY =` writes and
+  `delete` statements while counting `if (...)` reads). The ratchet records the correction with a
+  `--reason` line rather than pretending the number was always 20.
+- The plan said `execLocation` would be "28 untimeouted sites in `lib/**` or `devin-delegate.ts`"; the
+  split is 27 call sites outside `lib/` (`execLocation`) and 28 without a timeout (`execTimeout`) out of
+  44 total, overlapping.
+
+**Wiring:** `npm run lint|format|format:check|check|qa:baseline|qa`; `run.sh` gained `lint`, `format` and
+`check` suites (**15 suites** now, CI picks them up through `run.sh` as well as the `quality` job); the
+orphaned-test guard that #36 put in `run.sh` moved into `check-quality.mjs` so there is one
+implementation, reachable as `--only wiredTests` without any installed dependencies.
+
+## Still pending
 
 - **C2.0 spike result** (does `typebox/value` resolve under `pi -ne -e`?): _pending_
-- **C1.1 `test/**` formatter drift**: _pending_
-- **D1 decision taken** (a / b / c, and who decided): _pending_
 - **C2.4 fixture provenance** (captured from which backend version, or owed): _pending_
-- **Baseline deltas at each PR merge** (metric → before → after): _pending_
-- **Claims in this plan or in #35 found to be wrong**: _pending_
+- **Baseline deltas at each PR merge** (metric → before → after): C1 changed no source metric (it only
+  added measurement); the deltas start with C2.
+- **Claims in this plan or in #35 found to be wrong**: see "Corrections found while implementing" above.
