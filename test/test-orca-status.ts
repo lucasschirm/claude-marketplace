@@ -44,7 +44,7 @@ test("a failed worker-list is reported, never collapsed into \"no live workers\"
 	const text = await formatAllWorkersAndRuns(process.cwd());
 
 	// the parse message itself spans lines, so `.*` would not reach the code
-assert.match(text, /Unable to list workers:[\s\S]*\(BAD_JSON\)/);
+	assert.match(text, /Unable to list workers:[\s\S]*\(BAD_JSON\)/);
 	assert.doesNotMatch(text, /No live workers currently active\./);
 	// The count is unknown, not zero: "(0)" is the number a coordinator acts on.
 	assert.match(text, /Active \/ Live Workers \(unknown\)/);

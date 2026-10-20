@@ -437,10 +437,12 @@ export async function resolveRepoFilePath(repoRootDir: string, filePath: string)
 	if (!isInsideDir(root, absolute)) {
 		throw new Error(`suggestion path '${filePath}' resolves outside the repository (${root})`);
 	}
-	const firstSegment = absolute.slice(root.length + 1).split(path.sep)[0];
-	if (firstSegment === ".git") {
+	const relativeSegments = absolute.slice(root.length + 1).split(path.sep);
+	if (relativeSegments.some((segment) => segment.toLowerCase() === ".git")) {
 		// Unreachable from the GitHub API, which never suggests .git paths - but a write into
-		// hooks/ or config is a code-execution primitive, not just a bad edit.
+		// hooks/ or config is a code-execution primitive, not just a bad edit. Every segment, and
+		// case-insensitively: on a case-insensitive filesystem `.GIT` resolves into the real .git,
+		// and the realpath re-check below does not re-apply this rule.
 		throw new Error(`suggestion path '${filePath}' targets the git directory`);
 	}
 	return absolute;

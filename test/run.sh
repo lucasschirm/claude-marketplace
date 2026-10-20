@@ -5,6 +5,9 @@
 #   bash test/run.sh unit manifest   # run named suites
 #   bash test/run.sh --list          # list suites
 #
+# Requires `npm install`: `typecheck` needs typescript + the pinned pi typings, and the `unit`
+# suite includes files that import an extension entry (so pi-tui and typebox resolve at runtime).
+#
 # Suites NOT run here (and not run in CI):
 #   test-devin-delegate.ts            - starts real Devin sessions; run deliberately
 #   test-devin-delegate-lifecycle.ts  - starts real Devin sessions; run deliberately
@@ -21,6 +24,24 @@ ALL_SUITES="typecheck manifest unit observe-pr observe-pr-gh-failure branch-obse
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
 }
+
+# A test file no suite runs is a test that does not exist. Three files in this directory need a real
+# backend and are named as excluded in the header; everything else has to be referenced by this
+# runner (UNIT_TESTS or a suite) or by a suite's own .sh - otherwise it silently never executes.
+check_every_test_is_wired() {
+  # Named in the header above: they start real Devin sessions, so they are run deliberately.
+  local deliberate=" test-devin-delegate.ts test-devin-delegate-lifecycle.ts "
+  local file base
+  for file in test/test-*.ts; do
+    base="${file#test/}"
+    case "$deliberate" in *" $base "*) continue ;; esac
+    if ! grep -q -- "$base" test/run.sh test/*.sh 2>/dev/null; then
+      echo "✖ $file is wired into no suite - add it to UNIT_TESTS or to a suite runner" >&2
+      exit 1
+    fi
+  done
+}
+check_every_test_is_wired
 
 run_suite() {
   case "$1" in

@@ -173,7 +173,8 @@ export function resolveOrcaCmd(): string {
  * dispatch work that is already running.
  */
 export function orcaErrorText(env: { error?: { code?: string; message: string } }): string {
-	const message = env.error?.message?.trim() || "unknown error";
+	// String(): an envelope from another tool version may carry a non-string message.
+	const message = String(env.error?.message ?? "").trim() || "unknown error";
 	return env.error?.code ? `${message} (${env.error.code})` : message;
 }
 
