@@ -1,0 +1,24 @@
+{
+  // Typecheck-only configuration: Pi runs the TypeScript sources directly (Node >= 23.6),
+  // so nothing is emitted. `npm run typecheck` (and the CI `quality` job) is the gate.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["esnext"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    // Extensions import each other with explicit `.ts` specifiers (Node type stripping).
+    "allowImportingTsExtensions": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    // P1 (lint owns these): verbatimModuleSyntax, noUnusedLocals, noUnusedParameters.
+    "isolatedModules": true
+  },
+  // `test/**` is typechecked in P1: the Pi-runtime harnesses rely on ambient globals.
+  "include": ["extensions/**/*.ts"],
+  "exclude": ["node_modules", "plugins/**", "skills/**"]
+}
