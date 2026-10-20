@@ -356,11 +356,16 @@ gate lands late — they are P1/P3 items in #35.
 7. **F22-3 was overstated in the review** — corrected in `docs/extensions-code-quality-review.md`: the
    `endLine: undefined` path is not reachable from the current call site (`PRTask.line` is always
    filled in); the reachable defect there is the un-narrowed optional `suggestion`.
+8. **F22-1 was overstated too** — also corrected in the review: `matchesKey()` compares lower-cased
+   values, so `"pagedown"` matched `parseKey("\x1b[6~")` and PageDown worked. The real defect is that
+   the literals are not valid `KeyId`s, which is what `tsc` caught. `test/test-tools-command.ts`
+   Test 2b now pins the CSI sequences through `handleInput()`.
 
-**Behaviour changes to check by eye in the PR:** `/tools` PageUp/PageDown scroll again and its
-guidelines render one line each; the four dashboards survive `ui.custom()` invalidation; a failing
-`gh pr checks` no longer produces "All CI passed"; `orca_orchestration_status` reports
-`BAD_JSON`/`EXEC_ERROR` instead of an empty worker list.
+**Behaviour changes to check by eye in the PR:** `/tools` guidelines render one line each (PageUp /
+PageDown behaved the same before — only the key-id spelling changed); the four dashboards survive
+`ui.custom()` invalidation; a failing `gh pr checks` no longer produces "All CI passed";
+`orca_orchestration_status` reports `BAD_JSON`/`EXEC_ERROR` instead of an empty worker list; a
+suggestion whose path escapes the repository is rejected instead of written.
 
 **Counts after P0:** type errors `34 → 0`; unit tests `94 → 110`; CI suites `8 → 9`; tools returning
 `details` `0/19 → 19/19`; dashboards implementing `invalidate()` `1/5 → 5/5`.

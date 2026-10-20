@@ -133,9 +133,14 @@ for Orca, point `ORCA_CLI_COMMAND` (already honoured, `orca-client.ts:143`) at a
 
 **F22. Three user-visible defects that exist only because nothing type-checks.** Running `tsc` surfaced bugs no test
 or reviewer caught:
-- **`/tools` PageUp/PageDown are dead keys** (`tools.ts:237`, `:243`): `matchesKey(data, "pageup")` / `"pagedown"` —
-  pi-tui's `KeyId` union spells them `pageUp` / `pageDown` (`pi-tui/dist/keys.d.ts:32`), so neither branch can ever
-  match, while the footer advertises scrolling. A one-character-casing fix.
+- **`/tools` used key ids that are not in pi-tui's `KeyId` union** (`tools.ts:237`, `:243`):
+  `matchesKey(data, "pageup")` / `"pagedown"`, while `pi-tui/dist/keys.d.ts:32` declares `pageUp` / `pageDown`.
+  Corrected — `tsc` rejects the literals, which is how this was found.
+  **Correction made while implementing this (round-2 review):** the original claim that scrolling was dead is
+  *wrong*. `matchesKey()` compares lower-cased values, so `"pagedown"` matched `parseKey("\x1b[6~") === "pageDown"`
+  and paging worked all along. What is real is that the literals are not valid `KeyId`s: the type gate catches a
+  typo that would break the moment `matchesKey` became case-sensitive. `test/test-tools-command.ts` Test 2b now
+  pins the actual CSI sequences through `handleInput()`, which the typechecker cannot cover.
 - **`promptGuidelines` is rendered as a coerced array** (`tools.ts:401`): `ToolInfo.promptGuidelines` is
   `string[]` (`pi-coding-agent/dist/core/extensions/types.d.ts:463`), but it is passed straight to
   `wrapTextWithAnsi(…, safeWidth - 6)`, so the detail view shows comma-joined guidelines as one blob instead of lines.
