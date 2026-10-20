@@ -216,7 +216,9 @@ file and line. No invariant may shell out to a tool that isn't a devDependency.
 3. **`globalThis` ownership (`F11`)** — no `globalThis` write outside `extensions/lib/cross-extension.ts`
    (after C3) — until C3 lands, `extensions/lib/**` only, ratcheted from 15.
 4. **no `console.` in `extensions/**` (`F14`)** — reported by biome; `check-quality` additionally fails
-   on `process.stdout.write`, which biome does not see (verify count with grep before writing the rule).
+   on `process.stdout.write` and `process.stderr.write`, which biome does not see (measured today: **0**
+   of each, so this invariant is purely preventive — it costs nothing and closes the door on the
+   "writes into a live TUI" problem arriving by another route).
 5. **file budget (`F8`, per D2)** — per-file line counts from the baseline, may only shrink; the
    absolute numbers from the issue are recorded as targets in the report output, not enforced.
 6. **manifest ↔ disk** — `package.json` → `pi.extensions` matches `extensions/*.ts` **both directions**
