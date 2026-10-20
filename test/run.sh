@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
 UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts"
 
-ALL_SUITES="typecheck manifest unit observe-pr branch-observer startup-notice observe-pr-resume pr-tasks tools"
+ALL_SUITES="typecheck manifest unit observe-pr observe-pr-gh-failure branch-observer startup-notice observe-pr-resume pr-tasks pr-tasks-gh-failure tools"
 
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
@@ -42,6 +42,9 @@ run_suite() {
     observe-pr)
       bash test/test-observe-pr.sh
       ;;
+    observe-pr-gh-failure)
+      pi -ne -e test/test-observe-pr-gh-failure.ts --offline -p "test"
+      ;;
     branch-observer)
       pi -ne -e test/test-branch-observer.ts --offline -p "test"
       ;;
@@ -53,6 +56,9 @@ run_suite() {
       ;;
     pr-tasks)
       bash test/test-pr-tasks.sh
+      ;;
+    pr-tasks-gh-failure)
+      pi -ne -e test/test-pr-tasks-gh-failure.ts --offline -p "test"
       ;;
     tools)
       bash test/test-tools-command.sh

@@ -70,10 +70,12 @@ jobs:
       matrix:
         suite:
           - observe-pr
+          - observe-pr-gh-failure
           - branch-observer
           - startup-notice
           - observe-pr-resume
           - pr-tasks
+          - pr-tasks-gh-failure
           - tools
     steps:
       - uses: actions/checkout@v4
