@@ -9,6 +9,12 @@
     "test": "bash test/run.sh",
     "test:unit": "bash test/run.sh unit",
     "typecheck": "tsc --noEmit",
+    "lint": "biome lint extensions",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "node scripts/check-quality.mjs --check",
+    "qa:baseline": "node scripts/check-quality.mjs --write",
+    "qa": "npm run typecheck && npm run lint && npm run check && npm run validate && npm run test:unit",
     "validate": "node scripts/validate-marketplace.mjs"
   },
   "pi": {
