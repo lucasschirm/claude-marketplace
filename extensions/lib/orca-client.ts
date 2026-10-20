@@ -48,6 +48,8 @@ export interface OrcaWorkerRow {
 			worker?: string;
 			dispatch?: string;
 			detail?: string;
+			/** Short free-text description of what the worker is doing right now. */
+			activity?: string;
 		};
 		outcome?: "succeeded" | "failed" | string;
 		liveness?: {

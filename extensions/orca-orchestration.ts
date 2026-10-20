@@ -1,4 +1,9 @@
-import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionToolContext,
+	ExtensionUIContext,
+	AgentToolResult,
+} from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ChildProcess } from "node:child_process";
@@ -13,8 +18,10 @@ import {
 	type OrcaWorkerRow,
 	type OrcaMessageDelivery,
 } from "./lib/orca-client.ts";
+import { capList, type ToolDetails } from "./lib/tool-result.ts";
 
 const GLOBAL_GUARD_KEY = "__PI_ORCA_ORCHESTRATION_EXTENSION_ACTIVE__";
+
 
 export interface ObservedWorker {
 	dispatchId: string;
@@ -279,6 +286,14 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	let activeRunId: string | undefined;
 	let activeObjective: string | undefined;
 	const observedWorkers = new Map<string, ObservedWorker>();
+
+/**
+ * The `details` block every tool result of this extension carries: which tool answered, the Run it
+ * acted on and how many workers are observed here. Per-call facts go in `extra` (and win).
+ */
+function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
+	return { tool, runId: activeRunId ?? null, observedWorkers: observedWorkers.size, ...extra };
+}
 	let checkProcess: ChildProcess | null = null;
 	let reconcileTimer: NodeJS.Timeout | undefined;
 	let restartCheckTimer: NodeJS.Timeout | undefined;
@@ -779,6 +794,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 				if (!runRes.ok) {
 					return {
+						details: toolDetails("orca_orchestration_dispatch", { result: "run_create_failed", code: "RUN_CREATE_FAILED", objective, runId: activeRunId ?? null }),
 						content: [
 							{
 								type: "text",
@@ -825,6 +841,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (!startRes.ok) {
 				const errMsg = startRes.error?.message || JSON.stringify(startRes.error || "worker-start failed");
 				return {
+					details: toolDetails("orca_orchestration_dispatch", { result: "worker_start_failed", code: "WORKER_START_FAILED", runId: activeRunId ?? null, agent: params.agent ?? "codex", worktree: params.worktree ?? "current" }),
 					content: [{ type: "text", text: `Failed to dispatch worker:\n${errMsg}` }],
 					isError: true,
 				};
@@ -858,6 +875,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			}
 
 			return {
+				details: toolDetails("orca_orchestration_dispatch", { result: "dispatched", dispatchId, taskId: taskId ?? null, terminalHandle: terminalHandle ?? null, runId: activeRunId ?? null, agent: worker.agent, worktree: params.worktree ?? "current" }),
 				content: [
 					{
 						type: "text",
@@ -904,7 +922,15 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			),
 		}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
+		// An explicit signature: `observeToolDef` is a value, so nothing contextually types these
+		// parameters, and the returned literal would widen `type: "text"` to `string`.
+		async execute(
+			_toolCallId: string,
+			params: { action?: string; dispatch_id?: string; run_id?: string; all?: boolean },
+			_signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			ctx: ExtensionToolContext,
+		): Promise<AgentToolResult<ToolDetails>> {
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || lastCwd;
 			const action = params.action?.toLowerCase() || "status";
@@ -912,6 +938,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (params.all) {
 				const allText = await formatAllWorkersAndRuns(ctx.cwd || lastCwd);
 				return {
+					details: toolDetails("orca_orchestration_observe", { result: "all_workers", scope: "all" }),
 					content: [{ type: "text", text: allText }],
 				};
 			}
@@ -920,7 +947,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				activeRunId = params.run_id;
 				try {
 					const runRes = await execOrca<any>(
-						["orchestration", "run-show", "--run", activeRunId],
+						["orchestration", "run-show", "--run", params.run_id],
 						{ cwd: ctx.cwd },
 					);
 					if (runRes.ok && runRes.result?.run?.objective) {
@@ -969,6 +996,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					observedWorkers.delete(params.dispatch_id);
 					updateStatusUI(ctx.ui);
 					return {
+						details: toolDetails("orca_orchestration_observe", { result: "stopped_dispatch", dispatchId: params.dispatch_id ?? null }),
 						content: [{ type: "text", text: `Stopped observing dispatch ${params.dispatch_id}.` }],
 					};
 				}
@@ -985,6 +1013,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 				updateStatusUI(ctx.ui);
 				return {
+					details: toolDetails("orca_orchestration_observe", { result: "observation_stopped", scope: "all" }),
 					content: [{ type: "text", text: `Orca orchestration automatic check process paused and observation stopped.` }],
 				};
 			}
@@ -1001,6 +1030,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			);
 
 			return {
+				details: toolDetails("orca_orchestration_observe", { result: "status", action, observing: stats.isEnabled, ...capList(stats.workers.map((w) => w.dispatchId)) }),
 				content: [
 					{
 						type: "text",
@@ -1064,6 +1094,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (params.all) {
 				const allText = await formatAllWorkersAndRuns(ctx.cwd || lastCwd);
 				return {
+					details: toolDetails("orca_orchestration_status", { result: "all_workers", scope: "all" }),
 					content: [{ type: "text", text: allText }],
 				};
 			}
@@ -1072,7 +1103,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				activeRunId = params.run_id;
 				try {
 					const runRes = await execOrca<any>(
-						["orchestration", "run-show", "--run", activeRunId],
+						["orchestration", "run-show", "--run", params.run_id],
 						{ cwd: ctx.cwd },
 					);
 					if (runRes.ok && runRes.result?.run?.objective) {
@@ -1097,6 +1128,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 							: readRes.error?.message || "No output captured.";
 
 					return {
+						details: toolDetails("orca_orchestration_status", { result: "worker_output", dispatchId: dId, status: localMeta?.status ?? null }),
 						content: [
 							{
 								type: "text",
@@ -1112,6 +1144,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						{ cwd: ctx.cwd },
 					);
 					return {
+						details: toolDetails("orca_orchestration_status", { result: "worker_show", dispatchId: dId, ok: showRes.ok }),
 						content: [
 							{
 								type: "text",
@@ -1181,6 +1214,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 
 				return {
+					details: toolDetails("orca_orchestration_status", { result: "dispatch_status", dispatchId: dId, stage, outcome, attention, upstreamOk: showRes.ok }),
 					content: [
 						{
 							type: "text",
@@ -1216,6 +1250,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			const objectiveStr = typeof stats.objective === "string" ? stats.objective : stats.objective ? JSON.stringify(stats.objective) : "N/A";
 
 			return {
+				details: toolDetails("orca_orchestration_status", { result: "overview", activeRunId: stats.activeRunId ?? null, counts: { running: stats.runningCount, succeeded: stats.succeededCount, failed: stats.failedCount, released: stats.releasedCount }, ...capList(stats.workers.map((w) => w.dispatchId)) }),
 				content: [
 					{
 						type: "text",
@@ -1258,6 +1293,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 			if (!replyRes.ok) {
 				return {
+					details: toolDetails("orca_orchestration_reply", { result: "reply_failed", code: "REPLY_FAILED", messageId: params.message_id }),
 					content: [
 						{
 							type: "text",
@@ -1269,6 +1305,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			}
 
 			return {
+				details: toolDetails("orca_orchestration_reply", { result: "reply_sent", messageId: params.message_id }),
 				content: [
 					{
 						type: "text",
@@ -1331,6 +1368,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					}
 				}
 				return {
+					details: toolDetails("orca_orchestration_release", { result: "pruned", removed: pruneRes.removed.length, retained: pruneRes.retained.length }),
 					content: [{ type: "text", text: lines.join("\n") }],
 				};
 			}
@@ -1340,6 +1378,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				const safety = await checkWorktreeSafety(target, undefined, ctx.cwd);
 				if (!safety.safe && !params.force) {
 					return {
+						details: toolDetails("orca_orchestration_release", { result: "worktree_unsafe", code: "WORKTREE_UNSAFE", worktree: target, reason: safety.reason }),
 						content: [
 							{
 								type: "text",
@@ -1353,6 +1392,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				const rmRes = await removeOrcaWorktree(target, { force: true, cwd: ctx.cwd });
 				if (!rmRes.ok) {
 					return {
+						details: toolDetails("orca_orchestration_release", { result: "worktree_remove_failed", code: "WORKTREE_REMOVE_FAILED", worktree: target }),
 						content: [
 							{
 								type: "text",
@@ -1364,6 +1404,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 
 				return {
+					details: toolDetails("orca_orchestration_release", { result: "worktree_removed", worktree: target }),
 					content: [
 						{
 							type: "text",
@@ -1375,6 +1416,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 			if (!dId) {
 				return {
+					details: toolDetails("orca_orchestration_release", { result: "missing_target", code: "MISSING_TARGET" }),
 					content: [
 						{
 							type: "text",
@@ -1393,6 +1435,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 				if (!stopRes.ok) {
 					return {
+						details: toolDetails("orca_orchestration_release", { result: "stop_failed", code: "STOP_FAILED", dispatchId: dId }),
 						content: [
 							{
 								type: "text",
@@ -1410,6 +1453,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				updateStatusUI(ctx.ui);
 
 				return {
+					details: toolDetails("orca_orchestration_release", { result: "stopped", dispatchId: dId }),
 					content: [{ type: "text", text: `Worker ${dId} was successfully stopped and fenced.` }],
 				};
 			}
@@ -1422,6 +1466,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 			if (!releaseRes.ok) {
 				return {
+					details: toolDetails("orca_orchestration_release", { result: "release_failed", code: "RELEASE_FAILED", dispatchId: dId }),
 					content: [
 						{
 							type: "text",
@@ -1439,6 +1484,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			updateStatusUI(ctx.ui);
 
 			return {
+				details: toolDetails("orca_orchestration_release", { result: "released", dispatchId: dId }),
 				content: [
 					{
 						type: "text",

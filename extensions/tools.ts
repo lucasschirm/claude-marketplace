@@ -234,13 +234,13 @@ export class ToolsManagerComponent {
 				return;
 			}
 
-			if (matchesKey(data, "pageup")) {
+			if (matchesKey(data, "pageUp")) {
 				this.detailsScrollOffset = Math.max(0, this.detailsScrollOffset - 10);
 				this.invalidate();
 				return;
 			}
 
-			if (matchesKey(data, "pagedown")) {
+			if (matchesKey(data, "pageDown")) {
 				this.detailsScrollOffset += 10;
 				this.invalidate();
 				return;
@@ -395,11 +395,14 @@ export class ToolsManagerComponent {
 				}
 
 				// Prompt Guidelines if available
-				if (tool.promptGuidelines) {
+				if (tool.promptGuidelines?.length) {
 					detailContentLines.push(truncateToWidth(`  ${th.bold("Prompt Guidelines:")}`, safeWidth));
-					const guidelinesWrapped = wrapTextWithAnsi(tool.promptGuidelines, safeWidth - 6);
-					for (const g of guidelinesWrapped) {
-						detailContentLines.push(`    ${th.fg("muted", g)}`);
+					// One wrapped block per guideline: `promptGuidelines` is string[], and passing the
+					// array to wrapTextWithAnsi() rendered it comma-joined as a single paragraph.
+					for (const guideline of tool.promptGuidelines) {
+						for (const g of wrapTextWithAnsi(guideline, safeWidth - 6)) {
+							detailContentLines.push(`    ${th.fg("muted", g)}`);
+						}
 					}
 					detailContentLines.push("");
 				}

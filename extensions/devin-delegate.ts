@@ -15,6 +15,7 @@ import * as readline from "node:readline";
 import { DEVIN_BASH_BLOCK_REASON, findBlockedDevinCommand } from "./lib/devin-bash-guard.ts";
 import { stripAnsi, extractCliError } from "./lib/devin-diagnostics.ts";
 import { removeOrcaWorktree, checkWorktreeSafety } from "./lib/orca-client.ts";
+import { capList, type ToolDetails } from "./lib/tool-result.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
@@ -518,6 +519,22 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	const sessions = new Map<string, SessionMeta>();
 	const activeClients = new Map<string, AcpClient>();
 	let lastUIContext: ExtensionUIContext | undefined;
+
+	/**
+	 * The `details` block every tool result of this extension carries: which tool answered and the
+	 * session/queue counters a follow-up turn would otherwise re-query. Per-call facts go in `extra`.
+	 */
+	function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
+		return {
+			tool,
+			sessions: sessions.size,
+			queuedTasks: queue.length,
+			inFlight: countInFlight(),
+			maxInFlight: maxRuns,
+			totalCompleted,
+			...extra,
+		};
+	}
 
 	// Diagnostics: in TUI mode route through the pi UI (raw console writes
 	// corrupt the alternate-screen render); in non-TUI modes use the console.
@@ -1723,6 +1740,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						parentWtId = wt.parentWorktreeId;
 					} catch (err: any) {
 						return {
+							details: toolDetails("devin_delegate", { result: "worktree_create_failed", code: "WORKTREE_CREATE_FAILED" }),
 							content: [{ type: "text", text: `Error creating worktree: ${err.message}` }],
 							isError: true,
 						};
@@ -1746,10 +1764,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				try {
 					const meta = await startSession(task);
 					return {
+						details: toolDetails("devin_delegate", { result: "session_started", sessionId: meta.sessionId }),
 						content: [{ type: "text", text: `Your session started with id: ${meta.sessionId}` }],
 					};
 				} catch (err: any) {
 					return {
+						details: toolDetails("devin_delegate", { result: "session_start_failed", code: "SESSION_START_FAILED" }),
 						content: [{ type: "text", text: `Failed to start Devin session: ${err.message}` }],
 						isError: true,
 					};
@@ -1771,6 +1791,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				updateStatusUI(ctx.ui);
 
 				return {
+					details: toolDetails("devin_delegate", { result: "queued", queueId, queuePosition: position, queueTotal: queuePendingTotal }),
 					content: [
 						{
 							type: "text",
@@ -1810,6 +1831,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 			if (params.complete && !params.session_id) {
 				return {
+					details: toolDetails("devin_status", { result: "invalid_params", code: "INVALID_PARAMS", reason: "complete_requires_session_id" }),
 					content: [{ type: "text", text: "The 'complete' parameter requires a 'session_id'." }],
 					isError: true,
 				};
@@ -1822,6 +1844,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					if (params.complete) {
 						const transcript = readFullTranscriptFromDisk(meta);
 						return {
+							details: toolDetails("devin_status", { result: "full_transcript", sessionId: meta.sessionId, status: meta.status }),
 							content: [
 								{
 									type: "text",
@@ -1850,6 +1873,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					const prStr = meta.detectedPrNumber ? ` | PR: #${meta.detectedPrNumber}` : "";
 
 					return {
+						details: toolDetails("devin_status", { result: "session_summary", sessionId: meta.sessionId, status: meta.status, prNumber: meta.detectedPrNumber ?? null }),
 						content: [
 							{
 								type: "text",
@@ -1864,6 +1888,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				if (queuedTask) {
 					const pos = queue.indexOf(queuedTask) + 1;
 					return {
+						details: toolDetails("devin_status", { result: "queued_task", queueId: queuedTask.queueId, queuePosition: pos, queueTotal: queue.length }),
 						content: [
 							{
 								type: "text",
@@ -1874,6 +1899,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				}
 
 				return {
+					details: toolDetails("devin_status", { result: "not_found", code: "NOT_FOUND", requested: String(params.session_id ?? "") }),
 					content: [{ type: "text", text: `Devin session or queued task '${params.session_id}' not found.` }],
 					isError: true,
 				};
@@ -1882,6 +1908,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// No session_id: return 3 last messages for each session and summary of queued items
 			if (sessions.size === 0 && queue.length === 0) {
 				return {
+					details: toolDetails("devin_status", { result: "nothing_registered" }),
 					content: [{ type: "text", text: "No Devin sessions or queued tasks registered yet." }],
 				};
 			}
@@ -1917,6 +1944,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 
 			return {
+				details: toolDetails("devin_status", { result: "all_sessions", sessionCount: sessions.size, queueTotal: queue.length }),
 				content: [{ type: "text", text: summaries.join("\n\n---\n\n") }],
 			};
 		},
@@ -1941,6 +1969,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const meta = sessions.get(params.session_id);
 			if (!meta) {
 				return {
+					details: toolDetails("devin_message", { result: "not_found", code: "NOT_FOUND", requested: String(params.session_id ?? "") }),
 					content: [{ type: "text", text: `Session '${params.session_id}' not found.` }],
 					isError: true,
 				};
@@ -1948,6 +1977,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 			if (meta.status === "running" || meta.status === "stalled") {
 				return {
+					details: toolDetails("devin_message", { result: "busy", sessionId: params.session_id, status: meta.status }),
 					content: [
 						{
 							type: "text",
@@ -1972,6 +2002,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					// A failed handshake must not leave the spawned child behind.
 					client.dispose();
 					return {
+						details: toolDetails("devin_message", { result: "reattach_failed", code: "REATTACH_FAILED", sessionId: params.session_id }),
 						content: [{ type: "text", text: `Failed to re-attach to session: ${err.message}` }],
 						isError: true,
 					};
@@ -2042,6 +2073,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				});
 
 			return {
+				details: toolDetails("devin_message", { result: "message_sent", sessionId: meta.sessionId }),
 				content: [{ type: "text", text: `Message sent to session ${meta.sessionId}.` }],
 			};
 		},
@@ -2072,6 +2104,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const kind = cancelSessionById(targetId);
 			if (kind) {
 				return {
+					details: toolDetails("devin_cancel", { result: "cancelled", sessionId: targetId, cancelled: kind }),
 					content: [
 						{
 							type: "text",
@@ -2082,6 +2115,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 
 			return {
+				details: toolDetails("devin_cancel", { result: "not_found", code: "NOT_FOUND", requested: String(targetId ?? "") }),
 				content: [{ type: "text", text: `Session '${targetId}' not found.` }],
 				isError: true,
 			};
@@ -2114,6 +2148,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const meta = sessions.get(params.session_id);
 			if (!meta) {
 				return {
+					details: toolDetails("devin_restart", { result: "not_found", code: "NOT_FOUND", requested: String(params.session_id ?? "") }),
 					content: [{ type: "text", text: `Session '${params.session_id}' not found.` }],
 					isError: true,
 				};
@@ -2121,6 +2156,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 			if (meta.status === "running" || meta.status === "stalled") {
 				return {
+					details: toolDetails("devin_restart", { result: "busy", sessionId: params.session_id, status: meta.status }),
 					content: [
 						{
 							type: "text",
@@ -2135,6 +2171,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			if (meta.pid && isPidAlive(meta.pid)) {
 				if (meta.status !== "cancelled") {
 					return {
+						details: toolDetails("devin_restart", { result: "process_alive", code: "PROCESS_ALIVE", sessionId: params.session_id, pid: meta.pid ?? null }),
 						content: [
 							{
 								type: "text",
@@ -2153,6 +2190,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				}
 				if (isPidAlive(meta.pid)) {
 					return {
+						details: toolDetails("devin_restart", { result: "process_not_stopped", code: "PROCESS_NOT_STOPPED", sessionId: params.session_id, pid: meta.pid ?? null }),
 						content: [
 							{
 								type: "text",
@@ -2184,6 +2222,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					wtStatus = "active";
 				} catch (err: any) {
 					return {
+						details: toolDetails("devin_restart", { result: "worktree_recreate_failed", code: "WORKTREE_CREATE_FAILED", sessionId: params.session_id }),
 						content: [{ type: "text", text: `Failed to recreate worktree for restart: ${err.message}` }],
 						isError: true,
 					};
@@ -2209,10 +2248,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				try {
 					const newMeta = await startSession(task);
 					return {
+						details: toolDetails("devin_restart", { result: "restarted", sessionId: newMeta.sessionId }),
 						content: [{ type: "text", text: `Your session was restarted with id: ${newMeta.sessionId}` }],
 					};
 				} catch (err: any) {
 					return {
+						details: toolDetails("devin_restart", { result: "restart_failed", code: "RESTART_FAILED", sessionId: params.session_id }),
 						content: [{ type: "text", text: `Failed to restart session: ${err.message}` }],
 						isError: true,
 					};
@@ -2225,6 +2266,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				updateStatusUI(ctx.ui);
 
 				return {
+					details: toolDetails("devin_restart", { result: "queued", queuePosition: position, queueTotal: queuePendingTotal }),
 					content: [
 						{
 							type: "text",
@@ -2311,12 +2353,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					}
 				}
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "pruned", ...capList(cleaned), skipped: skipped.length }),
 					content: [{ type: "text", text: lines.join("\n") }],
 				};
 			}
 
 			if (!targetId) {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "missing_target", code: "MISSING_TARGET" }),
 					content: [
 						{
 							type: "text",
@@ -2330,6 +2374,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const meta = sessions.get(targetId);
 			if (!meta) {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "not_found", code: "NOT_FOUND", requested: String(targetId ?? "") }),
 					content: [{ type: "text", text: `Session '${targetId}' not found.` }],
 					isError: true,
 				};
@@ -2337,6 +2382,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 			if (!meta.worktreePath) {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "no_worktree", code: "NO_WORKTREE", sessionId: targetId }),
 					content: [{ type: "text", text: `Session '${targetId}' was not created with an isolated worktree.` }],
 					isError: true,
 				};
@@ -2344,12 +2390,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 			if (meta.worktreeStatus === "released") {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "already_released", sessionId: targetId }),
 					content: [{ type: "text", text: `Worktree for session '${targetId}' has already been released.` }],
 				};
 			}
 
 			if (meta.status === "running" || meta.status === "stalled") {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "busy", sessionId: targetId, status: meta.status }),
 					content: [
 						{
 							type: "text",
@@ -2363,6 +2411,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch);
 			if (!safety.safe && !params.force) {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "worktree_unsafe", code: "WORKTREE_UNSAFE", sessionId: targetId, reason: safety.reason }),
 					content: [
 						{
 							type: "text",
@@ -2377,6 +2426,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const rmRes = await removeOrcaWorktree(selector, { force: true });
 			if (!rmRes.ok) {
 				return {
+					details: toolDetails("devin_clean_worktree", { result: "worktree_remove_failed", code: "WORKTREE_REMOVE_FAILED", sessionId: targetId }),
 					content: [
 						{
 							type: "text",
@@ -2393,6 +2443,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			updateStatusUI();
 
 			return {
+				details: toolDetails("devin_clean_worktree", { result: "worktree_released", sessionId: targetId, worktreePath: meta.worktreePath }),
 				content: [
 					{
 						type: "text",
