@@ -1,0 +1,79 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": ["extensions/**", "test/**", "scripts/**"],
+    "ignoreUnknown": true
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "tab",
+    "lineWidth": 140
+  },
+  "assist": {
+    "enabled": false,
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        // 147 today: visible, and scripts/check-quality.mjs ratchets the count down.
+        "noExplicitAny": "warn",
+        // 17 call sites today; flips to "error" in the commit that removes the last one (P1/C2.2),
+        // because console output lands inside a live TUI.
+        "noConsole": "warn"
+      },
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedFunctionParameters": "warn"
+      },
+      "complexity": {
+        // 51 functions above 20 today (P1 decision D3b): reported here, ratcheted by check-quality,
+        // instead of a hand-rolled "lines per declaration" counter.
+        "noExcessiveCognitiveComplexity": {
+          "level": "warn",
+          "options": {
+            "maxAllowedComplexity": 20
+          }
+        }
+      }
+    }
+  },
+  "overrides": [
+    {
+      // ANSI stripping *is* control characters, so these regexes have to contain them. One override
+      // rather than eleven `// biome-ignore` comments, which can drift away from the file they sit in.
+      "includes": ["extensions/lib/devin-diagnostics.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noControlCharactersInRegex": "off"
+          }
+        }
+      }
+    },
+    {
+      // Test harnesses and the manifest script report to the terminal by design; they do not render
+      // inside a TUI. The gate is `npm run lint`, which lints extensions/.
+      "includes": ["test/**", "scripts/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": "off",
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    }
+  ]
+}
