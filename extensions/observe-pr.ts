@@ -267,6 +267,11 @@ export default function (pi: ExtensionAPI) {
 			pendingAnnouncements.clear();
 			pendingAutoStart.clear();
 			deferredAnnouncements.clear();
+			// session_shutdown also released the registration globals; without that the
+			// next session's factory re-run would early-return (global guard) and the
+			// extension would be dead until the process restarts.
+			delete (globalThis as any)[GLOBAL_GUARD_KEY];
+			delete (globalThis as any).__PI_OBSERVED_PRS__;
 		} catch (err) {
 			logError(EXT_LOG_SCOPE, "stale-context teardown failed", err);
 		}

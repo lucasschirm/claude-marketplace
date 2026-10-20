@@ -82,6 +82,7 @@ jobs:
           - observe-pr-resume
           - observe-pr-stale
           - pr-tasks
+          - pr-tasks-stale
           - pr-tasks-gh-failure
           - pr-tasks-reconcile
           - tools

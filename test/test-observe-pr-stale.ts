@@ -156,7 +156,9 @@ exit 0
         calls.appendEntry === appendAfter && calls.getFlag === flagAfter,
         `S1: no background work may survive the stale teardown (appendEntry ${appendAfter}->${calls.appendEntry}, getFlag ${flagAfter}->${calls.getFlag})`,
       );
-      assert(observed()?.size === 0, "S1: self-teardown must clear the observed map");
+      // The teardown either clears the map (shared global) or releases it (deleted
+      // global so the next session's factory re-run re-registers): both are "no live state".
+      assert(observed() === undefined || observed()?.size === 0, "S1: self-teardown must clear or release the observed map");
       assert(consoleErrors.length === 0, `S1: console.error must stay silent, got ${consoleErrors.length} call(s)`);
       assert(rejections.length === 0, `S1: no unhandled rejections, got ${JSON.stringify(rejections)}`);
       const s1Entries = readLogEntries();
