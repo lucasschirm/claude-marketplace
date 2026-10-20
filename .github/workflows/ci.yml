@@ -81,6 +81,7 @@ jobs:
           - startup-notice
           - observe-pr-resume
           - observe-pr-stale
+          - compaction-recovery
           - pr-tasks
           - pr-tasks-stale
           - pr-tasks-gh-failure
