@@ -1128,7 +1128,8 @@ function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 				if (params.read_output) {
 					const readRes = await execOrca<any>(
 						["orchestration", "worker-read", "--dispatch", dId, "--source", "auto"],
-						{ cwd: ctx.cwd },
+						// A terminal tail is text, so this one command may return a non-JSON body.
+						{ cwd: ctx.cwd, expectText: true },
 					);
 					const output =
 						readRes.ok && readRes.result

@@ -9,6 +9,11 @@ export interface OrcaCommandOptions {
 	cwd?: string;
 	timeoutMs?: number;
 	env?: Record<string, string | undefined>;
+	/**
+	 * The command's stdout is terminal text rather than an envelope (e.g. `worker-read`). Only for
+	 * those commands is unparseable output a success; everywhere else it is a BAD_JSON failure.
+	 */
+	expectText?: boolean;
 }
 
 export interface OrcaEnvelope<T = any> {
@@ -186,9 +191,18 @@ export async function execOrca<T = any>(args: string[], options: OrcaCommandOpti
 		try {
 			return JSON.parse(stdout) as OrcaEnvelope<T>;
 		} catch (parseErr: any) {
+			// Reporting unparseable output as ok:true is how a failed CLI call used to look like an
+			// empty worker list or "no messages". `expectText` commands are the deliberate exception.
+			if (options.expectText) {
+				return { ok: true, result: stdout.trim() as unknown as T };
+			}
 			return {
-				ok: true,
-				result: stdout.trim() as any,
+				ok: false,
+				error: {
+					code: "BAD_JSON",
+					message: `Orca CLI returned output that is not JSON: ${parseErr?.message || String(parseErr)}`,
+					details: { raw: stdout.trim().slice(0, 2048) },
+				},
 			};
 		}
 	} catch (err: any) {
