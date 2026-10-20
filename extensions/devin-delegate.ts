@@ -16,6 +16,7 @@ import { DEVIN_BASH_BLOCK_REASON, findBlockedDevinCommand } from "./lib/devin-ba
 import { stripAnsi, extractCliError } from "./lib/devin-diagnostics.ts";
 import { removeOrcaWorktree, checkWorktreeSafety } from "./lib/orca-client.ts";
 import { capList, type ToolDetails } from "./lib/tool-result.ts";
+import { logError as fileLogError, logWarn as fileLogWarn } from "./lib/extension-log.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
@@ -550,8 +551,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// Diagnostics: in TUI mode route through the pi UI (raw console writes
 	// corrupt the alternate-screen render); in non-TUI modes use the console.
+	// Every call is also file-logged (extension-log) as a persistent debug record.
 	function logWarn(message: string): void {
 		const safe = stripAnsi(message).replace(/\s+/g, " ").trim().slice(0, 500);
+		fileLogWarn("devin-delegate", safe);
 		const ui = lastUIContext;
 		if (ui?.notify) {
 			try {
@@ -564,6 +567,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	function logError(message: string): void {
 		const safe = stripAnsi(message).replace(/\s+/g, " ").trim().slice(0, 500);
+		fileLogError("devin-delegate", safe);
 		const ui = lastUIContext;
 		if (ui?.notify) {
 			try {

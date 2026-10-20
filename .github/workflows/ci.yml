@@ -80,6 +80,7 @@ jobs:
           - branch-observer
           - startup-notice
           - observe-pr-resume
+          - observe-pr-stale
           - pr-tasks
           - pr-tasks-gh-failure
           - pr-tasks-reconcile
