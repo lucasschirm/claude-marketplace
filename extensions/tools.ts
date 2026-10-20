@@ -33,7 +33,12 @@ export function formatParamSchema(name: string, schema: any, isRequired: boolean
 		}
 
 		if (Array.isArray(schema?.enum) && schema.enum.length > 0) {
-			lines.push(truncateToWidth(`      ${theme.fg("dim", `Allowed values: [${schema.enum.map((v: any) => JSON.stringify(v)).join(", ")}]`)}`, width));
+			lines.push(
+				truncateToWidth(
+					`      ${theme.fg("dim", `Allowed values: [${schema.enum.map((v: any) => JSON.stringify(v)).join(", ")}]`)}`,
+					width,
+				),
+			);
 		}
 
 		// Nested object properties
@@ -91,7 +96,7 @@ export class ToolsManagerComponent {
 		enabledTools: Set<string>,
 		theme: Theme,
 		onToggle: (toolName: string, enabled: boolean) => void,
-		onClose: () => void
+		onClose: () => void,
 	) {
 		this.allTools = allTools;
 		this.enabledTools = enabledTools;
@@ -151,106 +156,100 @@ export class ToolsManagerComponent {
 					return;
 				}
 
-			if (matchesKey(data, "down") || data === "j") {
-				if (this.selectedIndex < this.allTools.length - 1) {
-					this.selectedIndex++;
-					this.invalidate();
-				}
-				return;
-			}
-
-			// Space: toggle enable/disable
-			if (data === " ") {
-				const current = this.allTools[this.selectedIndex];
-				if (current) {
-					const nowEnabled = !this.enabledTools.has(current.name);
-					if (nowEnabled) {
-						this.enabledTools.add(current.name);
-					} else {
-						this.enabledTools.delete(current.name);
+				if (matchesKey(data, "down") || data === "j") {
+					if (this.selectedIndex < this.allTools.length - 1) {
+						this.selectedIndex++;
+						this.invalidate();
 					}
-					this.onToggle(current.name, nowEnabled);
-					this.invalidate();
+					return;
 				}
-				return;
-			}
 
-			// Right arrow or Enter: open details
-			if (matchesKey(data, "right") || matchesKey(data, "enter") || data === "l") {
-				if (this.allTools.length > 0) {
-					this.viewMode = "details";
-					this.detailsScrollOffset = 0;
-					this.invalidate();
-				}
-				return;
-			}
-		} else {
-			// Details view
-			if (
-				matchesKey(data, "left") ||
-				matchesKey(data, "escape") ||
-				data === "h" ||
-				data === "q" ||
-				data === "Q"
-			) {
-				this.viewMode = "list";
-				this.invalidate();
-				return;
-			}
-
-			if (matchesKey(data, "ctrl+c")) {
-				this.onClose();
-				return;
-			}
-
-			// Space: toggle enable/disable directly in details view
-			if (data === " ") {
-				const current = this.allTools[this.selectedIndex];
-				if (current) {
-					const nowEnabled = !this.enabledTools.has(current.name);
-					if (nowEnabled) {
-						this.enabledTools.add(current.name);
-					} else {
-						this.enabledTools.delete(current.name);
+				// Space: toggle enable/disable
+				if (data === " ") {
+					const current = this.allTools[this.selectedIndex];
+					if (current) {
+						const nowEnabled = !this.enabledTools.has(current.name);
+						if (nowEnabled) {
+							this.enabledTools.add(current.name);
+						} else {
+							this.enabledTools.delete(current.name);
+						}
+						this.onToggle(current.name, nowEnabled);
+						this.invalidate();
 					}
-					this.onToggle(current.name, nowEnabled);
-					this.invalidate();
+					return;
 				}
-				return;
-			}
 
-			// Scrolling inside details
-			if (matchesKey(data, "up") || data === "k") {
-				if (this.detailsScrollOffset > 0) {
-					this.detailsScrollOffset--;
-					this.invalidate();
+				// Right arrow or Enter: open details
+				if (matchesKey(data, "right") || matchesKey(data, "enter") || data === "l") {
+					if (this.allTools.length > 0) {
+						this.viewMode = "details";
+						this.detailsScrollOffset = 0;
+						this.invalidate();
+					}
+					return;
 				}
-				return;
-			}
+			} else {
+				// Details view
+				if (matchesKey(data, "left") || matchesKey(data, "escape") || data === "h" || data === "q" || data === "Q") {
+					this.viewMode = "list";
+					this.invalidate();
+					return;
+				}
 
-			if (matchesKey(data, "down") || data === "j") {
-				this.detailsScrollOffset++;
-				this.invalidate();
-				return;
-			}
+				if (matchesKey(data, "ctrl+c")) {
+					this.onClose();
+					return;
+				}
 
-			if (matchesKey(data, "pageUp")) {
-				this.detailsScrollOffset = Math.max(0, this.detailsScrollOffset - 10);
-				this.invalidate();
-				return;
-			}
+				// Space: toggle enable/disable directly in details view
+				if (data === " ") {
+					const current = this.allTools[this.selectedIndex];
+					if (current) {
+						const nowEnabled = !this.enabledTools.has(current.name);
+						if (nowEnabled) {
+							this.enabledTools.add(current.name);
+						} else {
+							this.enabledTools.delete(current.name);
+						}
+						this.onToggle(current.name, nowEnabled);
+						this.invalidate();
+					}
+					return;
+				}
 
-			if (matchesKey(data, "pageDown")) {
-				this.detailsScrollOffset += 10;
-				this.invalidate();
-				return;
+				// Scrolling inside details
+				if (matchesKey(data, "up") || data === "k") {
+					if (this.detailsScrollOffset > 0) {
+						this.detailsScrollOffset--;
+						this.invalidate();
+					}
+					return;
+				}
+
+				if (matchesKey(data, "down") || data === "j") {
+					this.detailsScrollOffset++;
+					this.invalidate();
+					return;
+				}
+
+				if (matchesKey(data, "pageUp")) {
+					this.detailsScrollOffset = Math.max(0, this.detailsScrollOffset - 10);
+					this.invalidate();
+					return;
+				}
+
+				if (matchesKey(data, "pageDown")) {
+					this.detailsScrollOffset += 10;
+					this.invalidate();
+					return;
+				}
 			}
+		} catch (err) {
+			console.error("[tools] Error processing input in ToolsManagerComponent:", err);
+			this.setError(err);
 		}
-	} catch (err) {
-		console.error("[tools] Error processing input in ToolsManagerComponent:", err);
-		this.setError(err);
 	}
-}
 
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) {
@@ -264,7 +263,10 @@ export class ToolsManagerComponent {
 			const errLines: string[] = [];
 			errLines.push("");
 			const title = th.fg("error", " Tool Manager Error ");
-			const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Error "))));
+			const headerLine =
+				th.fg("borderMuted", "───") +
+				title +
+				th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Error "))));
 			errLines.push(truncateToWidth(headerLine, safeWidth));
 			errLines.push("");
 			errLines.push(truncateToWidth(`  ${th.fg("error", "An error occurred while displaying tool details:")}`, safeWidth));
@@ -278,168 +280,189 @@ export class ToolsManagerComponent {
 		try {
 			const lines: string[] = [];
 
-		if (this.viewMode === "list") {
-			// List header
-			lines.push("");
-			const title = th.fg("accent", " Tools & Extensions Configuration ");
-			const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tools & Extensions Configuration "))));
-			lines.push(truncateToWidth(headerLine, safeWidth));
-			lines.push("");
-
-			const enabledCount = this.allTools.filter(t => this.enabledTools.has(t.name)).length;
-			lines.push(truncateToWidth(`  Active tools in this session: ${th.fg("accent", `${enabledCount}/${this.allTools.length}`)} enabled`, safeWidth));
-			lines.push("");
-
-			if (this.allTools.length === 0) {
-				lines.push(truncateToWidth(`  ${th.fg("dim", "No tools discovered in this session.")}`, safeWidth));
-			} else {
-				const maxVisible = 15;
-				let startIdx = 0;
-				let endIdx = this.allTools.length;
-
-				if (this.allTools.length > maxVisible) {
-					const half = Math.floor(maxVisible / 2);
-					if (this.selectedIndex <= half) {
-						startIdx = 0;
-						endIdx = maxVisible;
-					} else if (this.selectedIndex >= this.allTools.length - half) {
-						startIdx = this.allTools.length - maxVisible;
-						endIdx = this.allTools.length;
-					} else {
-						startIdx = this.selectedIndex - half;
-						endIdx = startIdx + maxVisible;
-					}
-				}
-
-				for (let i = startIdx; i < endIdx; i++) {
-					const tool = this.allTools[i];
-					const isSelected = i === this.selectedIndex;
-					const pointer = isSelected ? th.fg("accent", "▶ ") : "  ";
-					const isEnabled = this.enabledTools.has(tool.name);
-					const statusBadge = isEnabled
-						? th.fg("success", "[● ENABLED] ")
-						: th.fg("dim", "[○ DISABLED]");
-
-					const nameStyled = isSelected ? th.bold(tool.name) : th.fg("text", tool.name);
-					const oneLineDesc = tool.description ? tool.description.split("\n")[0].trim() : "";
-					const descStr = oneLineDesc ? th.fg("muted", ` - ${oneLineDesc}`) : "";
-
-					const row = `${pointer}${statusBadge} ${nameStyled}${descStr}`;
-					lines.push(truncateToWidth(row, safeWidth));
-				}
-
-				if (this.allTools.length > maxVisible) {
-					lines.push(truncateToWidth(`  ${th.fg("dim", `[Showing ${startIdx + 1}-${endIdx} of ${this.allTools.length} tools]`)}`, safeWidth));
-				}
-			}
-
-			lines.push("");
-			lines.push(truncateToWidth(`  ${th.fg("dim", "↑/↓: navigate  •  Space: toggle enable/disable  •  →/Enter: view parameters  •  Esc: close")}`, safeWidth));
-			lines.push("");
-		} else {
-			// Details view
-			const tool = this.allTools[this.selectedIndex];
-			if (!tool) {
-				lines.push(truncateToWidth(`  ${th.fg("error", "Tool not found.")}`, safeWidth));
-			} else {
-				const isEnabled = this.enabledTools.has(tool.name);
-				const statusBadge = isEnabled
-					? th.fg("success", "[● ENABLED]")
-					: th.fg("dim", "[○ DISABLED]");
-
+			if (this.viewMode === "list") {
+				// List header
 				lines.push("");
-				const title = th.fg("accent", ` Tool Details: ${tool.name} `);
-				const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + ` Tool Details: ${tool.name} `))));
+				const title = th.fg("accent", " Tools & Extensions Configuration ");
+				const headerLine =
+					th.fg("borderMuted", "───") +
+					title +
+					th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tools & Extensions Configuration "))));
 				lines.push(truncateToWidth(headerLine, safeWidth));
 				lines.push("");
 
-				const detailContentLines: string[] = [];
+				const enabledCount = this.allTools.filter((t) => this.enabledTools.has(t.name)).length;
+				lines.push(
+					truncateToWidth(
+						`  Active tools in this session: ${th.fg("accent", `${enabledCount}/${this.allTools.length}`)} enabled`,
+						safeWidth,
+					),
+				);
+				lines.push("");
 
-				detailContentLines.push(truncateToWidth(`  Status:      ${statusBadge} (Press Space to toggle)`, safeWidth));
-				if (tool.exposure) {
-					detailContentLines.push(truncateToWidth(`  Exposure:    ${th.fg("muted", tool.exposure)}`, safeWidth));
-				}
-				if (tool.sourceInfo?.source) {
-					detailContentLines.push(truncateToWidth(`  Source:      ${th.fg("muted", tool.sourceInfo.source)}`, safeWidth));
-				}
-				detailContentLines.push("");
-
-				// Description
-				detailContentLines.push(truncateToWidth(`  ${th.bold("Description:")}`, safeWidth));
-				if (tool.description) {
-					const descWrapped = wrapTextWithAnsi(tool.description, safeWidth - 6);
-					for (const d of descWrapped) {
-						detailContentLines.push(`    ${th.fg("text", d)}`);
-					}
+				if (this.allTools.length === 0) {
+					lines.push(truncateToWidth(`  ${th.fg("dim", "No tools discovered in this session.")}`, safeWidth));
 				} else {
-					detailContentLines.push(`    ${th.fg("dim", "No description provided.")}`);
-				}
-				detailContentLines.push("");
+					const maxVisible = 15;
+					let startIdx = 0;
+					let endIdx = this.allTools.length;
 
-				// Parameters
-				detailContentLines.push(truncateToWidth(`  ${th.bold("Parameters:")}`, safeWidth));
-				const paramsObj = tool.parameters as any;
-				const properties = paramsObj?.properties;
-				const requiredFields = new Set<string>(Array.isArray(paramsObj?.required) ? paramsObj.required : []);
-
-				if (properties && Object.keys(properties).length > 0) {
-					for (const [propName, propSchema] of Object.entries(properties)) {
-						const isReq = requiredFields.has(propName);
-						const formattedParam = formatParamSchema(propName, propSchema, isReq, th, safeWidth);
-						detailContentLines.push(...formattedParam);
-						detailContentLines.push("");
-					}
-				} else {
-					detailContentLines.push(`    ${th.fg("dim", "This tool accepts no parameters.")}`);
-					detailContentLines.push("");
-				}
-
-				// Prompt Guidelines if available
-				if (tool.promptGuidelines?.length) {
-					detailContentLines.push(truncateToWidth(`  ${th.bold("Prompt Guidelines:")}`, safeWidth));
-					// One wrapped block per guideline: `promptGuidelines` is string[], and passing the
-					// array to wrapTextWithAnsi() rendered it comma-joined as a single paragraph.
-					for (const guideline of tool.promptGuidelines) {
-						for (const g of wrapTextWithAnsi(guideline, safeWidth - 6)) {
-							detailContentLines.push(`    ${th.fg("muted", g)}`);
+					if (this.allTools.length > maxVisible) {
+						const half = Math.floor(maxVisible / 2);
+						if (this.selectedIndex <= half) {
+							startIdx = 0;
+							endIdx = maxVisible;
+						} else if (this.selectedIndex >= this.allTools.length - half) {
+							startIdx = this.allTools.length - maxVisible;
+							endIdx = this.allTools.length;
+						} else {
+							startIdx = this.selectedIndex - half;
+							endIdx = startIdx + maxVisible;
 						}
 					}
-					detailContentLines.push("");
+
+					for (let i = startIdx; i < endIdx; i++) {
+						const tool = this.allTools[i];
+						const isSelected = i === this.selectedIndex;
+						const pointer = isSelected ? th.fg("accent", "▶ ") : "  ";
+						const isEnabled = this.enabledTools.has(tool.name);
+						const statusBadge = isEnabled ? th.fg("success", "[● ENABLED] ") : th.fg("dim", "[○ DISABLED]");
+
+						const nameStyled = isSelected ? th.bold(tool.name) : th.fg("text", tool.name);
+						const oneLineDesc = tool.description ? tool.description.split("\n")[0].trim() : "";
+						const descStr = oneLineDesc ? th.fg("muted", ` - ${oneLineDesc}`) : "";
+
+						const row = `${pointer}${statusBadge} ${nameStyled}${descStr}`;
+						lines.push(truncateToWidth(row, safeWidth));
+					}
+
+					if (this.allTools.length > maxVisible) {
+						lines.push(
+							truncateToWidth(`  ${th.fg("dim", `[Showing ${startIdx + 1}-${endIdx} of ${this.allTools.length} tools]`)}`, safeWidth),
+						);
+					}
 				}
 
-				// Apply scrolling if needed
-				const maxDisplayLines = 25;
-				const maxScroll = Math.max(0, detailContentLines.length - maxDisplayLines);
-				if (this.detailsScrollOffset > maxScroll) {
-					this.detailsScrollOffset = maxScroll;
-				}
-
-				const visibleLines = detailContentLines.slice(
-					this.detailsScrollOffset,
-					this.detailsScrollOffset + maxDisplayLines
+				lines.push("");
+				lines.push(
+					truncateToWidth(
+						`  ${th.fg("dim", "↑/↓: navigate  •  Space: toggle enable/disable  •  →/Enter: view parameters  •  Esc: close")}`,
+						safeWidth,
+					),
 				);
-				lines.push(...visibleLines);
+				lines.push("");
+			} else {
+				// Details view
+				const tool = this.allTools[this.selectedIndex];
+				if (!tool) {
+					lines.push(truncateToWidth(`  ${th.fg("error", "Tool not found.")}`, safeWidth));
+				} else {
+					const isEnabled = this.enabledTools.has(tool.name);
+					const statusBadge = isEnabled ? th.fg("success", "[● ENABLED]") : th.fg("dim", "[○ DISABLED]");
 
-				if (detailContentLines.length > maxDisplayLines) {
-					const scrollPct = Math.round(((this.detailsScrollOffset + maxDisplayLines) / detailContentLines.length) * 100);
-					lines.push(truncateToWidth(`  ${th.fg("dim", `[Showing lines ${this.detailsScrollOffset + 1}-${Math.min(detailContentLines.length, this.detailsScrollOffset + maxDisplayLines)} of ${detailContentLines.length} (${scrollPct}%)]`)}`, safeWidth));
+					lines.push("");
+					const title = th.fg("accent", ` Tool Details: ${tool.name} `);
+					const headerLine =
+						th.fg("borderMuted", "───") +
+						title +
+						th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + ` Tool Details: ${tool.name} `))));
+					lines.push(truncateToWidth(headerLine, safeWidth));
+					lines.push("");
+
+					const detailContentLines: string[] = [];
+
+					detailContentLines.push(truncateToWidth(`  Status:      ${statusBadge} (Press Space to toggle)`, safeWidth));
+					if (tool.exposure) {
+						detailContentLines.push(truncateToWidth(`  Exposure:    ${th.fg("muted", tool.exposure)}`, safeWidth));
+					}
+					if (tool.sourceInfo?.source) {
+						detailContentLines.push(truncateToWidth(`  Source:      ${th.fg("muted", tool.sourceInfo.source)}`, safeWidth));
+					}
+					detailContentLines.push("");
+
+					// Description
+					detailContentLines.push(truncateToWidth(`  ${th.bold("Description:")}`, safeWidth));
+					if (tool.description) {
+						const descWrapped = wrapTextWithAnsi(tool.description, safeWidth - 6);
+						for (const d of descWrapped) {
+							detailContentLines.push(`    ${th.fg("text", d)}`);
+						}
+					} else {
+						detailContentLines.push(`    ${th.fg("dim", "No description provided.")}`);
+					}
+					detailContentLines.push("");
+
+					// Parameters
+					detailContentLines.push(truncateToWidth(`  ${th.bold("Parameters:")}`, safeWidth));
+					const paramsObj = tool.parameters as any;
+					const properties = paramsObj?.properties;
+					const requiredFields = new Set<string>(Array.isArray(paramsObj?.required) ? paramsObj.required : []);
+
+					if (properties && Object.keys(properties).length > 0) {
+						for (const [propName, propSchema] of Object.entries(properties)) {
+							const isReq = requiredFields.has(propName);
+							const formattedParam = formatParamSchema(propName, propSchema, isReq, th, safeWidth);
+							detailContentLines.push(...formattedParam);
+							detailContentLines.push("");
+						}
+					} else {
+						detailContentLines.push(`    ${th.fg("dim", "This tool accepts no parameters.")}`);
+						detailContentLines.push("");
+					}
+
+					// Prompt Guidelines if available
+					if (tool.promptGuidelines?.length) {
+						detailContentLines.push(truncateToWidth(`  ${th.bold("Prompt Guidelines:")}`, safeWidth));
+						// One wrapped block per guideline: `promptGuidelines` is string[], and passing the
+						// array to wrapTextWithAnsi() rendered it comma-joined as a single paragraph.
+						for (const guideline of tool.promptGuidelines) {
+							for (const g of wrapTextWithAnsi(guideline, safeWidth - 6)) {
+								detailContentLines.push(`    ${th.fg("muted", g)}`);
+							}
+						}
+						detailContentLines.push("");
+					}
+
+					// Apply scrolling if needed
+					const maxDisplayLines = 25;
+					const maxScroll = Math.max(0, detailContentLines.length - maxDisplayLines);
+					if (this.detailsScrollOffset > maxScroll) {
+						this.detailsScrollOffset = maxScroll;
+					}
+
+					const visibleLines = detailContentLines.slice(this.detailsScrollOffset, this.detailsScrollOffset + maxDisplayLines);
+					lines.push(...visibleLines);
+
+					if (detailContentLines.length > maxDisplayLines) {
+						const scrollPct = Math.round(((this.detailsScrollOffset + maxDisplayLines) / detailContentLines.length) * 100);
+						lines.push(
+							truncateToWidth(
+								`  ${th.fg("dim", `[Showing lines ${this.detailsScrollOffset + 1}-${Math.min(detailContentLines.length, this.detailsScrollOffset + maxDisplayLines)} of ${detailContentLines.length} (${scrollPct}%)]`)}`,
+								safeWidth,
+							),
+						);
+					}
 				}
+
+				lines.push("");
+				lines.push(
+					truncateToWidth(`  ${th.fg("dim", "←/Esc: back to list  •  Space: toggle enable/disable  •  ↑/↓: scroll details")}`, safeWidth),
+				);
+				lines.push("");
 			}
 
-			lines.push("");
-			lines.push(truncateToWidth(`  ${th.fg("dim", "←/Esc: back to list  •  Space: toggle enable/disable  •  ↑/↓: scroll details")}`, safeWidth));
-			lines.push("");
-		}
-
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return lines;
+			this.cachedWidth = width;
+			this.cachedLines = lines;
+			return lines;
 		} catch (err) {
 			console.error("[tools] Unhandled error during render:", err);
 			const errLines: string[] = [];
 			errLines.push("");
 			const title = th.fg("error", " Tool Manager Render Error ");
-			const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Render Error "))));
+			const headerLine =
+				th.fg("borderMuted", "───") +
+				title +
+				th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Render Error "))));
 			errLines.push(truncateToWidth(headerLine, safeWidth));
 			errLines.push("");
 			errLines.push(truncateToWidth(`  ${th.fg("error", "Failed to render tool details or list:")}`, safeWidth));
@@ -490,7 +513,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 	function restoreFromBranch(ctx: ExtensionContext) {
 		allTools = pi.getAllTools();
-		const allToolNames = allTools.map(t => t.name);
+		const allToolNames = allTools.map((t) => t.name);
 
 		let savedTools: string[] | undefined;
 		try {
@@ -509,7 +532,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 		if (savedTools) {
 			// Filter to tools that currently exist
-			enabledTools = new Set(savedTools.filter(t => allToolNames.includes(t)));
+			enabledTools = new Set(savedTools.filter((t) => allToolNames.includes(t)));
 			applyTools();
 		} else {
 			// Sync with currently active tools
@@ -549,7 +572,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 						},
 						() => {
 							done();
-						}
+						},
 					);
 
 					return {
@@ -558,12 +581,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 								return component.render(width);
 							} catch (renderErr) {
 								console.error("[tools] Critical render error:", renderErr);
-								return [
-									"",
-									theme.fg("error", "  Failed to display tools manager."),
-									theme.fg("dim", "  Press Esc to close."),
-									"",
-								];
+								return ["", theme.fg("error", "  Failed to display tools manager."), theme.fg("dim", "  Press Esc to close."), ""];
 							}
 						},
 						invalidate() {
@@ -586,10 +604,7 @@ export default function toolsExtension(pi: ExtensionAPI) {
 				});
 			} catch (cmdErr) {
 				console.error("[tools] Error running /tools command:", cmdErr);
-				ctx.ui.notify(
-					`Tool Manager encountered an error: ${cmdErr instanceof Error ? cmdErr.message : String(cmdErr)}`,
-					"error"
-				);
+				ctx.ui.notify(`Tool Manager encountered an error: ${cmdErr instanceof Error ? cmdErr.message : String(cmdErr)}`, "error");
 			}
 		},
 	});

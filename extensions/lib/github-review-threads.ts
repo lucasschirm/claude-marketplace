@@ -129,10 +129,7 @@ ${THREAD_COMMENT_FRAGMENT}`;
  * Fetches all review threads for a specific PR in a repository.
  * Throws instead of returning a partial list, since callers treat the result as the PR's full thread list.
  */
-export async function fetchReviewThreads(
-	prNumber: number,
-	cwd: string,
-): Promise<GitHubReviewThreadNode[]> {
+export async function fetchReviewThreads(prNumber: number, cwd: string): Promise<GitHubReviewThreadNode[]> {
 	const coords = await getRepoCoordinates(cwd);
 	const threads: GitHubReviewThreadNode[] = [];
 	let cursor: string | null = null;
@@ -162,7 +159,9 @@ export async function fetchReviewThreads(
 		const prData = res?.data?.repository?.pullRequest;
 		if (res?.errors?.length || !prData?.reviewThreads) {
 			// (only the error messages: stdout may hold a whole page of thread data)
-			throw new Error(`Failed to fetch review threads for PR #${prNumber}: ${responseErrorMessages(res) || "no review threads in the response"}`);
+			throw new Error(
+				`Failed to fetch review threads for PR #${prNumber}: ${responseErrorMessages(res) || "no review threads in the response"}`,
+			);
 		}
 
 		const pageNodes: GitHubReviewThreadNode[] = prData.reviewThreads?.nodes || [];
@@ -213,7 +212,9 @@ async function fetchLatestComments(threadId: string, cwd: string): Promise<GitHu
 	const res = JSON.parse(stdout);
 	const comments = res?.data?.node?.comments?.nodes;
 	if (res?.errors?.length || !Array.isArray(comments)) {
-		throw new Error(`Failed to fetch the latest comments of review thread ${threadId}: ${responseErrorMessages(res) || "no comments in the response"}`);
+		throw new Error(
+			`Failed to fetch the latest comments of review thread ${threadId}: ${responseErrorMessages(res) || "no comments in the response"}`,
+		);
 	}
 	return comments;
 }
@@ -281,9 +282,7 @@ function responseErrorMessages(res: any): string | undefined {
 }
 
 function ghErrorText(err: unknown): string {
-	const e = err as
-		| { message?: string; stderr?: string; stdout?: string; code?: unknown; killed?: boolean; signal?: string }
-		| undefined;
+	const e = err as { message?: string; stderr?: string; stdout?: string; code?: unknown; killed?: boolean; signal?: string } | undefined;
 	// Not a gh failure (gh missing, output over maxBuffer: a Node error code), or gh was stopped:
 	// any partial output isn't an error message
 	if (typeof e?.code === "string") return String(e.message ?? e.code).trim();
@@ -329,11 +328,7 @@ ${THREAD_COMMENT_FRAGMENT}`;
 /**
  * Adds a reply comment to a review thread.
  */
-export async function replyToReviewThread(
-	threadId: string,
-	body: string,
-	cwd: string,
-): Promise<GitHubCommentNode> {
+export async function replyToReviewThread(threadId: string, body: string, cwd: string): Promise<GitHubCommentNode> {
 	const args = [
 		"api",
 		"graphql",
@@ -350,9 +345,7 @@ export async function replyToReviewThread(
 	const res = JSON.parse(stdout);
 	const comment = res?.data?.addPullRequestReviewThreadReply?.comment;
 	if (!comment) {
-		throw new Error(
-			`Failed to add reply to review thread: ${stdout || "Unknown error"}`,
-		);
+		throw new Error(`Failed to add reply to review thread: ${stdout || "Unknown error"}`);
 	}
 	return comment;
 }
@@ -371,18 +364,8 @@ mutation($threadId: ID!) {
 /**
  * Resolves a review thread on GitHub.
  */
-export async function resolveReviewThread(
-	threadId: string,
-	cwd: string,
-): Promise<boolean> {
-	const args = [
-		"api",
-		"graphql",
-		"-f",
-		`threadId=${threadId}`,
-		"-f",
-		`query=${RESOLVE_THREAD_MUTATION}`,
-	];
+export async function resolveReviewThread(threadId: string, cwd: string): Promise<boolean> {
+	const args = ["api", "graphql", "-f", `threadId=${threadId}`, "-f", `query=${RESOLVE_THREAD_MUTATION}`];
 
 	const { stdout } = await runMutation(args, cwd);
 	const res = JSON.parse(stdout);

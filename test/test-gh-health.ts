@@ -20,9 +20,7 @@ function makeFakeClock() {
 		const until = nowMs + ms;
 		// Fire all timers that come due, in due-time order
 		for (;;) {
-			const due = timers
-				.filter((t) => t.at <= until)
-				.sort((a, b) => a.at - b.at);
+			const due = timers.filter((t) => t.at <= until).sort((a, b) => a.at - b.at);
 			if (due.length === 0) break;
 			const t = due[0];
 			nowMs = t.at;
@@ -124,10 +122,7 @@ test("availability errors are classified (network, timeout, rate limit, auth)", 
 	assert.strictEqual(isGhAvailabilityError({ code: "ETIMEDOUT" }), true);
 	assert.strictEqual(isGhAvailabilityError({ code: "ECONNREFUSED" }), true);
 	assert.strictEqual(isGhAvailabilityError({ code: "ECONNRESET" }), true);
-	assert.strictEqual(
-		isGhAvailabilityError({ stderr: "gh: failed to connect: dial tcp 140.107.20.17:443: i/o timeout" }),
-		true,
-	);
+	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: failed to connect: dial tcp 140.107.20.17:443: i/o timeout" }), true);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: HTTP 429: You have exceeded a secondary rate limit" }), true);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: HTTP 503 Service Unavailable" }), true);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: token expired or unauthorized" }), true);
@@ -149,8 +144,16 @@ test("auth errors are classified (and are also availability errors)", () => {
 	assert.strictEqual(isGhAuthError({ stderr: "gh: authentication failed" }), true);
 	assert.strictEqual(isGhAuthError({ stderr: "gh: bad credentials" }), true);
 	assert.strictEqual(isGhAuthError(new Error("Command failed: gh api ...\nHTTP 401: Unauthorized")), true);
-	assert.strictEqual(isGhAvailabilityError({ stderr: "graphql error: token expired or unauthorized" }), true, "auth failures pace the background retries too");
-	assert.strictEqual(isGhAuthError({ stderr: "failed to connect: dial tcp 1.2.3.4:443: i/o timeout" }), false, "a plain network failure is not an auth error");
+	assert.strictEqual(
+		isGhAvailabilityError({ stderr: "graphql error: token expired or unauthorized" }),
+		true,
+		"auth failures pace the background retries too",
+	);
+	assert.strictEqual(
+		isGhAuthError({ stderr: "failed to connect: dial tcp 1.2.3.4:443: i/o timeout" }),
+		false,
+		"a plain network failure is not an auth error",
+	);
 	assert.strictEqual(isGhAuthError({ stderr: "Could not resolve to a PullRequest with the number 999" }), false);
 	assert.strictEqual(isGhAuthError("HTTP 502 Bad Gateway"), false);
 });
@@ -181,12 +184,24 @@ test("a release while the slot became due re-fires the hooks (pendingWhileBusy)"
 });
 
 test("common gh network error strings are classified", () => {
-	assert.strictEqual(isGhAvailabilityError({ stderr: 'Get "https://api.github.com/...": context deadline exceeded' }), true, "Go HTTP client timeout");
+	assert.strictEqual(
+		isGhAvailabilityError({ stderr: 'Get "https://api.github.com/...": context deadline exceeded' }),
+		true,
+		"Go HTTP client timeout",
+	);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "streaming response: unexpected EOF" }), true, "dropped mid-response");
 	assert.strictEqual(isGhAvailabilityError({ code: "ENOENT" }), true, "missing gh binary paces (no 1 Hz respawn loop)");
 	assert.strictEqual(isGhAvailabilityError(new Error("spawn gh ENOENT")), true);
-	assert.strictEqual(isGhAvailabilityError({ stderr: "To auth to GitHub with gh, run: gh auth login" }), true, "not-logged-in paces the background");
-	assert.strictEqual(isGhAuthError({ stderr: "To auth to GitHub with gh, run: gh auth login" }), true, "not-logged-in surfaces on explicit calls");
+	assert.strictEqual(
+		isGhAvailabilityError({ stderr: "To auth to GitHub with gh, run: gh auth login" }),
+		true,
+		"not-logged-in paces the background",
+	);
+	assert.strictEqual(
+		isGhAuthError({ stderr: "To auth to GitHub with gh, run: gh auth login" }),
+		true,
+		"not-logged-in surfaces on explicit calls",
+	);
 });
 
 test("a 403 rate limit is availability, not an auth error", () => {

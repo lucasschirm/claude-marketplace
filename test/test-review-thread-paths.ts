@@ -1,11 +1,7 @@
 // Run with: node --test test/test-review-thread-paths.ts
 import { after, test } from "node:test";
 import * as assert from "node:assert";
-import {
-	applyCodeSuggestion,
-	isInsideDir,
-	resolveRepoFilePath,
-} from "../extensions/lib/github-review-threads.ts";
+import { applyCodeSuggestion, isInsideDir, resolveRepoFilePath } from "../extensions/lib/github-review-threads.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { cleanupTmpDirs, tmpDir, tmpGitRepo } from "./helpers/git-repo.ts";
@@ -39,10 +35,7 @@ test("applyCodeSuggestion refuses a path that escapes the repository without wri
 	const victim = path.join(outside, "victim.txt");
 	fs.writeFileSync(victim, "keep me\n", "utf-8");
 
-	await assert.rejects(
-		() => applyCodeSuggestion(victim, 1, 1, "overwritten\n", repo),
-		/repository-relative/,
-	);
+	await assert.rejects(() => applyCodeSuggestion(victim, 1, 1, "overwritten\n", repo), /repository-relative/);
 	assert.strictEqual(fs.readFileSync(victim, "utf-8"), "keep me\n", "the escape must fail before any write");
 });
 
@@ -65,10 +58,7 @@ test("applyCodeSuggestion refuses line numbers that are not a usable range", asy
 test("a suggestion may not target the git directory", async () => {
 	const repo = tmpRepo();
 	// Unreachable through the GitHub API, but a hook or config write is code execution, not a bad edit.
-	await assert.rejects(
-		() => applyCodeSuggestion(".git/hooks/pre-commit", 1, 1, "#!/bin/sh\n", repo),
-		/targets the git directory/,
-	);
+	await assert.rejects(() => applyCodeSuggestion(".git/hooks/pre-commit", 1, 1, "#!/bin/sh\n", repo), /targets the git directory/);
 	assert.strictEqual(fs.existsSync(path.join(repo, ".git", "hooks", "pre-commit")), false);
 });
 

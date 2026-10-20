@@ -257,10 +257,18 @@ process.exit(0);
 			if (windowTs.length >= 5) {
 				assert(maxGap >= 5000, `T2: expected a slow-cadence gap (8 s) after 5 fast failures, max gap was ${maxGap} ms`);
 			}
-			console.log(`✓ T2: gh calls paced — ${windowTs.length} attempts, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`);
+			console.log(
+				`✓ T2: gh calls paced — ${windowTs.length} attempts, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`,
+			);
 
 			// T4: a mutation during the outage fails fast and concise
-			const resolve1 = await tools["pr_task_resolve"].execute("call-2", { conversation_id: "1001", message: "done" }, undefined, undefined, mockCtx);
+			const resolve1 = await tools["pr_task_resolve"].execute(
+				"call-2",
+				{ conversation_id: "1001", message: "done" },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			const resolve1Text = resolve1.content[0].text;
 			console.log("resolve during outage:", resolve1Text);
 			assert(resolve1Text.includes("temporarily unreachable"), `T4: expected concise unreachable error, got: ${resolve1Text}`);
@@ -278,7 +286,13 @@ process.exit(0);
 			console.log("— GitHub recovered; waiting for the next sync slot —");
 			await sleep(10000);
 
-			const resolve2 = await tools["pr_task_resolve"].execute("call-4", { conversation_id: "1001", message: "done" }, undefined, undefined, mockCtx);
+			const resolve2 = await tools["pr_task_resolve"].execute(
+				"call-4",
+				{ conversation_id: "1001", message: "done" },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			const resolve2Text = resolve2.content[0].text;
 			console.log("resolve after recovery:", resolve2Text);
 			assert(resolve2Text.includes("resolved successfully"), `T5: expected the retried resolve to succeed, got: ${resolve2Text}`);

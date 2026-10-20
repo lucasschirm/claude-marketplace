@@ -1,9 +1,4 @@
-import type {
-	ExtensionAPI,
-	ExtensionToolContext,
-	ExtensionUIContext,
-	AgentToolResult,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext, AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { ChildProcess } from "node:child_process";
@@ -22,7 +17,6 @@ import {
 import { capList, type ToolDetails } from "./lib/tool-result.ts";
 
 const GLOBAL_GUARD_KEY = "__PI_ORCA_ORCHESTRATION_EXTENSION_ACTIVE__";
-
 
 export interface ObservedWorker {
 	dispatchId: string;
@@ -91,14 +85,8 @@ export function formatMessageText(val: any, fallback = ""): string {
 
 export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 	const [workerListRes, runListRes] = await Promise.all([
-		execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(
-			["orchestration", "worker-list"],
-			{ cwd },
-		),
-		execOrca<{ runs?: any[] }>(
-			["orchestration", "run-list"],
-			{ cwd },
-		),
+		execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(["orchestration", "worker-list"], { cwd }),
+		execOrca<{ runs?: any[] }>(["orchestration", "run-list"], { cwd }),
 	]);
 
 	// A failed list call is not "nothing is running". Collapsing it into an empty list is the
@@ -109,15 +97,13 @@ export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 
 	const workers: OrcaWorkerRow[] =
 		workerListRes.ok && workerListRes.result
-			? ((workerListRes.result as any).workers || workerListRes.result.rows || (Array.isArray(workerListRes.result) ? workerListRes.result : []))
+			? (workerListRes.result as any).workers ||
+				workerListRes.result.rows ||
+				(Array.isArray(workerListRes.result) ? workerListRes.result : [])
 			: [];
 
 	const runs: any[] =
-		runListRes.ok && runListRes.result?.runs
-			? runListRes.result.runs
-			: Array.isArray(runListRes.result)
-			? runListRes.result
-			: [];
+		runListRes.ok && runListRes.result?.runs ? runListRes.result.runs : Array.isArray(runListRes.result) ? runListRes.result : [];
 
 	const lines: string[] = ["=== All Orchestration Runs & Workers Across Sessions ===\n"];
 
@@ -170,8 +156,8 @@ export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 	}
 
 	lines.push("\nTo observe a specific Run or dispatch from another session, use:");
-	lines.push("  orca_orchestration_observe({ run_id: \"<run_id>\" })");
-	lines.push("  orca_orchestration_status({ dispatch_id: \"<dispatch_id>\" })");
+	lines.push('  orca_orchestration_observe({ run_id: "<run_id>" })');
+	lines.push('  orca_orchestration_status({ dispatch_id: "<dispatch_id>" })');
 
 	return lines.join("\n");
 }
@@ -216,8 +202,7 @@ export class OrcaDashboardComponent {
 
 		lines.push("");
 		const title = th.fg("accent", " Orca Orchestration Observer ");
-		const headerLine =
-			th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 33)));
+		const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 33)));
 		lines.push(truncateToWidth(headerLine, width));
 		lines.push("");
 
@@ -238,12 +223,7 @@ export class OrcaDashboardComponent {
 
 		if (stats.workers.length === 0) {
 			lines.push(truncateToWidth(`  ${th.fg("dim", "No workers observed yet.")}`, width));
-			lines.push(
-				truncateToWidth(
-					`  ${th.fg("dim", "Use the orca_orchestration_dispatch tool to start a supervised worker.")}`,
-					width,
-				),
-			);
+			lines.push(truncateToWidth(`  ${th.fg("dim", "Use the orca_orchestration_dispatch tool to start a supervised worker.")}`, width));
 		} else {
 			lines.push(truncateToWidth(`  ${th.fg("muted", "Observed Workers:")}`, width));
 			lines.push("");
@@ -262,12 +242,7 @@ export class OrcaDashboardComponent {
 				const agentInfo = w.agent ? ` (${w.agent})` : "";
 				const titleStr = w.taskTitle || w.spec?.slice(0, 35) || w.dispatchId;
 
-				lines.push(
-					truncateToWidth(
-						`${pointer}${th.bold(w.dispatchId)} ${statusBadge}${agentInfo}: ${titleStr}`,
-						width,
-					),
-				);
+				lines.push(truncateToWidth(`${pointer}${th.bold(w.dispatchId)} ${statusBadge}${agentInfo}: ${titleStr}`, width));
 
 				if (w.summary) {
 					lines.push(truncateToWidth(`     Summary: ${w.summary.slice(0, 60)}`, width));
@@ -305,10 +280,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	let activeObjective: string | undefined;
 	const observedWorkers = new Map<string, ObservedWorker>();
 
-/**
- * The `details` block every tool result of this extension carries: which tool answered, the Run it
- * acted on and how many workers are observed here. Per-call facts go in `extra` (and win).
- */
+	/**
+	 * The `details` block every tool result of this extension carries: which tool answered, the Run it
+	 * acted on and how many workers are observed here. Per-call facts go in `extra` (and win).
+	 */
 	function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 		return { tool, runId: activeRunId ?? null, observedWorkers: observedWorkers.size, ...extra };
 	}
@@ -484,16 +459,14 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	}
 
 	function handleCheckDelivery(data: any) {
-		const delivery: any =
-			data.result?.delivery || data.delivery || data.result || data;
+		const delivery: any = data.result?.delivery || data.delivery || data.result || data;
 
 		const deliveryId = delivery?.deliveryId || data.result?.deliveryId || data.deliveryId;
 		if (deliveryId) {
 			lastPendingAckDeliveryId = deliveryId;
 		}
 
-		const messages =
-			delivery?.messages || (Array.isArray(data.result) ? data.result : Array.isArray(data) ? data : []);
+		const messages = delivery?.messages || (Array.isArray(data.result) ? data.result : Array.isArray(data) ? data : []);
 		if (!Array.isArray(messages) || messages.length === 0) return;
 
 		for (const msg of messages) {
@@ -579,15 +552,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		isReconciling = true;
 
 		try {
-			const res = await execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(
-				["orchestration", "worker-list"],
-				{ cwd: lastCwd },
-			);
+			const res = await execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(["orchestration", "worker-list"], { cwd: lastCwd });
 
 			const rows: OrcaWorkerRow[] =
-				res.ok && res.result
-					? ((res.result as any).workers || res.result.rows || (Array.isArray(res.result) ? res.result : []))
-					: [];
+				res.ok && res.result ? (res.result as any).workers || res.result.rows || (Array.isArray(res.result) ? res.result : []) : [];
 
 			if (rows.length > 0) {
 				for (const row of rows) {
@@ -605,10 +573,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						const matchesRun = activeRunId ? row.runId === activeRunId : terminalState === "active";
 						if (matchesRun) {
 							const isLive =
-								terminalState === "active" ||
-								row.workerState === "running" ||
-								row.workerState === "ready" ||
-								verdict === "live";
+								terminalState === "active" || row.workerState === "running" || row.workerState === "ready" || verdict === "live";
 
 							w = {
 								dispatchId: dId,
@@ -726,9 +691,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		}
 
 		return {
-			systemPrompt: event.systemPrompt
-				? `${event.systemPrompt}\n\n${AUTO_OBSERVATION_PROMPT_MESSAGE}`
-				: AUTO_OBSERVATION_PROMPT_MESSAGE,
+			systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${AUTO_OBSERVATION_PROMPT_MESSAGE}` : AUTO_OBSERVATION_PROMPT_MESSAGE,
 		};
 	});
 
@@ -762,8 +725,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			"Dispatches a supervised task/worker in Orca orchestration. Automatically binds a Run, registers the worker, and begins background observation so you receive completion and question messages automatically.",
 		parameters: Type.Object({
 			spec: Type.String({
-				description:
-					"Task specification adhering to the task-spec contract (Target, Change, Constraints, Ownership, Acceptance criteria)",
+				description: "Task specification adhering to the task-spec contract (Target, Change, Constraints, Ownership, Acceptance criteria)",
 			}),
 			objective: Type.Optional(
 				Type.String({
@@ -805,14 +767,18 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			// Ensure an active Run exists
 			if (!activeRunId) {
 				const objective = params.objective || params.task_title || params.spec.slice(0, 60);
-				const runRes = await execOrca<{ run?: any; id?: string }>(
-					["orchestration", "run-create", "--objective", objective],
-					{ cwd: ctx.cwd },
-				);
+				const runRes = await execOrca<{ run?: any; id?: string }>(["orchestration", "run-create", "--objective", objective], {
+					cwd: ctx.cwd,
+				});
 
 				if (!runRes.ok) {
 					return {
-						details: toolDetails("orca_orchestration_dispatch", { result: "run_create_failed", code: "RUN_CREATE_FAILED", objective, runId: activeRunId ?? null }),
+						details: toolDetails("orca_orchestration_dispatch", {
+							result: "run_create_failed",
+							code: "RUN_CREATE_FAILED",
+							objective,
+							runId: activeRunId ?? null,
+						}),
 						content: [
 							{
 								type: "text",
@@ -859,7 +825,13 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (!startRes.ok) {
 				const errMsg = startRes.error?.message || JSON.stringify(startRes.error || "worker-start failed");
 				return {
-					details: toolDetails("orca_orchestration_dispatch", { result: "worker_start_failed", code: "WORKER_START_FAILED", runId: activeRunId ?? null, agent: params.agent ?? "codex", worktree: params.worktree ?? "current" }),
+					details: toolDetails("orca_orchestration_dispatch", {
+						result: "worker_start_failed",
+						code: "WORKER_START_FAILED",
+						runId: activeRunId ?? null,
+						agent: params.agent ?? "codex",
+						worktree: params.worktree ?? "current",
+					}),
 					content: [{ type: "text", text: `Failed to dispatch worker:\n${errMsg}` }],
 					isError: true,
 				};
@@ -893,7 +865,15 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			}
 
 			return {
-				details: toolDetails("orca_orchestration_dispatch", { result: "dispatched", dispatchId, taskId: taskId ?? null, terminalHandle: terminalHandle ?? null, runId: activeRunId ?? null, agent: worker.agent, worktree: params.worktree ?? "current" }),
+				details: toolDetails("orca_orchestration_dispatch", {
+					result: "dispatched",
+					dispatchId,
+					taskId: taskId ?? null,
+					terminalHandle: terminalHandle ?? null,
+					runId: activeRunId ?? null,
+					agent: worker.agent,
+					worktree: params.worktree ?? "current",
+				}),
 				content: [
 					{
 						type: "text",
@@ -964,10 +944,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (params.run_id && params.run_id !== activeRunId) {
 				activeRunId = params.run_id;
 				try {
-					const runRes = await execOrca<any>(
-						["orchestration", "run-show", "--run", params.run_id],
-						{ cwd: ctx.cwd },
-					);
+					const runRes = await execOrca<any>(["orchestration", "run-show", "--run", params.run_id], { cwd: ctx.cwd });
 					if (runRes.ok && runRes.result?.run?.objective) {
 						activeObjective = runRes.result.run.objective;
 					}
@@ -978,19 +955,13 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (params.dispatch_id && (action === "start" || action === "status")) {
 				const dId = params.dispatch_id;
 				if (!observedWorkers.has(dId)) {
-					const showRes = await execOrca<any>(
-						["orchestration", "worker-show", "--dispatch", dId],
-						{ cwd: ctx.cwd },
-					);
+					const showRes = await execOrca<any>(["orchestration", "worker-show", "--dispatch", dId], { cwd: ctx.cwd });
 					if (showRes.ok && showRes.result) {
 						const disp = showRes.result.dispatch || {};
 						const proj = showRes.result.projection || {};
 						const workerInfo = showRes.result.worker || {};
 						const rId = disp.runId || proj.runId || activeRunId;
-						const isLive =
-							proj.liveness?.verdict === "live" ||
-							workerInfo.state === "ready" ||
-							workerInfo.state === "running";
+						const isLive = proj.liveness?.verdict === "live" || workerInfo.state === "ready" || workerInfo.state === "running";
 						observedWorkers.set(dId, {
 							dispatchId: dId,
 							taskId: disp.taskId || proj.taskId,
@@ -1044,11 +1015,20 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			const stats = getStats();
 
 			const workerLines = stats.workers.map(
-				(w) => `  - [${w.status.toUpperCase()}] ${w.dispatchId} (${w.agent || "agent"}): ${w.taskTitle || w.spec?.slice(0, 40) || "No title"}`,
+				(w) =>
+					`  - [${w.status.toUpperCase()}] ${w.dispatchId} (${w.agent || "agent"}): ${w.taskTitle || w.spec?.slice(0, 40) || "No title"}`,
 			);
 
 			return {
-				details: toolDetails("orca_orchestration_observe", { result: "status", action, observing: stats.isEnabled, ...capList("dispatchIds", stats.workers.map((w) => w.dispatchId)) }),
+				details: toolDetails("orca_orchestration_observe", {
+					result: "status",
+					action,
+					observing: stats.isEnabled,
+					...capList(
+						"dispatchIds",
+						stats.workers.map((w) => w.dispatchId),
+					),
+				}),
 				content: [
 					{
 						type: "text",
@@ -1059,7 +1039,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 							(workerLines.length > 0
 								? `Observed Workers:\n${workerLines.join("\n")}`
 								: `No workers currently tracked.` +
-								  `\n\nIf this run was started by another session you can manually start observing it by passing the parameters 'run_id' (e.g. orca_orchestration_observe({ run_id: "<run_id>" })), 'dispatch_id' (e.g. orca_orchestration_observe({ dispatch_id: "<dispatch_id>" })), or view all active workers/runs across sessions by passing 'all: true' (e.g. orca_orchestration_observe({ all: true })).`),
+									`\n\nIf this run was started by another session you can manually start observing it by passing the parameters 'run_id' (e.g. orca_orchestration_observe({ run_id: "<run_id>" })), 'dispatch_id' (e.g. orca_orchestration_observe({ dispatch_id: "<dispatch_id>" })), or view all active workers/runs across sessions by passing 'all: true' (e.g. orca_orchestration_observe({ all: true })).`),
 					},
 				],
 			};
@@ -1088,8 +1068,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "orca_orchestration_status",
 		label: "Orchestration Status",
-		description:
-			"Checks status, attention categories, and bounded output for supervised workers without needing manual bash scripts.",
+		description: "Checks status, attention categories, and bounded output for supervised workers without needing manual bash scripts.",
 		parameters: Type.Object({
 			dispatch_id: Type.Optional(
 				Type.String({
@@ -1133,10 +1112,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (params.run_id && params.run_id !== activeRunId) {
 				activeRunId = params.run_id;
 				try {
-					const runRes = await execOrca<any>(
-						["orchestration", "run-show", "--run", params.run_id],
-						{ cwd: ctx.cwd },
-					);
+					const runRes = await execOrca<any>(["orchestration", "run-show", "--run", params.run_id], { cwd: ctx.cwd });
 					if (runRes.ok && runRes.result?.run?.objective) {
 						activeObjective = runRes.result.run.objective;
 					}
@@ -1155,12 +1131,14 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 						{ cwd: ctx.cwd, expectText: true },
 					);
 					const output =
-						readRes.ok && readRes.result
-							? formatWorkerOutput(readRes.result)
-							: readRes.error?.message || "No output captured.";
+						readRes.ok && readRes.result ? formatWorkerOutput(readRes.result) : readRes.error?.message || "No output captured.";
 
 					return {
-						details: toolDetails("orca_orchestration_status", { result: "worker_output", dispatchId: dId, status: localMeta?.status ?? null }),
+						details: toolDetails("orca_orchestration_status", {
+							result: "worker_output",
+							dispatchId: dId,
+							status: localMeta?.status ?? null,
+						}),
 						content: [
 							{
 								type: "text",
@@ -1171,10 +1149,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 
 				if (params.complete) {
-					const showRes = await execOrca<any>(
-						["orchestration", "worker-show", "--dispatch", dId],
-						{ cwd: ctx.cwd },
-					);
+					const showRes = await execOrca<any>(["orchestration", "worker-show", "--dispatch", dId], { cwd: ctx.cwd });
 					return {
 						details: toolDetails("orca_orchestration_status", { result: "worker_show", dispatchId: dId, ok: showRes.ok }),
 						content: [
@@ -1187,33 +1162,26 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 
 				// Standard dispatch status
-				const showRes = await execOrca<any>(
-					["orchestration", "worker-show", "--dispatch", dId],
-					{ cwd: ctx.cwd },
-				);
+				const showRes = await execOrca<any>(["orchestration", "worker-show", "--dispatch", dId], { cwd: ctx.cwd });
 				const proj = showRes.result?.projection || showRes.result || {};
 				const stage =
 					typeof proj.stage === "string"
 						? proj.stage
 						: proj.stage?.worker ||
-						  proj.stage?.detail ||
-						  showRes.result?.worker?.state ||
-						  showRes.result?.worker?.stage ||
-						  localMeta?.status ||
-						  "unknown";
+							proj.stage?.detail ||
+							showRes.result?.worker?.state ||
+							showRes.result?.worker?.stage ||
+							localMeta?.status ||
+							"unknown";
 
 				const outcome =
-					typeof proj.outcome === "string"
-						? proj.outcome
-						: typeof localMeta?.outcome === "string"
-						? localMeta.outcome
-						: "pending";
+					typeof proj.outcome === "string" ? proj.outcome : typeof localMeta?.outcome === "string" ? localMeta.outcome : "pending";
 
 				const attention = Array.isArray(proj.attention?.categories)
 					? proj.attention.categories.join(", ")
 					: typeof proj.attention === "string"
-					? proj.attention
-					: "none";
+						? proj.attention
+						: "none";
 
 				const summaryText = formatMessageText(localMeta?.summary);
 				const filesModified = localMeta?.filesModified?.length ? `Modified Files: ${localMeta.filesModified.join(", ")}\n` : "";
@@ -1225,10 +1193,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					const disp = showRes.result.dispatch || {};
 					const workerInfo = showRes.result.worker || {};
 					const rId = disp.runId || proj.runId || activeRunId;
-					const isLive =
-						proj.liveness?.verdict === "live" ||
-						workerInfo.state === "ready" ||
-						workerInfo.state === "running";
+					const isLive = proj.liveness?.verdict === "live" || workerInfo.state === "ready" || workerInfo.state === "running";
 					observedWorkers.set(dId, {
 						dispatchId: dId,
 						taskId: disp.taskId || proj.taskId,
@@ -1246,7 +1211,14 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 
 				return {
-					details: toolDetails("orca_orchestration_status", { result: "dispatch_status", dispatchId: dId, stage, outcome, attention, upstreamOk: showRes.ok }),
+					details: toolDetails("orca_orchestration_status", {
+						result: "dispatch_status",
+						dispatchId: dId,
+						stage,
+						outcome,
+						attention,
+						upstreamOk: showRes.ok,
+					}),
 					content: [
 						{
 							type: "text",
@@ -1279,10 +1251,24 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				);
 			}
 
-			const objectiveStr = typeof stats.objective === "string" ? stats.objective : stats.objective ? JSON.stringify(stats.objective) : "N/A";
+			const objectiveStr =
+				typeof stats.objective === "string" ? stats.objective : stats.objective ? JSON.stringify(stats.objective) : "N/A";
 
 			return {
-				details: toolDetails("orca_orchestration_status", { result: "overview", activeRunId: stats.activeRunId ?? null, counts: { running: stats.runningCount, succeeded: stats.succeededCount, failed: stats.failedCount, released: stats.releasedCount }, ...capList("dispatchIds", stats.workers.map((w) => w.dispatchId)) }),
+				details: toolDetails("orca_orchestration_status", {
+					result: "overview",
+					activeRunId: stats.activeRunId ?? null,
+					counts: {
+						running: stats.runningCount,
+						succeeded: stats.succeededCount,
+						failed: stats.failedCount,
+						released: stats.releasedCount,
+					},
+					...capList(
+						"dispatchIds",
+						stats.workers.map((w) => w.dispatchId),
+					),
+				}),
 				content: [
 					{
 						type: "text",
@@ -1292,7 +1278,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 							(list.length > 0
 								? list.join("\n")
 								: `No workers observed yet.` +
-								  `\n\nIf this run was started by another session you can manually start observing it by passing the parameters 'run_id' (e.g. orca_orchestration_status({ run_id: "<run_id>" }) or orca_orchestration_observe({ run_id: "<run_id>" })), 'dispatch_id' (e.g. orca_orchestration_status({ dispatch_id: "<dispatch_id>" })), or view all active workers/runs across sessions by passing 'all: true' (e.g. orca_orchestration_status({ all: true })).`),
+									`\n\nIf this run was started by another session you can manually start observing it by passing the parameters 'run_id' (e.g. orca_orchestration_status({ run_id: "<run_id>" }) or orca_orchestration_observe({ run_id: "<run_id>" })), 'dispatch_id' (e.g. orca_orchestration_status({ dispatch_id: "<dispatch_id>" })), or view all active workers/runs across sessions by passing 'all: true' (e.g. orca_orchestration_status({ all: true })).`),
 					},
 				],
 			};
@@ -1303,8 +1289,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "orca_orchestration_reply",
 		label: "Orchestration Reply",
-		description:
-			"Replies to a blocking question or escalation from a supervised worker to unblock its execution.",
+		description: "Replies to a blocking question or escalation from a supervised worker to unblock its execution.",
 		parameters: Type.Object({
 			message_id: Type.String({
 				description: "The identifier of the message/question being answered",
@@ -1318,10 +1303,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || lastCwd;
 
-			const replyRes = await execOrca<any>(
-				["orchestration", "reply", "--id", params.message_id, "--body", params.answer],
-				{ cwd: ctx.cwd },
-			);
+			const replyRes = await execOrca<any>(["orchestration", "reply", "--id", params.message_id, "--body", params.answer], {
+				cwd: ctx.cwd,
+			});
 
 			if (!replyRes.ok) {
 				return {
@@ -1400,7 +1384,11 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					}
 				}
 				return {
-					details: toolDetails("orca_orchestration_release", { result: "pruned", removed: pruneRes.removed.length, retained: pruneRes.retained.length }),
+					details: toolDetails("orca_orchestration_release", {
+						result: "pruned",
+						removed: pruneRes.removed.length,
+						retained: pruneRes.retained.length,
+					}),
 					content: [{ type: "text", text: lines.join("\n") }],
 				};
 			}
@@ -1410,7 +1398,12 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				const safety = await checkWorktreeSafety(target, undefined, ctx.cwd);
 				if (!safety.safe && !params.force) {
 					return {
-						details: toolDetails("orca_orchestration_release", { result: "worktree_unsafe", code: "WORKTREE_UNSAFE", worktree: target, reason: safety.reason }),
+						details: toolDetails("orca_orchestration_release", {
+							result: "worktree_unsafe",
+							code: "WORKTREE_UNSAFE",
+							worktree: target,
+							reason: safety.reason,
+						}),
 						content: [
 							{
 								type: "text",
@@ -1424,7 +1417,11 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				const rmRes = await removeOrcaWorktree(target, { force: true, cwd: ctx.cwd });
 				if (!rmRes.ok) {
 					return {
-						details: toolDetails("orca_orchestration_release", { result: "worktree_remove_failed", code: "WORKTREE_REMOVE_FAILED", worktree: target }),
+						details: toolDetails("orca_orchestration_release", {
+							result: "worktree_remove_failed",
+							code: "WORKTREE_REMOVE_FAILED",
+							worktree: target,
+						}),
 						content: [
 							{
 								type: "text",
@@ -1460,10 +1457,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			}
 
 			if (action === "stop") {
-				const stopRes = await execOrca<any>(
-					["orchestration", "worker-stop", "--dispatch", dId],
-					{ cwd: ctx.cwd },
-				);
+				const stopRes = await execOrca<any>(["orchestration", "worker-stop", "--dispatch", dId], { cwd: ctx.cwd });
 
 				if (!stopRes.ok) {
 					return {
@@ -1491,10 +1485,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			}
 
 			// Default: release settled worker
-			const releaseRes = await execOrca<any>(
-				["orchestration", "worker-release", "--dispatch", dId],
-				{ cwd: ctx.cwd },
-			);
+			const releaseRes = await execOrca<any>(["orchestration", "worker-release", "--dispatch", dId], { cwd: ctx.cwd });
 
 			if (!releaseRes.ok) {
 				return {
@@ -1530,7 +1521,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	// --- Command / Dashboard ---
 
 	pi.registerCommand("orchestration", {
-		description: "Orca orchestration controls and dashboard (subcommands: list, dashboard, stop <id>, release <id>, prune, enable, disable)",
+		description:
+			"Orca orchestration controls and dashboard (subcommands: list, dashboard, stop <id>, release <id>, prune, enable, disable)",
 		handler: async (args, ctx) => {
 			lastUIContext = ctx.ui;
 			const trimmed = (args || "").trim();
@@ -1539,10 +1531,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 			if (sub === "prune" || sub === "prune-children") {
 				const pruneRes = await pruneChildWorktrees({ cwd: ctx.cwd });
-				ctx.ui.notify(
-					`Pruned ${pruneRes.removed.length} child worktree(s). Retained: ${pruneRes.retained.length}.`,
-					"info",
-				);
+				ctx.ui.notify(`Pruned ${pruneRes.removed.length} child worktree(s). Retained: ${pruneRes.retained.length}.`, "info");
 				return;
 			}
 
@@ -1650,10 +1639,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				}
 				ctx.ui.notify("Orca orchestration tools disabled.", "info");
 			} else {
-				ctx.ui.notify(
-					`Unknown subcommand '${sub}'. Available: list, dashboard, stop <id>, release <id>, enable, disable`,
-					"warning",
-				);
+				ctx.ui.notify(`Unknown subcommand '${sub}'. Available: list, dashboard, stop <id>, release <id>, enable, disable`, "warning");
 			}
 			updateStatusUI(ctx.ui);
 		},

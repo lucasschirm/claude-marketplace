@@ -53,7 +53,10 @@ export function extractCliError(err: unknown): string {
 				}
 			}
 			// Parseable JSON without a failure payload — don't dump the raw payload.
-			return stripAnsi(e?.message || String(err)).replace(/\s+/g, " ").trim().slice(0, 300);
+			return stripAnsi(e?.message || String(err))
+				.replace(/\s+/g, " ")
+				.trim()
+				.slice(0, 300);
 		} catch {}
 	}
 	if (raw) {

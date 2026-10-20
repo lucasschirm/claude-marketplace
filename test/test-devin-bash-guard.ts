@@ -42,7 +42,7 @@ const blocked = [
 	"echo `devin -p x`",
 	'echo "result: $(devin -p x)"',
 	"bash -c 'devin -p x'",
-	"sh -c \"cd /tmp && devin -p x\"",
+	'sh -c "cd /tmp && devin -p x"',
 	"bash -lc 'devin -p x'",
 	"sudo bash -c 'devin -p x'",
 	"bash -c \"bash -c 'devin -p x'\"",
@@ -98,7 +98,7 @@ const allowed = [
 	"cat <<< 'devin -p x'",
 	"find . -name devin",
 	"echo $(date)",
-	"echo \"$(git rev-parse HEAD)\"",
+	'echo "$(git rev-parse HEAD)"',
 	"ls 2>&1 | wc -l",
 	"",
 ];

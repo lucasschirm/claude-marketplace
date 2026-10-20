@@ -94,9 +94,7 @@ test("re-links a re-posted comment (new root ID) by file, author, and body; the 
 	const m = new PRTasksManager();
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_old", dbId: 100, line: 10 })]);
 
-	const { newTasks } = m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_new", dbId: 200, line: 14, isResolved: true }),
-	]);
+	const { newTasks } = m.syncFromGitHubThreads(1, [thread({ id: "PRRT_new", dbId: 200, line: 14, isResolved: true })]);
 
 	assert.strictEqual(newTasks.length, 0);
 	assert.strictEqual(m.getAllTasks().length, 1);
@@ -112,11 +110,12 @@ test("a re-post with an edited body is a new task; the old one goes STALE", () =
 	const m = new PRTasksManager();
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_old", dbId: 100, line: 10, body: "Fix it" })]);
 
-	const { newTasks } = m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_new", dbId: 200, line: 10, body: "Fix it, please" }),
-	]);
+	const { newTasks } = m.syncFromGitHubThreads(1, [thread({ id: "PRRT_new", dbId: 200, line: 10, body: "Fix it, please" })]);
 
-	assert.deepStrictEqual(newTasks.map((t) => t.conversationId), ["200"]);
+	assert.deepStrictEqual(
+		newTasks.map((t) => t.conversationId),
+		["200"],
+	);
 	assert.strictEqual(m.findTask("100")?.status, "STALE");
 	assert.strictEqual(m.findTask("200")?.status, "UNRESOLVED");
 });
@@ -138,10 +137,7 @@ test("ambiguous replacements are not merged: the old task goes STALE and the new
 
 test("two orphans matching one new thread are not merged", () => {
 	const m = new PRTasksManager();
-	m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_x", dbId: 100, line: 10 }),
-		thread({ id: "PRRT_y", dbId: 101, line: 12 }),
-	]);
+	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_x", dbId: 100, line: 10 }), thread({ id: "PRRT_y", dbId: 101, line: 12 })]);
 
 	const { newTasks } = m.syncFromGitHubThreads(1, [thread({ id: "PRRT_new", dbId: 200, line: 40 })]);
 
@@ -209,10 +205,7 @@ test("isStaleNodeError recognizes GitHub's unresolvable node ID errors only", ()
 		stderr: "gh: Could not resolve to a node with the global id of 'PRRT_kwDOQ-abc'",
 	});
 	assert.strictEqual(isStaleNodeError(ghError), true);
-	assert.strictEqual(
-		isStaleNodeError(new Error('Failed to add reply to review thread: {"errors":[{"type":"NOT_FOUND"}]}')),
-		false,
-	);
+	assert.strictEqual(isStaleNodeError(new Error('Failed to add reply to review thread: {"errors":[{"type":"NOT_FOUND"}]}')), false);
 	assert.strictEqual(isStaleNodeError(new Error("gh: HTTP 502 Bad Gateway")), false);
 	assert.strictEqual(isStaleNodeError(undefined), false);
 });
@@ -235,10 +228,7 @@ test("a dead node listed beside its replacement re-links to the replacement with
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_dead", dbId: 100 })]);
 	m.markStale("100", "rejected", { deadThread: true });
 
-	const { newTasks } = m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_dead", dbId: 100 }),
-		thread({ id: "PRRT_live", dbId: 100 }),
-	]);
+	const { newTasks } = m.syncFromGitHubThreads(1, [thread({ id: "PRRT_dead", dbId: 100 }), thread({ id: "PRRT_live", dbId: 100 })]);
 
 	assert.strictEqual(newTasks.length, 0);
 	assert.strictEqual(m.getAllTasks().length, 1);
@@ -323,12 +313,12 @@ test("a re-post never re-links to an already STALE task: it is tracked as a new 
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_A", dbId: 100 })]);
 	m.markStale("100", "rejected", { deadThread: true });
 
-	const { newTasks } = m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_A", dbId: 100 }),
-		thread({ id: "PRRT_B", dbId: 200 }),
-	]);
+	const { newTasks } = m.syncFromGitHubThreads(1, [thread({ id: "PRRT_A", dbId: 100 }), thread({ id: "PRRT_B", dbId: 200 })]);
 
-	assert.deepStrictEqual(newTasks.map((t) => t.threadId), ["PRRT_B"]);
+	assert.deepStrictEqual(
+		newTasks.map((t) => t.threadId),
+		["PRRT_B"],
+	);
 	assert.strictEqual(m.findTask("100")?.status, "STALE");
 	assert.strictEqual(m.findTask("200")?.status, "UNRESOLVED");
 });
@@ -381,7 +371,10 @@ test("re-keying keeps the task order", () => {
 
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1b", dbId: 100 }), thread({ id: "PRRT_2", dbId: 101, path: "src/b.ts" })]);
 
-	assert.deepStrictEqual(m.getAllTasks().map((t) => t.threadId), ["PRRT_1b", "PRRT_2"]);
+	assert.deepStrictEqual(
+		m.getAllTasks().map((t) => t.threadId),
+		["PRRT_1b", "PRRT_2"],
+	);
 });
 
 test("isResolvedUpstream tracks GitHub's state separately from a local resolve", () => {
@@ -505,10 +498,20 @@ test("a reply the agent was never shown is reported as unseen and does not join 
 	const m = new PRTasksManager();
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, replies: [{ id: "PRRC_answer", body: "Use B" }] })]);
 
-	assert.deepStrictEqual(m.getUnseenReplies("100").map((r) => r.id), ["PRRC_answer"]);
+	assert.deepStrictEqual(
+		m.getUnseenReplies("100").map((r) => r.id),
+		["PRRC_answer"],
+	);
 	block(m, "100");
 	const { unblockedTasks } = m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_1", dbId: 100, replies: [{ id: "PRRC_answer", body: "Use B" }, { id: "PRRC_block", body: "Need input", author: "bot" }] }),
+		thread({
+			id: "PRRT_1",
+			dbId: 100,
+			replies: [
+				{ id: "PRRC_answer", body: "Use B" },
+				{ id: "PRRC_block", body: "Need input", author: "bot" },
+			],
+		}),
 	]);
 	assert.strictEqual(unblockedTasks[0]?.latestReply.id, "PRRC_answer");
 });
@@ -533,7 +536,11 @@ test("a reviewer's repeated identical reply still unblocks a BLOCKED task", () =
 	block(m, "100");
 
 	const { unblockedTasks } = m.syncFromGitHubThreads(1, [
-		thread({ id: "PRRT_1", dbId: 100, replies: [ok, { id: "PRRC_block", body: "Need input", author: "bot" }, { id: "PRRC_ok2", body: "ok" }] }),
+		thread({
+			id: "PRRT_1",
+			dbId: 100,
+			replies: [ok, { id: "PRRC_block", body: "Need input", author: "bot" }, { id: "PRRC_ok2", body: "ok" }],
+		}),
 	]);
 
 	assert.strictEqual(unblockedTasks[0]?.latestReply.id, "PRRC_ok2");
@@ -541,7 +548,10 @@ test("a reviewer's repeated identical reply still unblocks a BLOCKED task", () =
 
 test("a re-opened thread brings its task back, including a STALE task resolved locally", () => {
 	const m = new PRTasksManager({ reopenGraceMs: 0 });
-	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, isResolved: true }), thread({ id: "PRRT_2", dbId: 101, path: "src/b.ts" })]);
+	m.syncFromGitHubThreads(1, [
+		thread({ id: "PRRT_1", dbId: 100, isResolved: true }),
+		thread({ id: "PRRT_2", dbId: 101, path: "src/b.ts" }),
+	]);
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, isResolved: true })]);
 	m.markResolved("101"); // the agent cleared the STALE task
 
@@ -705,7 +715,10 @@ test("a BLOCKED task reopened by a re-post is reported, so the agent learns its 
 	const { repostedTasks, unblockedTasks } = m.syncFromGitHubThreads(1, [
 		thread({ id: "PRRT_B", dbId: 200, createdAt: "2026-10-09T09:00:00Z" }),
 	]);
-	assert.deepStrictEqual(repostedTasks.map((t) => t.conversationId), ["200"]);
+	assert.deepStrictEqual(
+		repostedTasks.map((t) => t.conversationId),
+		["200"],
+	);
 	assert.strictEqual(unblockedTasks.length, 0);
 });
 
@@ -748,7 +761,10 @@ test("a deleted root comment on the same thread keeps the original request inste
 	assert.strictEqual(task.author, "reviewer_alice");
 	assert.strictEqual(task.message, "```suggestion\nfixed();\n```");
 	assert.strictEqual(task.hasSuggestion, false); // withdrawn with the comment
-	assert.deepStrictEqual(task.replies.map((r) => r.id), ["PRRC_bot"]);
+	assert.deepStrictEqual(
+		task.replies.map((r) => r.id),
+		["PRRC_bot"],
+	);
 	assert.strictEqual(task.status, "UNRESOLVED");
 });
 
@@ -824,7 +840,10 @@ test("describeGhError reports Node errors and stopped processes instead of parti
 test("a thread with more than 100 comments keeps its root comment and its newest replies", () => {
 	const node = thread({ id: "PRRT_1", dbId: 100, replies: [{ id: "PRRC_1", body: "old" }] });
 	const merged = withLatestComments(node, [node.comments.nodes[1], { ...node.comments.nodes[1], id: "PRRC_newest", body: "new" }]);
-	assert.deepStrictEqual(merged.comments.nodes.map((c) => c.id), ["C_PRRT_1", "PRRC_1", "PRRC_newest"]);
+	assert.deepStrictEqual(
+		merged.comments.nodes.map((c) => c.id),
+		["C_PRRT_1", "PRRC_1", "PRRC_newest"],
+	);
 });
 
 test("a changed root comment on the same thread node is not taken for a re-post", () => {
@@ -847,7 +866,10 @@ test("the agent's own replies never count as unseen; a reply that unblocked the 
 	];
 	const { unblockedTasks } = m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, replies })]);
 	assert.strictEqual(unblockedTasks.length, 1);
-	assert.deepStrictEqual(m.getUnseenReplies("100").map((r) => r.id), ["PRRC_answer"]);
+	assert.deepStrictEqual(
+		m.getUnseenReplies("100").map((r) => r.id),
+		["PRRC_answer"],
+	);
 });
 
 test("a task whose rejected thread is still listed is not re-linked to a same-text comment on another line", () => {
@@ -860,7 +882,10 @@ test("a task whose rejected thread is still listed is not re-linked to a same-te
 		thread({ id: "PRRT_B", dbId: 200, line: 80, body: "Same here" }),
 	]);
 	assert.strictEqual(m.findTask("100")?.threadId, "PRRT_A");
-	assert.deepStrictEqual(newTasks.map((t) => t.threadId), ["PRRT_B"]);
+	assert.deepStrictEqual(
+		newTasks.map((t) => t.threadId),
+		["PRRT_B"],
+	);
 });
 
 test("describeGhError keeps only the error messages of a GraphQL error response", () => {
@@ -968,7 +993,10 @@ test("a re-post never takes over a task whose thread is listed without its comme
 		thread({ id: "PRRT_Z", dbId: 200 }),
 	]);
 	assert.strictEqual(m.findTask("100")?.threadId, "PRRT_X");
-	assert.deepStrictEqual(newTasks.map((t) => t.threadId), ["PRRT_Z"]);
+	assert.deepStrictEqual(
+		newTasks.map((t) => t.threadId),
+		["PRRT_Z"],
+	);
 });
 
 test("within the reopen grace window, a list showing the thread resolved is still recorded", () => {
@@ -981,7 +1009,9 @@ test("within the reopen grace window, a list showing the thread resolved is stil
 
 test("showing only replies never marks the suggestion or comment as seen", () => {
 	const m = new PRTasksManager();
-	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, body: "Use\n```suggestion\nB\n```", replies: [{ id: "PRRC_1", body: "hm" }] })]);
+	m.syncFromGitHubThreads(1, [
+		thread({ id: "PRRT_1", dbId: 100, body: "Use\n```suggestion\nB\n```", replies: [{ id: "PRRC_1", body: "hm" }] }),
+	]);
 	const task = m.findTask("100")!;
 	m.markRepliesShown(task, task.replies);
 	assert.strictEqual(task.seenMessage, undefined);
@@ -1015,7 +1045,13 @@ test("a suggestion fenced with more backticks keeps the ``` lines inside it", ()
 });
 
 test("a task whose root comment was deleted still follows its thread through a replacement", () => {
-	for (const variant of ["replaced", "re-issued IDs", "dead node listed", "deleted and replaced at once", "deleted and replaced at once, re-issued IDs"]) {
+	for (const variant of [
+		"replaced",
+		"re-issued IDs",
+		"dead node listed",
+		"deleted and replaced at once",
+		"deleted and replaced at once, re-issued IDs",
+	]) {
 		const m = new PRTasksManager();
 		m.syncFromGitHubThreads(1, [thread({ id: "PRRT_A", dbId: 100 })]);
 		block(m, "100");
@@ -1027,8 +1063,9 @@ test("a task whose root comment was deleted still follows its thread through a r
 		// the root comment is deleted (seen by a sync, unless both happen between two syncs)
 		if (!variant.startsWith("deleted and replaced")) m.syncFromGitHubThreads(1, [leading("PRRT_A", 9000, "PRRC_block")]);
 
-		const replacement =
-			variant.endsWith("re-issued IDs") ? leading("PRRT_B", 9500, "PRRC_block_new") : leading("PRRT_B", 9000, "PRRC_block");
+		const replacement = variant.endsWith("re-issued IDs")
+			? leading("PRRT_B", 9500, "PRRC_block_new")
+			: leading("PRRT_B", 9000, "PRRC_block");
 		const nodes = [replacement];
 		if (variant === "dead node listed") {
 			m.markStale("100", "rejected", { deadThread: true });

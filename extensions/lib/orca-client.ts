@@ -238,10 +238,7 @@ export async function execOrca<T = any>(args: string[], options: OrcaCommandOpti
 /**
  * Spawns an Orca long-poll process for orchestration message check.
  */
-export function spawnOrcaCheck(
-	runId?: string,
-	options: { cwd?: string; timeoutMs?: number; ackDeliveryId?: string } = {},
-): ChildProcess {
+export function spawnOrcaCheck(runId?: string, options: { cwd?: string; timeoutMs?: number; ackDeliveryId?: string } = {}): ChildProcess {
 	const cmd = resolveOrcaCmd();
 	const args = [
 		"orchestration",
@@ -314,28 +311,21 @@ export async function removeOrcaWorktree(
 /**
  * Gets the Orca worktree for the current working directory.
  */
-export async function getCurrentWorktree(
-	cwd?: string,
-): Promise<OrcaEnvelope<{ worktree?: OrcaWorktree }>> {
+export async function getCurrentWorktree(cwd?: string): Promise<OrcaEnvelope<{ worktree?: OrcaWorktree }>> {
 	return execOrca<{ worktree?: OrcaWorktree }>(["worktree", "current"], { cwd });
 }
 
 /**
  * Gets details for a single Orca worktree selector.
  */
-export async function getWorktree(
-	selector: string,
-	cwd?: string,
-): Promise<OrcaEnvelope<{ worktree?: OrcaWorktree }>> {
+export async function getWorktree(selector: string, cwd?: string): Promise<OrcaEnvelope<{ worktree?: OrcaWorktree }>> {
 	return execOrca<{ worktree?: OrcaWorktree }>(["worktree", "show", "--worktree", selector], { cwd });
 }
 
 /**
  * Lists Orca worktrees, optionally filtered by repo selector.
  */
-export async function listWorktrees(
-	options: { repo?: string; cwd?: string } = {},
-): Promise<OrcaEnvelope<{ worktrees?: OrcaWorktree[] }>> {
+export async function listWorktrees(options: { repo?: string; cwd?: string } = {}): Promise<OrcaEnvelope<{ worktrees?: OrcaWorktree[] }>> {
 	const args = ["worktree", "list"];
 	if (options.repo) {
 		args.push("--repo", options.repo);
@@ -462,11 +452,9 @@ export async function checkWorktreeSafety(
 		// 3b. Check against origin remote branch if origin/<branch> exists
 		if (!unpushedChecked) {
 			try {
-				const { stdout: remoteBranchOut } = await execFileAsync(
-					"git",
-					["log", `origin/${targetBranch}..HEAD`, "--oneline"],
-					{ cwd: worktreePath },
-				);
+				const { stdout: remoteBranchOut } = await execFileAsync("git", ["log", `origin/${targetBranch}..HEAD`, "--oneline"], {
+					cwd: worktreePath,
+				});
 				unpushedChecked = true;
 				if (remoteBranchOut.trim().length > 0) {
 					return {
@@ -535,9 +523,7 @@ export async function checkWorktreeSafety(
 /**
  * Audits child worktrees of the current or specified parent workspace and deletes safe/stray ones.
  */
-export async function pruneChildWorktrees(
-	options: { parentWorktreeId?: string; cwd?: string; force?: boolean } = {},
-): Promise<{
+export async function pruneChildWorktrees(options: { parentWorktreeId?: string; cwd?: string; force?: boolean } = {}): Promise<{
 	removed: Array<{ id: string; path: string; reason: string }>;
 	retained: Array<{ id: string; path: string; reason: string }>;
 }> {
@@ -562,9 +548,7 @@ export async function pruneChildWorktrees(
 
 		// Guard against active running workers in the child workspace
 		const isChildActive =
-			child?.workspaceStatus === "running" ||
-			(child as any)?.liveTerminalCount > 0 ||
-			(child as any)?.status === "active";
+			child?.workspaceStatus === "running" || (child as any)?.liveTerminalCount > 0 || (child as any)?.status === "active";
 		if (isChildActive && !options.force) {
 			retained.push({ id: childId, path: childPath, reason: "Child workspace is currently active" });
 			continue;
@@ -589,4 +573,3 @@ export async function pruneChildWorktrees(
 
 	return { removed, retained };
 }
-

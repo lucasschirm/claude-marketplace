@@ -106,13 +106,7 @@ exit 0
 	ext(mockPi);
 
 	// Poll devin_status until the session reaches `want` or `timeoutMs` elapses.
-	async function waitForStatus(
-		statusTool: any,
-		mockCtx: any,
-		sessionId: string,
-		want: string,
-		timeoutMs: number,
-	): Promise<string> {
+	async function waitForStatus(statusTool: any, mockCtx: any, sessionId: string, want: string, timeoutMs: number): Promise<string> {
 		const deadline = Date.now() + timeoutMs;
 		let last = "unknown";
 		while (Date.now() < deadline) {
@@ -168,7 +162,13 @@ exit 0
 			console.log("T1: starting a 70s turn (exceeds old 60s timeout)...");
 			process.env.FAKE_DELAY_MS = "70000";
 			process.env.FAKE_EXIT_EARLY_MS = "0";
-			const t1 = await delegateTool.execute("t1", { prompt: "long running task", model: "swe-2-high", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
+			const t1 = await delegateTool.execute(
+				"t1",
+				{ prompt: "long running task", model: "swe-2-high", mode: "dangerous", create_worktree: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			assert.match(t1.content[0].text, /^Your session started with id: /);
 			const t1Id = t1.content[0].text.replace("Your session started with id: ", "").trim();
 			created.push(t1Id);
@@ -176,7 +176,9 @@ exit 0
 			// At +70s (old behavior: failed at +60s) the session must be idle.
 			const t1Status = await waitForStatus(statusTool, mockCtx, t1Id, "idle", 120_000);
 			assert.strictEqual(t1Status, "idle", `T1 session must be idle after long turn (was ${t1Status})`);
-			const t1Meta = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t1Id, "meta.json"), "utf-8"));
+			const t1Meta = JSON.parse(
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t1Id, "meta.json"), "utf-8"),
+			);
 			assert.strictEqual(t1Meta.status, "idle");
 			assert.strictEqual(t1Meta.error, undefined, "T1 must not be marked failed");
 			console.log("✓ T1: 70s turn completed idle (no false 60s failure)");
@@ -185,22 +187,38 @@ exit 0
 			const t2 = await statusTool.execute("t2", { session_id: t1Id, complete: true }, undefined, undefined, mockCtx);
 			assert.match(t2.content[0].text, /Working on it:/, "T2: streamed chunk must be captured");
 			assert.match(t2.content[0].text, /Final answer from fake devin\./, "T2: final assistant output must be captured");
-			const events = fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t1Id, "events.jsonl"), "utf-8").split("\n");
-			assert.ok(events.some((l) => l.includes('"usage_update"')), "T2: usage_update must be logged");
-			assert.ok(events.some((l) => l.includes('"tool_call"')), "T2: tool_call must be logged");
+			const events = fs
+				.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t1Id, "events.jsonl"), "utf-8")
+				.split("\n");
+			assert.ok(
+				events.some((l) => l.includes('"usage_update"')),
+				"T2: usage_update must be logged",
+			);
+			assert.ok(
+				events.some((l) => l.includes('"tool_call"')),
+				"T2: tool_call must be logged",
+			);
 			console.log("✓ T2: chunks/tool/usage observability captured");
 
 			// ---------- T3 (cancel mid-turn kills the process) ----------
 			console.log("T3: cancelling a 30s turn mid-way...");
 			process.env.FAKE_DELAY_MS = "30000";
-			const t3 = await delegateTool.execute("t3", { prompt: "task to cancel", model: "swe-2-high", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
+			const t3 = await delegateTool.execute(
+				"t3",
+				{ prompt: "task to cancel", model: "swe-2-high", mode: "dangerous", create_worktree: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			const t3Id = t3.content[0].text.replace("Your session started with id: ", "").trim();
 			created.push(t3Id);
 			await sleepMs(5000);
 			const t3c = await cancelTool.execute("t3c", { session_id: t3Id }, undefined, undefined, mockCtx);
 			assert.match(t3c.content[0].text, /was cancelled/);
 			await sleepMs(3000); // SIGKILL fallback is +1.5s
-			const t3Meta = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t3Id, "meta.json"), "utf-8"));
+			const t3Meta = JSON.parse(
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t3Id, "meta.json"), "utf-8"),
+			);
 			let t3alive = true;
 			try {
 				process.kill(t3Meta.pid, 0);
@@ -216,12 +234,20 @@ exit 0
 			console.log("T4: process dies mid-turn (exit 42 at +4s)...");
 			process.env.FAKE_DELAY_MS = "30000";
 			process.env.FAKE_EXIT_EARLY_MS = "4000";
-			const t4 = await delegateTool.execute("t4", { prompt: "task that dies", model: "swe-2-high", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
+			const t4 = await delegateTool.execute(
+				"t4",
+				{ prompt: "task that dies", model: "swe-2-high", mode: "dangerous", create_worktree: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			const t4Id = t4.content[0].text.replace("Your session started with id: ", "").trim();
 			created.push(t4Id);
 			const t4Status = await waitForStatus(statusTool, mockCtx, t4Id, "interrupted", 30_000);
 			assert.strictEqual(t4Status, "interrupted", `T4 must be interrupted (was ${t4Status})`);
-			const t4Meta = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4Id, "meta.json"), "utf-8"));
+			const t4Meta = JSON.parse(
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4Id, "meta.json"), "utf-8"),
+			);
 			assert.notStrictEqual(t4Meta.status, "failed", "T4: process death must not be marked failed");
 			assert.match(t4Meta.error || "", /code 42/);
 			assert.ok(
@@ -246,12 +272,20 @@ exit 0
 			process.env.FAKE_DELAY_MS = "30000";
 			process.env.FAKE_EXIT_EARLY_MS = "4000";
 			process.env.FAKE_EXIT_CODE = "0";
-			const t4c = await delegateTool.execute("t4c", { prompt: "task that exits cleanly", model: "swe-2-high", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
+			const t4c = await delegateTool.execute(
+				"t4c",
+				{ prompt: "task that exits cleanly", model: "swe-2-high", mode: "dangerous", create_worktree: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			const t4cId = t4c.content[0].text.replace("Your session started with id: ", "").trim();
 			created.push(t4cId);
 			const t4cStatus = await waitForStatus(statusTool, mockCtx, t4cId, "idle", 30_000);
 			assert.strictEqual(t4cStatus, "idle", `T4c clean exit must be idle, not failed (was ${t4cStatus})`);
-			const t4cMeta = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4cId, "meta.json"), "utf-8"));
+			const t4cMeta = JSON.parse(
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4cId, "meta.json"), "utf-8"),
+			);
 			assert.notStrictEqual(t4cMeta.status, "failed", "T4c: clean exit must not be marked failed by the prompt catch path");
 			process.env.FAKE_EXIT_CODE = "42";
 			console.log("✓ T4c: clean exit code 0 mid-turn -> idle (no false failed)");
@@ -264,12 +298,22 @@ exit 0
 			process.env.FAKE_DELAY_MS = "5000";
 			process.env.FAKE_EXIT_EARLY_MS = "0";
 			process.env.FAKE_EXIT_CODE = "42";
-			const t5 = await delegateTool.execute("t5", { prompt: "task with swe-2-max", model: "swe-2-max", mode: "dangerous", create_worktree: false }, undefined, undefined, mockCtx);
+			const t5 = await delegateTool.execute(
+				"t5",
+				{ prompt: "task with swe-2-max", model: "swe-2-max", mode: "dangerous", create_worktree: false },
+				undefined,
+				undefined,
+				mockCtx,
+			);
 			const t5Id = t5.content[0].text.replace("Your session started with id: ", "").trim();
 			created.push(t5Id);
 			const t5Status = await waitForStatus(statusTool, mockCtx, t5Id, "idle", 30_000);
 			assert.strictEqual(t5Status, "idle", `T5 must be idle (was ${t5Status})`);
-			assert.strictEqual(fs.existsSync(path.join(markerDir, "set_config_option_model")), false, "T5: redundant set_config_option(model) must not be called");
+			assert.strictEqual(
+				fs.existsSync(path.join(markerDir, "set_config_option_model")),
+				false,
+				"T5: redundant set_config_option(model) must not be called",
+			);
 			console.log("✓ T5: out-of-vocab model works via --model spawn flag, no set_config_option call");
 
 			// Clean up

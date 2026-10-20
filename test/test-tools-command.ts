@@ -90,11 +90,17 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 		{ type: "string", enum: ["safe", "dangerous"], description: "Execution mode" },
 		true,
 		mockTheme,
-		80
+		80,
 	);
 	assert(formattedParam.length > 0, "formatParamSchema returns formatted lines");
-	assert(formattedParam.some(l => l.includes("mode") && l.includes("[required]")), "Includes param name and required flag");
-	assert(formattedParam.some(l => l.includes("Allowed values")), "Includes allowed enum values");
+	assert(
+		formattedParam.some((l) => l.includes("mode") && l.includes("[required]")),
+		"Includes param name and required flag",
+	);
+	assert(
+		formattedParam.some((l) => l.includes("Allowed values")),
+		"Includes allowed enum values",
+	);
 
 	// 2. Test ToolsManagerComponent list and details navigation
 	console.log("Test 2: Testing ToolsManagerComponent navigation and actions...");
@@ -113,7 +119,7 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 		},
 		() => {
 			closed = true;
-		}
+		},
 	);
 
 	assert(comp.getViewMode() === "list", "Initial view mode is 'list'");
@@ -123,9 +129,18 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 	// Render list view
 	const listLines = comp.render(80);
 	assert(listLines.length > 5, "List view renders lines");
-	assert(listLines.some(l => l.includes("Tools & Extensions Configuration")), "Renders header");
-	assert(listLines.some(l => l.includes("[● ENABLED]  **read**")), "Renders enabled read tool");
-	assert(listLines.some(l => l.includes("[○ DISABLED] devin_delegate")), "Renders disabled devin_delegate");
+	assert(
+		listLines.some((l) => l.includes("Tools & Extensions Configuration")),
+		"Renders header",
+	);
+	assert(
+		listLines.some((l) => l.includes("[● ENABLED]  **read**")),
+		"Renders enabled read tool",
+	);
+	assert(
+		listLines.some((l) => l.includes("[○ DISABLED] devin_delegate")),
+		"Renders disabled devin_delegate",
+	);
 
 	// Move down
 	comp.handleInput("\x1b[B"); // down arrow
@@ -149,10 +164,22 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 	assert(comp.getViewMode() === "details", "Right arrow switches to 'details' view");
 
 	const detailLines = comp.render(80);
-	assert(detailLines.some(l => l.includes("Tool Details: devin_delegate")), "Details view header displays tool name");
-	assert(detailLines.some(l => l.includes("Parameters:")), "Details view displays Parameters section");
-	assert(detailLines.some(l => l.includes("prompt")), "Details view displays prompt parameter");
-	assert(detailLines.some(l => l.includes("mode")), "Details view displays mode parameter");
+	assert(
+		detailLines.some((l) => l.includes("Tool Details: devin_delegate")),
+		"Details view header displays tool name",
+	);
+	assert(
+		detailLines.some((l) => l.includes("Parameters:")),
+		"Details view displays Parameters section",
+	);
+	assert(
+		detailLines.some((l) => l.includes("prompt")),
+		"Details view displays prompt parameter",
+	);
+	assert(
+		detailLines.some((l) => l.includes("mode")),
+		"Details view displays mode parameter",
+	);
 
 	// Return to list view (Left arrow)
 	comp.handleInput("\x1b[D"); // left arrow
@@ -177,7 +204,13 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 	const manyProps: Record<string, unknown> = {};
 	for (let i = 0; i < 40; i++) manyProps[`param_${i}`] = { type: "string" };
 	const pagingComp = new ToolsManagerComponent(
-		[{ name: "wide_tool", description: "A tool with many parameters", parameters: { type: "object", required: [], properties: manyProps } } as any],
+		[
+			{
+				name: "wide_tool",
+				description: "A tool with many parameters",
+				parameters: { type: "object", required: [], properties: manyProps },
+			} as any,
+		],
 		new Set<string>(["wide_tool"]),
 		mockTheme,
 		() => {},
@@ -211,7 +244,7 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 		assert(active.includes("read"), "read tool is initially active");
 
 		// Test modifying active tools
-		const newActive = active.filter(n => n !== "read");
+		const newActive = active.filter((n) => n !== "read");
 		pi.setActiveTools(newActive);
 		const updatedActive = pi.getActiveTools();
 		assert(!updatedActive.includes("read"), "read tool successfully disabled via setActiveTools");
@@ -248,19 +281,31 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 			new Set(["read"]),
 			mockTheme,
 			() => {},
-			() => {}
+			() => {},
 		);
 		// Simulate a caught error
 		errorComp.setError(new Error("Simulated schema rendering error"));
 		const errorLines = errorComp.render(80);
-		assert(errorLines.some(l => l.includes("Tool Manager Error")), "Error fallback header is rendered");
-		assert(errorLines.some(l => l.includes("Simulated schema rendering error")), "Error details are clearly displayed to the user");
-		assert(errorLines.some(l => l.includes("Press 'r' or Left Arrow")), "Recovery instructions are displayed");
+		assert(
+			errorLines.some((l) => l.includes("Tool Manager Error")),
+			"Error fallback header is rendered",
+		);
+		assert(
+			errorLines.some((l) => l.includes("Simulated schema rendering error")),
+			"Error details are clearly displayed to the user",
+		);
+		assert(
+			errorLines.some((l) => l.includes("Press 'r' or Left Arrow")),
+			"Recovery instructions are displayed",
+		);
 
 		// Test clearing error / recovery with 'r' key
 		errorComp.handleInput("r");
 		const recoveredLines = errorComp.render(80);
-		assert(recoveredLines.some(l => l.includes("Tools & Extensions Configuration")), "Component cleanly recovers back to tools list");
+		assert(
+			recoveredLines.some((l) => l.includes("Tools & Extensions Configuration")),
+			"Component cleanly recovers back to tools list",
+		);
 
 		console.log("✓ ALL TESTS PASSED!");
 		process.exit(0);

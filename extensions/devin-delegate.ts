@@ -1,9 +1,4 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionToolContext,
-	ExtensionUIContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
@@ -104,10 +99,7 @@ interface AcpMessage {
 class AcpClient {
 	private child: ChildProcess | null = null;
 	private nextRpcId = 1;
-	private pendingRequests = new Map<
-		number,
-		{ resolve: (val: any) => void; reject: (err: any) => void; timer: NodeJS.Timeout | null }
-	>();
+	private pendingRequests = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timer: NodeJS.Timeout | null }>();
 	private logStream: fs.WriteStream | null = null;
 	private rl: readline.Interface | null = null;
 	private onUpdateCallback?: (update: any) => void;
@@ -457,8 +449,7 @@ class DevinDashboardComponent {
 				const s = sessions[i];
 				const isSelected = i === this.selectedIndex;
 				const pointer = isSelected ? th.fg("accent", "▶ ") : "  ";
-				const statusColor =
-					s.status === "running" ? "success" : s.status === "failed" ? "error" : "muted";
+				const statusColor = s.status === "running" ? "success" : s.status === "failed" ? "error" : "muted";
 				const statusBadge = th.fg(statusColor, `[${s.status.toUpperCase()}]`);
 				const prBadge = s.detectedPrNumber ? th.fg("accent", ` PR #${s.detectedPrNumber}`) : "";
 				const timeStr = s.lastMessageTime ? new Date(s.lastMessageTime).toLocaleTimeString() : "N/A";
@@ -814,11 +805,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					if (j.role !== "assistant") continue;
 					const c = j.content;
 					const text =
-						typeof c === "string"
-							? c
-							: Array.isArray(c)
-								? c.map((p: any) => (typeof p === "string" ? p : p?.text || "")).join("")
-							: "";
+						typeof c === "string" ? c : Array.isArray(c) ? c.map((p: any) => (typeof p === "string" ? p : p?.text || "")).join("") : "";
 					if (text.trim()) return text;
 				} catch {}
 			}
@@ -875,17 +862,21 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		}
 
 		if (meta.worktreePath && meta.worktreeStatus === "active") {
-			checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch).then((safety) => {
-				if (safety.safe) {
-					const selector = meta.worktreeId || `path:${meta.worktreePath}`;
-					removeOrcaWorktree(selector).then((rmRes) => {
-						if (rmRes.ok) {
-							meta.worktreeStatus = "released";
-							persistSessionMeta(meta, true);
-						}
-					}).catch(() => {});
-				}
-			}).catch(() => {});
+			checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch)
+				.then((safety) => {
+					if (safety.safe) {
+						const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+						removeOrcaWorktree(selector)
+							.then((rmRes) => {
+								if (rmRes.ok) {
+									meta.worktreeStatus = "released";
+									persistSessionMeta(meta, true);
+								}
+							})
+							.catch(() => {});
+					}
+				})
+				.catch(() => {});
 		}
 
 		persistSessionMeta(meta, true);
@@ -1184,9 +1175,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					// non-zero; surface the real error instead of a generic
 					// "Command failed" before falling back to git.
 					orcaFailure = extractCliError(orcaErr) || "unknown orca failure";
-					logWarn(
-						`orca worktree create failed for ${targetBranch}, falling back to git: ${orcaFailure}`,
-					);
+					logWarn(`orca worktree create failed for ${targetBranch}, falling back to git: ${orcaFailure}`);
 				}
 			}
 
@@ -1327,131 +1316,129 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		const targetCwd = task.worktreePath || baseDir;
 		const client = new AcpClient(targetCwd, task.model);
 		try {
-		await client.start();
+			await client.start();
 
-		// Create session in ACP
-		const newSessionRes = await client.request("session/new", {
-			cwd: targetCwd,
-			mcpServers: [],
-		});
-		const realSessionId = newSessionRes.sessionId as string;
-
-		// Set real log file path now that session ID is resolved (zero file rename conflicts)
-		const realLogFile = getEventsLogPath(currentPiSessionId, realSessionId);
-		client.setLogFilePath(realLogFile);
-
-		const meta: SessionMeta = {
-			sessionId: realSessionId,
-			queueId: task.queueId,
-			prompt: task.prompt,
-			model: task.model,
-			mode: task.mode,
-			createWorktree: task.createWorktree,
-			worktreePath: task.worktreePath,
-			worktreeBranch: task.worktreeBranch,
-			worktreeId: task.worktreeId,
-			parentWorktreeId: task.parentWorktreeId,
-			worktreeStatus: task.worktreePath ? "active" : undefined,
-			status: "running",
-			createdAt: task.enqueuedAt,
-			startedAt: Date.now(),
-			lastMessageTime: Date.now(),
-			turnStartedAt: Date.now(),
-			pid: client.pid,
-		};
-
-		sessions.set(realSessionId, meta);
-		activeClients.set(realSessionId, client);
-		persistSessionMeta(meta, true);
-		persistState();
-		updateStatusUI();
-
-		wireClientEvents(client, meta);
-
-		// Configure ACP mode (validated against the advertised config vocabulary when known).
-		// The model is set authoritatively via the --model spawn flag above; there is
-		// deliberately no set_config_option(model) call — the ACP config vocabulary does
-		// not cover every CLI model (e.g. swe-2-max) and the redundant call used to
-		// fail with -32602 "Invalid value".
-		const acpMode = task.mode === "dangerous" ? "bypass" : task.mode;
-		try {
-			await client.request("session/set_mode", {
-				sessionId: realSessionId,
-				modeId: acpMode,
+			// Create session in ACP
+			const newSessionRes = await client.request("session/new", {
+				cwd: targetCwd,
+				mcpServers: [],
 			});
-		} catch (err: any) {
-			const knownModes = sessionConfigOptions.get(realSessionId)?.get("mode");
-			logWarn(
-				`set_mode ${acpMode} failed${knownModes ? ` (valid modes: ${knownModes.join(", ")})` : ""}: ${extractCliError(err)}`,
-			);
-		}
+			const realSessionId = newSessionRes.sessionId as string;
 
-		// Turn liveness watchdog (replaces the old hard 60s prompt timeout)
-		startStallWatchdog(meta);
+			// Set real log file path now that session ID is resolved (zero file rename conflicts)
+			const realLogFile = getEventsLogPath(currentPiSessionId, realSessionId);
+			client.setLogFilePath(realLogFile);
 
-		// Execute initial prompt asynchronously — no response timeout: a turn completes
-		// when the ACP session/prompt response arrives, minutes or hours later.
-		client.appendUserMessage(task.prompt);
-		client
-			.request(
-				"session/prompt",
-				{
+			const meta: SessionMeta = {
+				sessionId: realSessionId,
+				queueId: task.queueId,
+				prompt: task.prompt,
+				model: task.model,
+				mode: task.mode,
+				createWorktree: task.createWorktree,
+				worktreePath: task.worktreePath,
+				worktreeBranch: task.worktreeBranch,
+				worktreeId: task.worktreeId,
+				parentWorktreeId: task.parentWorktreeId,
+				worktreeStatus: task.worktreePath ? "active" : undefined,
+				status: "running",
+				createdAt: task.enqueuedAt,
+				startedAt: Date.now(),
+				lastMessageTime: Date.now(),
+				turnStartedAt: Date.now(),
+				pid: client.pid,
+			};
+
+			sessions.set(realSessionId, meta);
+			activeClients.set(realSessionId, client);
+			persistSessionMeta(meta, true);
+			persistState();
+			updateStatusUI();
+
+			wireClientEvents(client, meta);
+
+			// Configure ACP mode (validated against the advertised config vocabulary when known).
+			// The model is set authoritatively via the --model spawn flag above; there is
+			// deliberately no set_config_option(model) call — the ACP config vocabulary does
+			// not cover every CLI model (e.g. swe-2-max) and the redundant call used to
+			// fail with -32602 "Invalid value".
+			const acpMode = task.mode === "dangerous" ? "bypass" : task.mode;
+			try {
+				await client.request("session/set_mode", {
 					sessionId: realSessionId,
-					prompt: [{ type: "text", text: task.prompt }],
-				},
-				0,
-			)
-			.then(async () => {
-				stopStallWatchdog(meta.sessionId);
-				flushAssistantBuffer(meta);
-				meta.status = "idle";
-				meta.turnCompletedAt = Date.now();
-				meta.finishedAt = Date.now();
-				totalCompleted++;
-				persistSessionMeta(meta, true);
+					modeId: acpMode,
+				});
+			} catch (err: any) {
+				const knownModes = sessionConfigOptions.get(realSessionId)?.get("mode");
+				logWarn(`set_mode ${acpMode} failed${knownModes ? ` (valid modes: ${knownModes.join(", ")})` : ""}: ${extractCliError(err)}`);
+			}
 
-				// Detect PR if worktree was created
-				let prSuffix = " No pullrequest was created";
-				if (task.worktreePath) {
-					const prNum = await detectPullRequest(task.worktreePath, task.worktreeBranch);
-					if (prNum) {
-						meta.detectedPrNumber = prNum;
-						prSuffix = ` The session created the pr #${prNum}`;
-						persistSessionMeta(meta, true);
-					}
-				}
+			// Turn liveness watchdog (replaces the old hard 60s prompt timeout)
+			startStallWatchdog(meta);
 
-				persistState();
-				updateStatusUI();
-
-				// Turn complete notification
-				sendAgentMessage(
-					`The session ${meta.sessionId} is done. use the "devin_status" to check the session last messages. or "devin_message" to send a new message.${prSuffix}`,
-				);
-
-				drainQueue();
-			})
-			.catch((err) => {
-				// Only override a turn that is still in flight: onExit (idle/interrupted)
-				// and devin_cancel (cancelled) already set the terminal state.
-				if (meta.status === "running" || meta.status === "stalled") {
+			// Execute initial prompt asynchronously — no response timeout: a turn completes
+			// when the ACP session/prompt response arrives, minutes or hours later.
+			client.appendUserMessage(task.prompt);
+			client
+				.request(
+					"session/prompt",
+					{
+						sessionId: realSessionId,
+						prompt: [{ type: "text", text: task.prompt }],
+					},
+					0,
+				)
+				.then(async () => {
 					stopStallWatchdog(meta.sessionId);
 					flushAssistantBuffer(meta);
-					meta.status = "failed";
-					meta.error = err.message || String(err);
+					meta.status = "idle";
+					meta.turnCompletedAt = Date.now();
 					meta.finishedAt = Date.now();
+					totalCompleted++;
 					persistSessionMeta(meta, true);
+
+					// Detect PR if worktree was created
+					let prSuffix = " No pullrequest was created";
+					if (task.worktreePath) {
+						const prNum = await detectPullRequest(task.worktreePath, task.worktreeBranch);
+						if (prNum) {
+							meta.detectedPrNumber = prNum;
+							prSuffix = ` The session created the pr #${prNum}`;
+							persistSessionMeta(meta, true);
+						}
+					}
+
 					persistState();
 					updateStatusUI();
 
+					// Turn complete notification
 					sendAgentMessage(
-						`The session ${meta.sessionId} failed: ${meta.error}. You can check details with "devin_status" or restart it with "devin_restart".`,
+						`The session ${meta.sessionId} is done. use the "devin_status" to check the session last messages. or "devin_message" to send a new message.${prSuffix}`,
 					);
-					drainQueue();
-				}
-			});
 
-		return meta;
+					drainQueue();
+				})
+				.catch((err) => {
+					// Only override a turn that is still in flight: onExit (idle/interrupted)
+					// and devin_cancel (cancelled) already set the terminal state.
+					if (meta.status === "running" || meta.status === "stalled") {
+						stopStallWatchdog(meta.sessionId);
+						flushAssistantBuffer(meta);
+						meta.status = "failed";
+						meta.error = err.message || String(err);
+						meta.finishedAt = Date.now();
+						persistSessionMeta(meta, true);
+						persistState();
+						updateStatusUI();
+
+						sendAgentMessage(
+							`The session ${meta.sessionId} failed: ${meta.error}. You can check details with "devin_status" or restart it with "devin_restart".`,
+						);
+						drainQueue();
+					}
+				});
+
+			return meta;
 		} catch (err) {
 			// Spawn/handshake/session-new failed: kill the spawned child so it is not
 			// an untracked orphan, then surface the error.
@@ -1574,7 +1561,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 							killProcessGroup(meta.pid);
 							meta.status = "interrupted";
 							meta.finishedAt = Date.now();
-							meta.error = "pi session restarted; the devin process was still running (orphaned) and was terminated. Restart with devin_restart.";
+							meta.error =
+								"pi session restarted; the devin process was still running (orphaned) and was terminated. Restart with devin_restart.";
 							persistSessionMeta(meta, true);
 						} else {
 							// Process is dead: the turn may have completed on devin's side
@@ -1819,8 +1807,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "devin_status",
 		label: "Devin Status",
-		description:
-			"Checks status and recent or full messages for Devin sessions. Reads on-demand from disk without RAM memory overhead.",
+		description: "Checks status and recent or full messages for Devin sessions. Reads on-demand from disk without RAM memory overhead.",
 		parameters: Type.Object({
 			session_id: Type.Optional(
 				Type.String({
@@ -1843,7 +1830,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 			if (params.complete && !params.session_id) {
 				return {
-					details: toolDetails("devin_status", { result: "invalid_params", code: "INVALID_PARAMS", reason: "complete_requires_session_id" }),
+					details: toolDetails("devin_status", {
+						result: "invalid_params",
+						code: "INVALID_PARAMS",
+						reason: "complete_requires_session_id",
+					}),
 					content: [{ type: "text", text: "The 'complete' parameter requires a 'session_id'." }],
 					isError: true,
 				};
@@ -1879,13 +1870,16 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 							lastMessages = readLastMessagesFromDisk(meta, 3);
 						} catch {}
 					}
-					const timeStr = meta.lastMessageTime
-						? new Date(meta.lastMessageTime).toISOString()
-						: "N/A";
+					const timeStr = meta.lastMessageTime ? new Date(meta.lastMessageTime).toISOString() : "N/A";
 					const prStr = meta.detectedPrNumber ? ` | PR: #${meta.detectedPrNumber}` : "";
 
 					return {
-						details: toolDetails("devin_status", { result: "session_summary", sessionId: meta.sessionId, status: meta.status, prNumber: meta.detectedPrNumber ?? null }),
+						details: toolDetails("devin_status", {
+							result: "session_summary",
+							sessionId: meta.sessionId,
+							status: meta.status,
+							prNumber: meta.detectedPrNumber ?? null,
+						}),
 						content: [
 							{
 								type: "text",
@@ -1900,7 +1894,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				if (queuedTask) {
 					const pos = queue.indexOf(queuedTask) + 1;
 					return {
-						details: toolDetails("devin_status", { result: "queued_task", queueId: queuedTask.queueId, queuePosition: pos, queueTotal: queue.length }),
+						details: toolDetails("devin_status", {
+							result: "queued_task",
+							queueId: queuedTask.queueId,
+							queuePosition: pos,
+							queueTotal: queue.length,
+						}),
 						content: [
 							{
 								type: "text",
@@ -1938,9 +1937,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						lastMessages = readLastMessagesFromDisk(meta, 3);
 					} catch {}
 				}
-				const timeStr = meta.lastMessageTime
-					? new Date(meta.lastMessageTime).toISOString()
-					: "N/A";
+				const timeStr = meta.lastMessageTime ? new Date(meta.lastMessageTime).toISOString() : "N/A";
 				const prStr = meta.detectedPrNumber ? ` | PR: #${meta.detectedPrNumber}` : "";
 
 				summaries.push(
@@ -1949,9 +1946,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			}
 
 			if (queue.length > 0) {
-				const queueList = queue
-					.map((q, idx) => `  ${idx + 1}. [${q.queueId}] "${q.prompt.slice(0, 60)}" (${q.model})`)
-					.join("\n");
+				const queueList = queue.map((q, idx) => `  ${idx + 1}. [${q.queueId}] "${q.prompt.slice(0, 60)}" (${q.model})`).join("\n");
 				summaries.push(`Queued Tasks (${queue.length}):\n${queueList}`);
 			}
 
@@ -2183,7 +2178,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			if (meta.pid && isPidAlive(meta.pid)) {
 				if (meta.status !== "cancelled") {
 					return {
-						details: toolDetails("devin_restart", { result: "process_alive", code: "PROCESS_ALIVE", sessionId: params.session_id, pid: meta.pid ?? null }),
+						details: toolDetails("devin_restart", {
+							result: "process_alive",
+							code: "PROCESS_ALIVE",
+							sessionId: params.session_id,
+							pid: meta.pid ?? null,
+						}),
 						content: [
 							{
 								type: "text",
@@ -2194,15 +2194,20 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					};
 				}
 				// Cancelled: the old process may still be inside its dispose kill window —
-			// force-kill it and wait (async, so pending SIGKILL timers can fire) until it is
-			// actually gone before spawning a new one.
+				// force-kill it and wait (async, so pending SIGKILL timers can fire) until it is
+				// actually gone before spawning a new one.
 				killProcessGroup(meta.pid);
 				for (let i = 0; i < 30 && isPidAlive(meta.pid); i++) {
 					await new Promise((r) => setTimeout(r, 100));
 				}
 				if (isPidAlive(meta.pid)) {
 					return {
-						details: toolDetails("devin_restart", { result: "process_not_stopped", code: "PROCESS_NOT_STOPPED", sessionId: params.session_id, pid: meta.pid ?? null }),
+						details: toolDetails("devin_restart", {
+							result: "process_not_stopped",
+							code: "PROCESS_NOT_STOPPED",
+							sessionId: params.session_id,
+							pid: meta.pid ?? null,
+						}),
 						content: [
 							{
 								type: "text",
@@ -2234,7 +2239,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					wtStatus = "active";
 				} catch (err: any) {
 					return {
-						details: toolDetails("devin_restart", { result: "worktree_recreate_failed", code: "WORKTREE_CREATE_FAILED", sessionId: params.session_id }),
+						details: toolDetails("devin_restart", {
+							result: "worktree_recreate_failed",
+							code: "WORKTREE_CREATE_FAILED",
+							sessionId: params.session_id,
+						}),
 						content: [{ type: "text", text: `Failed to recreate worktree for restart: ${err.message}` }],
 						isError: true,
 					};
@@ -2334,9 +2343,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					if (!params.force && (!safety.safe || (!prSettled && safety.prState !== "NONE" && safety.prState !== undefined))) {
 						skipped.push({
 							sessionId: sId,
-							reason: !safety.safe
-								? safety.reason
-								: `PR #${safety.prNumber} is still ${safety.prState || "OPEN"}`,
+							reason: !safety.safe ? safety.reason : `PR #${safety.prNumber} is still ${safety.prState || "OPEN"}`,
 						});
 						continue;
 					}
@@ -2355,9 +2362,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				persistState();
 				updateStatusUI();
 
-				const lines = [
-					`Cleaned worktrees for ${cleaned.length} settled session(s): ${cleaned.join(", ") || "none"}.`,
-				];
+				const lines = [`Cleaned worktrees for ${cleaned.length} settled session(s): ${cleaned.join(", ") || "none"}.`];
 				if (skipped.length > 0) {
 					lines.push("Skipped sessions:");
 					for (const s of skipped) {
@@ -2365,7 +2370,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					}
 				}
 				return {
-					details: toolDetails("devin_clean_worktree", { result: "pruned", ...capList("cleanedSessionIds", cleaned), skipped: skipped.length }),
+					details: toolDetails("devin_clean_worktree", {
+						result: "pruned",
+						...capList("cleanedSessionIds", cleaned),
+						skipped: skipped.length,
+					}),
 					content: [{ type: "text", text: lines.join("\n") }],
 				};
 			}
@@ -2423,7 +2432,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch);
 			if (!safety.safe && !params.force) {
 				return {
-					details: toolDetails("devin_clean_worktree", { result: "worktree_unsafe", code: "WORKTREE_UNSAFE", sessionId: targetId, reason: safety.reason }),
+					details: toolDetails("devin_clean_worktree", {
+						result: "worktree_unsafe",
+						code: "WORKTREE_UNSAFE",
+						sessionId: targetId,
+						reason: safety.reason,
+					}),
 					content: [
 						{
 							type: "text",
@@ -2438,7 +2452,11 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const rmRes = await removeOrcaWorktree(selector, { force: true });
 			if (!rmRes.ok) {
 				return {
-					details: toolDetails("devin_clean_worktree", { result: "worktree_remove_failed", code: "WORKTREE_REMOVE_FAILED", sessionId: targetId }),
+					details: toolDetails("devin_clean_worktree", {
+						result: "worktree_remove_failed",
+						code: "WORKTREE_REMOVE_FAILED",
+						sessionId: targetId,
+					}),
 					content: [
 						{
 							type: "text",
@@ -2508,7 +2526,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// --- Slash Command /devin ---
 
 	pi.registerCommand("devin", {
-		description: "Devin delegation controls and dashboard (subcommands: list, sessions, limit [n], cancel <id>, allow_bash [on|off|status])",
+		description:
+			"Devin delegation controls and dashboard (subcommands: list, sessions, limit [n], cancel <id>, allow_bash [on|off|status])",
 		handler: async (args, ctx) => {
 			lastUIContext = ctx.ui;
 			const trimmed = (args || "").trim();
@@ -2562,10 +2581,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				// Share the tool's cancel path (watchdog stop, buffer flush, orphan-pid kill).
 				const kind = cancelSessionById(targetId);
 				if (kind) {
-					ctx.ui.notify(
-						kind === "queued" ? `Cancelled queued session ${targetId}.` : `Cancelled session ${targetId}.`,
-						"info",
-					);
+					ctx.ui.notify(kind === "queued" ? `Cancelled queued session ${targetId}.` : `Cancelled session ${targetId}.`, "info");
 				} else {
 					ctx.ui.notify(`Session '${targetId}' not found.`, "warning");
 				}
