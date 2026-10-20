@@ -24,15 +24,28 @@ export interface CiVerdictInput {
 	checks: unknown;
 	/** The checks call failed, timed out, or returned unparseable output: nothing is knowable. */
 	ghFailed: boolean;
+	/**
+	 * What this observer saw with its own run watchers: runs that completed and runs that failed.
+	 * Only consulted when GitHub reported *no* check runs (`gh pr checks` answers `[]`), where it is
+	 * the remaining evidence - never when the call itself failed.
+	 */
+	bookkeeping?: { completed: number; failed: number };
 }
 
 /**
  * `"passed"` only when every reported check passed and the checks call itself succeeded.
  * Anything in flight, an unusable payload, or a failed call is `"unknown"` - never a pass.
  */
-export function evaluateCiVerdict({ checks, ghFailed }: CiVerdictInput): CiVerdict {
+export function evaluateCiVerdict({ checks, ghFailed, bookkeeping }: CiVerdictInput): CiVerdict {
 	if (ghFailed) return "unknown";
-	if (!Array.isArray(checks) || checks.length === 0) return "unknown";
+	if (!Array.isArray(checks)) return "unknown";
+
+	if (checks.length === 0) {
+		// GitHub reported no check runs at all. The observer's own run bookkeeping is then the only
+		// evidence: a run it watched to completion, with nothing failed, is a pass. This branch is
+		// unreachable when the call failed - that is the false green this file exists to prevent.
+		return bookkeeping && bookkeeping.completed > 0 && bookkeeping.failed === 0 ? "passed" : "unknown";
+	}
 
 	const stateOf = (row: unknown) => field(row, "state") || field(row, "status") || field(row, "conclusion");
 	const bucketOf = (row: unknown) => field(row, "bucket").toLowerCase();

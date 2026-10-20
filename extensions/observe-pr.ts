@@ -554,7 +554,14 @@ export default function (pi: ExtensionAPI) {
 				// (the shared backoff re-checks); any other gh failure is logged, never reported as
 				// a pass, and malformed output is treated the same way.
 				if (!isGhAvailabilityError(ghErr)) logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
-			} else if (evaluateCiVerdict({ checks, ghFailed: false }) === "passed") {
+			} else if (
+				evaluateCiVerdict({
+					checks,
+					ghFailed: false,
+					// only consulted for an empty check list, where it is the remaining evidence
+					bookkeeping: { completed: pr.completedRuns.size, failed: pr.failedRuns.size },
+				}) === "passed"
+			) {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
 				// Persisted so a session restart does not announce the same pass again.
