@@ -398,6 +398,24 @@ export function extractCodeSuggestion(body: string): { hasSuggestion: boolean; s
  * Linux - adding drive-letter rules with no Windows job to execute them would ship
  * untested behaviour.
  */
+/**
+ * Whether a directory *is* git metadata: `<repo>/.git`, a bare clone (`name.git`), or a linked worktree's
+ * gitdir under `.git/worktrees/`.
+ *
+ * Today's only caller cannot hand one here: `repoRoot()` runs `git rev-parse --show-toplevel`, and that was
+ * measured to fail with "this operation must be run in a work tree" inside `.git`, inside a bare repo and
+ * inside a linked worktree's gitdir - it never prints a `.git` path. The guard is for the layer below:
+ * `resolveRepoFilePath` is exported, and a `.git` *segment* test cannot see a root that IS the git directory
+ * (relative to `<repo>/.git`, the path `config` has no `.git` segment). Any caller that resolves a repo
+ * differently - `--absolute-git-dir`, a stored path, `--git-dir`/`--work-tree` in the environment - would
+ * otherwise be one string away from rewriting hooks or config.
+ */
+export function isGitMetadataDir(dir: string): boolean {
+	const abs = path.resolve(dir);
+	const base = path.basename(abs).toLowerCase();
+	return base === ".git" || base.endsWith(".git") || /\/\.git([/\\]|$)/i.test(abs);
+}
+
 export function isInsideDir(root: string, target: string): boolean {
 	const rel = path.relative(path.resolve(root), path.resolve(target));
 	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
@@ -416,6 +434,12 @@ export async function resolveRepoFilePath(repoRootDir: string, filePath: string)
 		throw new Error(`suggestion path '${filePath}' must be repository-relative`);
 	}
 	const root = path.resolve(repoRootDir);
+	if (isGitMetadataDir(root)) {
+		// In a bare repository or a linked worktree the root IS git metadata, and the segment check below is
+		// blind there: relative to `<repo>/.git`, the path `config` has no `.git` segment at all. A suggestion
+		// payload could rewrite hooks or config - a code-execution primitive, not a bad edit.
+		throw new Error(`suggestion cannot be applied: '${root}' is a git metadata directory, not a working tree`);
+	}
 	const absolute = path.resolve(root, filePath);
 	if (!isInsideDir(root, absolute)) {
 		throw new Error(`suggestion path '${filePath}' resolves outside the repository (${root})`);

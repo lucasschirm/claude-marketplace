@@ -15,9 +15,9 @@
     "biome.suspicious/noExplicitAny": 147,
     "biome.style/noNonNullAssertion": 6,
     "biome.complexity/noExcessiveCognitiveComplexity": 51,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.complexity/useOptionalChain": 6,
     "biome.suspicious/noConsole": 17,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
@@ -26,8 +26,8 @@
     "extensions/lib/ci-verdict.ts": 66,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
-    "extensions/lib/gh-health.ts": 274,
-    "extensions/lib/github-review-threads.ts": 500,
+    "extensions/lib/gh-health.ts": 280,
+    "extensions/lib/github-review-threads.ts": 524,
     "extensions/lib/orca-client.ts": 576,
     "extensions/lib/pr-tasks-manager.ts": 837,
     "extensions/lib/tool-result.ts": 60,
@@ -50,7 +50,15 @@
       "changes": [
         "extensions/lib/gh-health.ts: 274 lines > baseline 255 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-20",
+      "reason": "gh-health.ts 274->280 (a failure supersedes an unrun recovery tick, so hooks cannot be driven twice in one window); github-review-threads.ts 500->524 (a root that IS git metadata is refused: relative to <repo>/.git the path config has no .git segment, so the segment test could not see it).",
+      "changes": [
+        "extensions/lib/gh-health.ts: 280 lines > baseline 274 (files may only shrink)",
+        "extensions/lib/github-review-threads.ts: 524 lines > baseline 500 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "19c3182"
+  "generatedFrom": "26a1d92"
 }
