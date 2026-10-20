@@ -597,3 +597,28 @@ implementation, reachable as `--only wiredTests` without any installed dependenc
 - **Baseline deltas at each PR merge** (metric → before → after): C1 changed no source metric (it only
   added measurement); the deltas start with C2.
 - **Claims in this plan or in #35 found to be wrong**: see "Corrections found while implementing" above.
+
+## C1 review rounds 2 and 3 — what the gate got wrong, and how it is now proven
+
+`19c3182`/`26a1d92` shipped a gate that did not measure several of the things it claimed. The independent
+review found 19 issues across three rounds; every one was reproduced before being fixed. The classes matter
+more than the list:
+
+| class | what happened | the general rule |
+| --- | --- | --- |
+| **raw text instead of code** | a `//` inside a string (`"https://x"`) read as a comment start and hid every call after it; a call inside `/* */` or a string counted as real; regex literals (`{P:/[(]/}`) corrupted bracket depth so one call's extent ran into the next; generic callees `execOrca<{…}>([…])` — the codebase's own spelling — matched no callee list | any "detector" that is not literal-aware will be wrong in both directions, silently. One scanner (`skipCompound`) now serves extent, statement-boundary and comment questions. |
+| **counts that cannot answer the question asked** | "the rule reported nothing" and "the rule was switched off" are the same number. My first discriminator (zero diagnostics ⇒ legit) was exactly inverted, so switching `noExplicitAny` off recorded 147 `any`s as an improvement. | ask the config, not the counts: `ruleEnabledInConfig()` reads biome.jsonc. Still enabled ⇒ debt gone (recordable improvement). Off with debt ⇒ fails, and only `--write --reason` may record it. |
+| **a check with a bypass one command away** | `--check` failed on stale keys while `--write` dropped them silently; the new `notes` guard fired on the dependency-free `--only` path (which `run.sh` runs before `npm install`); `gatedExtras` was pushed to before it was declared, so the stale-rule path crashed with a TDZ error. | the write path is the attack surface of a ratchet. Every gate must be refused by *both* modes. |
+| **an invariant nobody proves** | four of the twelve measured nothing at first, and the TDZ crash proves the path had never run. | `test/quality-gate-fixtures.sh`: 83 assertions, in CI, run against a copy of the tree. New invariant ⇒ fixture in the same commit. |
+
+Two things worth recording about the process:
+
+- **A fixture harness that mutates the tree it tests is a hazard.** An early draft replaced
+  `node_modules/.bin/biome` with a stub and left a fake binary in the checkout, which then made the *real*
+  gate report "biome produced output in an unrecognised shape" — a true positive about a broken environment.
+  The committed suite copies the tree to a temp dir and injects biome through `PI_QA_BIOME`. Its cleanup must
+  never `git checkout --`: an earlier draft reverted uncommitted work under review that way.
+- **Reachability claims get measured.** The bare-repo `.git` hole (R2-19) is real at the exported layer, but
+  `git rev-parse --show-toplevel` was measured to *fail* — not print `.git` — inside `.git`, a bare repo and a
+  worktree gitdir. So the guard is defence in depth for future callers, and that is what its comment says,
+  rather than claiming an exploit the current caller cannot reach.
