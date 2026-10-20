@@ -14,7 +14,7 @@
     "format:check": "biome format .",
     "check": "node scripts/check-quality.mjs --check",
     "qa:baseline": "node scripts/check-quality.mjs --write",
-    "qa": "npm run typecheck && npm run lint && npm run check && npm run validate && npm run test:unit",
+    "qa": "npm run typecheck && npm run lint && npm run format:check && npm run check && npm run validate && npm run test:unit",
     "validate": "node scripts/validate-marketplace.mjs"
   },
   "pi": {

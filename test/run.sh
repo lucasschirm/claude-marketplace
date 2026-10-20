@@ -25,11 +25,6 @@ usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-# A test file no suite runs is a test that does not exist. The check lives in
-# scripts/check-quality.mjs (one implementation for local runs, CI and `npm run check`); it needs no
-# installed dependencies, so it is safe to call before `npm install`.
-node scripts/check-quality.mjs --only wiredTests
-
 run_suite() {
   case "$1" in
     lint)
@@ -40,6 +35,11 @@ run_suite() {
       npm run lint
       ;;
     check)
+      # The full gate counts the biome-derived metrics, so it needs the devDependencies too.
+      if [ ! -x node_modules/.bin/biome ]; then
+        echo "biome is not installed - run 'npm install' first (the repo invariants also count biome's metrics)" >&2
+        exit 1
+      fi
       npm run check
       ;;
     format)
@@ -107,6 +107,11 @@ if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
   usage
   exit 0
 fi
+
+# A test file no suite runs is a test that does not exist. The check lives in scripts/check-quality.mjs
+# (one implementation for local runs, CI and `npm run check`) and needs no installed dependencies. It
+# runs here rather than at the top of the file so `--list` and `--help` stay noise-free.
+node scripts/check-quality.mjs --only wiredTests
 
 if command -v pi >/dev/null 2>&1; then
   echo "pi: $(pi --version 2>/dev/null | head -1)"

@@ -6,8 +6,11 @@
 //   - the JSON manifests parse and carry the required fields
 //   - `source` resolves to a directory holding .claude-plugin/plugin.json
 //   - the plugin.json `name` matches the marketplace entry it belongs to
-//   - every SKILL.md / agents/*.md has `name` + `description` frontmatter
 //   - every plugins/*/.claude-plugin/plugin.json is listed in the marketplace
+// SKILL.md / agents/*.md frontmatter is NOT checked here: scripts/check-quality.mjs owns that invariant
+// (same BOM/CRLF tolerance and `name` length rule, plus the root skills/ tree this never covered). Two
+// parsers for one rule is how they start to disagree.
+// `npm run check` runs it; `npm run validate` runs this file.
 // and for package.json:
 //   - every path in the `pi` manifest (extensions, skills) exists
 
@@ -37,30 +40,6 @@ const readJson = (rel) => {
 		fail(`${rel}: invalid JSON (${err.message})`);
 		return null;
 	}
-};
-
-/** Frontmatter of a Markdown file: the YAML-ish block between the first two `---` lines. */
-const frontmatter = (abs) => {
-	const raw = fs.readFileSync(abs, "utf8");
-	const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
-	if (!match) return null;
-	const fields = {};
-	for (const line of match[1].split(/\r?\n/)) {
-		const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
-		if (kv) fields[kv[1]] = kv[2].trim();
-	}
-	return fields;
-};
-
-const listMarkdown = (dir) => {
-	if (!fs.existsSync(dir)) return [];
-	const out = [];
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		const abs = path.join(dir, entry.name);
-		if (entry.isDirectory()) out.push(...listMarkdown(abs));
-		else if (entry.isFile() && entry.name.endsWith(".md")) out.push(abs);
-	}
-	return out;
 };
 
 // --- Claude Code marketplace ------------------------------------------------
@@ -102,25 +81,6 @@ if (marketplace) {
 		if (!manifest.description) fail(`${manifestRel}: \`description\` is required`);
 		if (!manifest.version) fail(`${manifestRel}: \`version\` is required`);
 		ok(`${entry.name}: source + manifest ok`);
-
-		for (const file of listMarkdown(path.join(sourceDir, "skills"))) {
-			if (path.basename(file) !== "SKILL.md") continue;
-			const fm = frontmatter(file);
-			const rel = path.relative(root, file);
-			if (!fm) fail(`${rel}: missing frontmatter`);
-			else if (!fm.name || !fm.description) fail(`${rel}: frontmatter needs \`name\` and \`description\``);
-			else if (fm.name.length > 64) fail(`${rel}: \`name\` must be 64 characters or fewer`);
-			else if (!fm.description) fail(`${rel}: \`description\` is required`);
-			else ok(`${rel}: frontmatter ok`);
-		}
-
-		for (const file of listMarkdown(path.join(sourceDir, "agents"))) {
-			const rel = path.relative(root, file);
-			const fm = frontmatter(file);
-			if (!fm) fail(`${rel}: missing frontmatter`);
-			else if (!fm.name || !fm.description) fail(`${rel}: frontmatter needs \`name\` and \`description\``);
-			else ok(`${rel}: frontmatter ok`);
-		}
 	}
 }
 

@@ -9,6 +9,7 @@
  *   node scripts/check-quality.mjs --write --reason "why a threshold went up"
  *   node scripts/check-quality.mjs --list          # invariant names
  *   node scripts/check-quality.mjs --only <name>   # run one invariant
+ *   node scripts/check-quality.mjs --full          # list every violating site, not the first 8
  *
  * Ratchet semantics (the part that decides whether this survives a deadline):
  *   - every metric may stay equal or shrink;
@@ -52,6 +53,139 @@ function linesOf(file) {
 	return fs.readFileSync(file, "utf-8").split("\n");
 }
 
+const lineOf = (src, index) => src.slice(0, index).split("\n").length;
+
+/** Skip a string/template literal that starts at `i`; returns the index of its closing quote. */
+function skipLiteral(src, i) {
+	const quote = src[i];
+	for (let j = i + 1; j < src.length; j++) {
+		if (src[j] === "\\") {
+			j++;
+			continue;
+		}
+		if (src[j] === quote) return j;
+		// An apostrophe in a comment must not swallow the file: a quote cannot cross a newline.
+		if (quote !== "`" && src[j] === "\n") return j;
+	}
+	return src.length;
+}
+
+/** Whether `index` sits in a line comment or after a block-comment gutter (a mentioned API is not a call). */
+function inComment(src, index) {
+	const lineStart = src.lastIndexOf("\n", index - 1) + 1;
+	return /\/\/|(^\s*\*)/.test(src.slice(lineStart, index));
+}
+
+/**
+ * The source of the call whose callee name starts at `nameIndex`: from its "(" through the matching ")",
+ * with literals and comments skipped so a bracket inside a string cannot end the scan.
+ *
+ * This exists because a flat line window was demonstrably wrong in both directions: two adjacent calls
+ * masked each other (the second call's `timeout:` landed inside the first call's window), and an unrelated
+ * mutating verb a few lines below false-flagged a benign call.
+ */
+function callTextAt(src, nameIndex) {
+	const open = src.indexOf("(", nameIndex);
+	if (open < 0) return "";
+	let depth = 0;
+	for (let j = open; j < src.length; j++) {
+		const c = src[j];
+		if (c === '"' || c === "'" || c === "`") {
+			j = skipLiteral(src, j);
+			continue;
+		}
+		if (c === "/" && (src[j + 1] === "/" || src[j + 1] === "*")) {
+			const eol = src.indexOf("\n", j);
+			const end = src.indexOf("*/", j);
+			j = src[j + 1] === "/" ? (eol < 0 ? src.length : eol) : end < 0 ? src.length : end + 1;
+			continue;
+		}
+		if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") {
+			depth--;
+			if (depth === 0) return src.slice(open, j + 1);
+		}
+	}
+	return "";
+}
+
+/** The argument strings of a call, in order, lowercased: ["worker", "stop", "--dispatch", "x"]. */
+function callArgs(call) {
+	const out = [];
+	for (let i = 0; i < call.length; i++) {
+		const c = call[i];
+		if (c !== '"' && c !== "'" && c !== "`") continue;
+		const end = skipLiteral(call, i);
+		out.push(call.slice(i + 1, end).toLowerCase());
+		i = end;
+	}
+	return out;
+}
+
+/**
+ * The last code character of a line, with literals skipped and anything from a comment onward ignored:
+ * `foo(); // note` ends in `;`. Reading the raw text instead made every line after a trailing comment look
+ * like a continuation, so a `const x =` four lines up appeared to bind an unrelated call.
+ */
+function codeTail(line) {
+	const code = codeOnly(line).trimEnd();
+	return code === "" ? "" : code.slice(-1);
+}
+
+/** Text preceding the callee inside its own statement (binding, `return`, a condition). */
+function beforeInStatement(src, nameIndex) {
+	const lineStart = src.lastIndexOf("\n", nameIndex - 1) + 1;
+	let start = lineStart;
+	// Pull in the lines above that continue this statement (a call split across lines after `const x =`).
+	while (start > 0) {
+		const prevEnd = src.lastIndexOf("\n", start - 2) + 1;
+		const tail = codeTail(src.slice(prevEnd, start - 1));
+		if (tail === "" || tail === ";" || tail === "{" || tail === "}") break;
+		start = prevEnd;
+	}
+	return src.slice(start, nameIndex);
+}
+
+/** A line with literals preserved and comments removed (prose must not satisfy a "the result is checked"
+ * heuristic, and a comment must not end the scan). */
+function codeOnly(line) {
+	let out = "";
+	for (let i = 0; i < line.length; i++) {
+		const c = line[i];
+		if (c === '"' || c === "'" || c === "`") {
+			const end = skipLiteral(line, i);
+			out += line.slice(i, end + 1);
+			i = end;
+			continue;
+		}
+		if (c === "/" && (line[i + 1] === "/" || line[i + 1] === "*")) break;
+		out += c;
+	}
+	return out;
+}
+
+/**
+ * Text following the call inside its own statement: a `.then(...)`, `.ok`, `&&` chain that continues on
+ * following lines. Continuation means the next line *starts* with an operator — a later, unrelated line
+ * that merely contains `.then(` is a different statement, and treating it as this one's chain hid an
+ * unchecked `spawnSync("git", ["push"])` sitting two lines above a chained call.
+ */
+function afterInStatement(src, callEnd) {
+	const pieces = [];
+	let end = src.indexOf("\n", callEnd);
+	pieces.push(src.slice(callEnd, end < 0 ? src.length : end));
+	if (end < 0) end = src.length;
+	for (;;) {
+		const nextEnd = src.indexOf("\n", end + 1);
+		const next = src.slice(end + 1, nextEnd < 0 ? src.length : nextEnd).trim();
+		if (!/^(\.|&&|\|\||\?|:)/.test(next)) break;
+		pieces.push(next);
+		if (nextEnd < 0) break;
+		end = nextEnd;
+	}
+	return pieces.map(codeOnly).join("\n");
+}
+
 // ---------------------------------------------------------------- biome metrics
 
 /** Counts of biome diagnostics per rule over extensions/, or null when biome is unavailable. */
@@ -84,46 +218,73 @@ function biomeRuleCounts() {
 
 // ---------------------------------------------------------------- source-scanned metrics
 
+// `(?<![.\w$])` keeps a method call out of it: `runRegex.exec(line)` is not a process spawn.
+const EXEC_CALL_RE = /(?<![.\w$])(execFileAsync|execFileSync|execFile|execSync|exec|spawnSync|spawn)\s*\(/g;
+
 /**
- * execFile/execFileAsync/spawn sites, split by location and by whether a timeout is visible in the
- * call. The window is the call line plus the six that follow: enough for the options object of every
- * call in the tree today, short enough that an unrelated `timeout` below does not mask a missing one.
+ * execFile/exec/spawn sites, split by location and by whether *that call* passes a timeout. The timeout
+ * is looked for inside the call's own parentheses: with a line window, `exec(a); exec(b, {timeout: 1})`
+ * counted the first call as guarded.
  */
 function execSites() {
 	const all = [];
 	for (const file of extensionFiles()) {
-		const lines = linesOf(file);
-		for (let i = 0; i < lines.length; i++) {
-			if (!/\b(execFileAsync|execFileSync|execFile|spawn|spawnSync)\s*\(/.test(lines[i])) continue;
-			const window = lines.slice(i, i + 7).join("\n");
-			all.push({ file: rel(file), line: i + 1, hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(window) });
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(EXEC_CALL_RE)) {
+			if (inComment(src, m.index)) continue;
+			const call = callTextAt(src, m.index);
+			all.push({
+				file: rel(file),
+				line: lineOf(src, m.index),
+				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(call),
+				src,
+				nameIndex: m.index,
+				call,
+			});
 		}
 	}
 	return all;
 }
 
 function countEmptyCatches() {
-	let n = 0;
 	const hits = [];
 	for (const file of extensionFiles()) {
 		const src = fs.readFileSync(file, "utf-8");
-		for (const m of src.matchAll(/catch\s*(?:\([^)]*\))?\s*\{\s*\}/g)) {
-			n++;
-			hits.push(`${rel(file)}:${src.slice(0, m.index).split("\n").length}`);
+		for (const m of src.matchAll(/catch\s*(?:\([^)]*\))?\s*\{([^}]*)\}/g)) {
+			// A reason comment satisfies the rule — that is the rule. A lone `;` or comma is not a reason.
+			if (!/^[\s;,]*$/.test(m[1])) continue;
+			hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
 		}
 	}
-	return { count: n, hits };
+	return { count: hits.length, hits };
 }
 
 /**
  * A write (or delete) of a global slot. Reads must not count: `(globalThis as any)[K]` also appears in
  * `if (...)` guards, and counting those would inflate the metric and hide the real ones.
  */
+/**
+ * A write (or delete) of a global slot. Reads must not count: `(globalThis as any)[K]` also appears in
+ * `if (...)` guards, and counting those would inflate the metric and hide the real ones.
+ *
+ * `Object.assign(globalThis, {...})` and `Reflect.set/deleteProperty(globalThis, ...)` are the natural
+ * way a module publishes a batch of slots, so they are writes too; so is every compound assignment and
+ * `++`/`--`, which the first version of this detector missed.
+ */
+const GLOBAL_WRITE_TAIL =
+	/globalThis\s*(?:as\s+[^)]{0,20}\)\s*)?(?:\[[^\]]+\]|\.[A-Za-z_$][\w$]*)\s*(?:\?\?=|\|\|=|&&=|[-+*/%&|^]?=|\+\+|--)(?!=)/;
+
+// An alias hands the shared object to whatever the variable touches, so the declaration is the site worth
+// naming: a line-level scan cannot see `g.__X__ = ...`, and without this the alias would be free.
+const GLOBAL_ALIAS = /\b(?:const|let|var)\s+[\w$]+\s*=\s*globalThis\b/;
+
 function isGlobalThisWrite(line) {
 	const idx = line.indexOf("globalThis");
 	if (idx < 0) return false;
 	if (/\bdelete\s+\(?\s*$/.test(line.slice(0, idx))) return true;
-	return /globalThis\s*(?:as\s+any\s*\))?\s*(?:\[[^\]]+\]|\.[A-Za-z_$][\w$]*)\s*(?:=|\?\?=|\|\|=|&&=)(?!=)/.test(line.slice(idx));
+	if (/\bObject\s*\.\s*(?:assign|defineProperty|defineProperties)\s*\(\s*globalThis\b/.test(line)) return true;
+	if (/\bReflect\s*\.\s*(?:set|deleteProperty|defineProperty)\s*\(\s*globalThis\b/.test(line)) return true;
+	return GLOBAL_WRITE_TAIL.test(line.slice(idx));
 }
 
 function countGlobalThisWrites() {
@@ -131,7 +292,7 @@ function countGlobalThisWrites() {
 	for (const file of extensionFiles()) {
 		if (rel(file) === "extensions/lib/cross-extension.ts") continue;
 		linesOf(file).forEach((line, i) => {
-			if (isGlobalThisWrite(line)) hits.push(`${rel(file)}:${i + 1}`);
+			if (isGlobalThisWrite(line) || GLOBAL_ALIAS.test(line)) hits.push(`${rel(file)}:${i + 1}`);
 		});
 	}
 	return { count: hits.length, hits };
@@ -143,7 +304,10 @@ function countJsonParseOutsideExecLib() {
 		if (rel(file) === "extensions/lib/exec.ts") continue;
 		const lines = linesOf(file);
 		lines.forEach((line, i) => {
-			if (/\bJSON\.parse\s*\(/.test(line)) hits.push(`${rel(file)}:${i + 1}`);
+			const trimmed = line.trim();
+			if (/^(\/\/|\*|\/\*)/.test(trimmed)) return; // a mention in a comment is not a call
+			// Covers `JSON.parse(`, `JSON.parse<T>(`, `JSON.parse (` and the `JSON["parse"](...)` spelling.
+			if (/\bJSON\s*(?:\.\s*parse|\[\s*["']parse["']\s*\])\s*(?:<[^<>]*>)?\s*\(/.test(line)) hits.push(`${rel(file)}:${i + 1}`);
 		});
 	}
 	return { count: hits.length, hits };
@@ -163,21 +327,66 @@ function countStdioWrites() {
 /**
  * A mutating external call whose result is never read. `execOrca([... "worker-stop" ...])` with no
  * assignment is how `/orchestration stop` came to announce success on a failed call, so the shape
- * itself is the bug. Verbs are matched on the argument vector, not on the function name.
+ * itself is the bug. The verb is read from the call's own argument vector, so both `"worker-stop"` and
+ * `["worker", "stop"]` count, and a neighbouring line can neither trigger nor hide a hit.
  */
-const MUTATING_VERBS =
-	/\b(worker-stop|worker-release|pr\s+merge|pr\s+review|pr\s+comment|pr\s+close|issue\s+close|push|commit|rm|delete)\b/;
+const MUTATING_SEQUENCES = [
+	["worker", "stop"],
+	["worker", "release"],
+	["worker", "dispatch"],
+	["worker", "cancel"],
+	["run", "stop"],
+	["pr", "merge"],
+	["pr", "close"],
+	["pr", "comment"],
+	["pr", "review"],
+	["pr", "edit"],
+	["pr", "ready"],
+	["issue", "close"],
+	["issue", "comment"],
+	["git", "push"],
+	["git", "commit"],
+	["push"],
+	["commit"],
+	["rm"],
+	["delete"],
+	["remove"],
+];
+
+const FUNNEL_CALL_RE = /(?<![.\w$])(execFileAsync|execFileSync|execFile|execSync|exec|spawnSync|spawn|execOrca|runJson|runText)\s*\(/g;
+
+function isMutatingCall(call) {
+	const args = callArgs(call);
+	return MUTATING_SEQUENCES.some((seq) =>
+		args.some((_, i) => seq.length + i <= args.length && seq.every((token, k) => args[i + k] === token)),
+	);
+}
+
+/** Whether the result of the call reaches the caller: bound, returned, tested, or chained on. */
+function resultReachesCaller(before, after) {
+	const left = before.trimEnd();
+	if (/\b(?:const|let|var)\s+[\w$\s,{}\[\]:]*=[^=]/.test(before)) return true; // bound to a variable
+	if (/^\s*(?:return|throw)\b/.test(before)) return true; // handed to the caller
+	if (/[\w$]]\s*=\s*(?:await\s*)?$/.test(left)) return true; // assigned: `res = await ...`
+	if (/\b(?:if|while)\s*\($/.test(left)) return true; // tested directly
+	if (/(?:&&|\|\||\?\?|\|\||\?)\s*$/.test(left)) return true; // feeds a condition
+	if (/\.\s*(?:then|catch|finally)\s*\(/.test(after)) return true; // chained on
+	if (/\.ok\b|!==|===|\bassert\b|\.error\b/.test(after)) return true; // inspected on the spot
+	return false;
+}
 
 function countUncheckedMutations() {
 	const hits = [];
 	for (const file of extensionFiles()) {
-		const lines = linesOf(file);
-		lines.forEach((line, i) => {
-			const call = /^\s*await\s+(execOrca|execFileAsync|execFileSync|runJson|runText)\s*\(/.test(line);
-			if (!call) return;
-			const window = lines.slice(i, i + 5).join(" ");
-			if (MUTATING_VERBS.test(window)) hits.push(`${rel(file)}:${i + 1}`);
-		});
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(FUNNEL_CALL_RE)) {
+			if (inComment(src, m.index)) continue;
+			const call = callTextAt(src, m.index);
+			if (!call || !isMutatingCall(call)) continue;
+			const callEnd = m.index + m[0].length - 1 + call.length;
+			if (resultReachesCaller(beforeInStatement(src, m.index), afterInStatement(src, callEnd))) continue;
+			hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
 	}
 	return { count: hits.length, hits };
 }
@@ -212,16 +421,26 @@ function checkPiExtensionsMatchDisk() {
 function checkUnusedLibs() {
 	const libDir = path.join(ROOT, "extensions", "lib");
 	if (!fs.existsSync(libDir)) return { count: 0, hits: [] };
-	const entries = fs
+	const read = (f) => fs.readFileSync(f, "utf-8");
+	const libFiles = fs.readdirSync(libDir).filter((f) => f.endsWith(".ts"));
+	// Reachability, not textual mention: a lib imported only by another live lib is used.
+	const reached = new Set();
+	const queue = fs
 		.readdirSync(path.join(ROOT, "extensions"))
 		.filter((f) => f.endsWith(".ts"))
 		.map((f) => path.join(ROOT, "extensions", f));
-	const corpus = entries.map((f) => fs.readFileSync(f, "utf-8")).join("\n");
-	const hits = fs
-		.readdirSync(libDir)
-		.filter((f) => f.endsWith(".ts"))
-		.filter((f) => !corpus.includes(`./lib/${f}`) && !corpus.includes(`lib/${f}`))
-		.map((f) => `extensions/lib/${f} is imported by no entry file`);
+	while (queue.length > 0) {
+		const file = queue.pop();
+		if (!fs.existsSync(file)) continue;
+		const src = read(file);
+		for (const m of src.matchAll(/from\s+["'][^"']*lib\/([\w.-]+\.ts)["']/g)) {
+			const name = m[1];
+			if (!libFiles.includes(name) || reached.has(name)) continue;
+			reached.add(name);
+			queue.push(path.join(libDir, name));
+		}
+	}
+	const hits = libFiles.filter((f) => !reached.has(f)).map((f) => `extensions/lib/${f} is reachable from no entry file`);
 	return { count: hits.length, hits };
 }
 
@@ -254,16 +473,24 @@ function checkWiredTests() {
 /** SKILL.md / agents/*.md need name + description frontmatter (moved here from validate-marketplace). */
 function checkFrontmatter() {
 	const hits = [];
+	// Same tolerance the marketplace validator has always had: BOM and CRLF are not a missing block.
+	const FRONTMATTER_RE = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---/;
 	const check = (file) => {
 		const src = fs.readFileSync(file, "utf-8");
-		const m = /^---\n([\s\S]*?)\n---/.exec(src);
+		const m = FRONTMATTER_RE.exec(src);
 		if (!m) {
 			hits.push(`${rel(file)} has no frontmatter block`);
 			return;
 		}
-		for (const key of ["name", "description"]) {
-			if (!new RegExp(`^${key}:\\s*\\S`, "m").test(m[1])) hits.push(`${rel(file)} frontmatter is missing '${key}'`);
+		const fields = {};
+		for (const line of m[1].split(/\r?\n/)) {
+			const kv = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
+			if (kv) fields[kv[1]] = kv[2].trim();
 		}
+		for (const key of ["name", "description"]) {
+			if (!fields[key]) hits.push(`${rel(file)} frontmatter is missing '${key}'`);
+		}
+		if (fields.name && fields.name.length > 64) hits.push(`${rel(file)}: \`name\` must be 64 characters or fewer`);
 	};
 	const walk = (dir, visit) => {
 		if (!fs.existsSync(dir)) return;
@@ -283,6 +510,13 @@ function checkFrontmatter() {
 }
 
 // ---------------------------------------------------------------- invariant registry
+
+// Per-file budget for a file with no baseline entry: the issue's absolute targets, applied immediately. */
+function defaultBudgetFor(file) {
+	if (file.startsWith("extensions/lib/")) return 500;
+	if (file.startsWith("extensions/")) return 300;
+	return Number.POSITIVE_INFINITY;
+}
 
 const INVARIANTS = [
 	{
@@ -376,6 +610,15 @@ function readBaseline() {
 	}
 }
 
+/** The commit the baseline was captured from, so a stale baseline is at least datable. */
+function headSha() {
+	try {
+		return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: ROOT, encoding: "utf-8", timeout: 5000 }).trim();
+	} catch {
+		return "unrecorded";
+	}
+}
+
 function writeBaseline(next) {
 	fs.writeFileSync(BASELINE_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf-8");
 }
@@ -396,6 +639,15 @@ function collect({ includeBiome }) {
 	}
 	if (includeBiome) {
 		const counts = biomeRuleCounts();
+		// null = biome missing or unparseable; an empty map = it ran but produced no diagnostics in the
+		// shape we read (a --reporter=json change would look exactly like this). Both must be fatal: a
+		// gate that exits 0 while measuring nothing is worse than no gate.
+		if (counts !== null && counts.size === 0 && Object.keys(readBaseline().metrics ?? {}).some((k) => k.startsWith("biome."))) {
+			console.error(
+				"biome produced no diagnostics in the expected shape (JSON reporter) - the biome half of the ratchet is not measuring anything.",
+			);
+			process.exit(1);
+		}
 		if (counts === null) {
 			console.error("biome is not runnable (node_modules/.bin/biome missing) - run `npm install` first.");
 			console.error("Source-scanned invariants still ran; biome-derived metrics were skipped.");
@@ -406,7 +658,7 @@ function collect({ includeBiome }) {
 	return { metrics, files: fileLineBudget() };
 }
 
-function run({ mode, only, reason }) {
+function run({ mode, only, reason, full }) {
 	const selected = only ? INVARIANTS.filter((i) => i.name === only) : INVARIANTS;
 	if (only && selected.length === 0) {
 		fail([`unknown invariant '${only}' - known: ${INVARIANTS.map((i) => i.name).join(", ")}`]);
@@ -436,6 +688,15 @@ function run({ mode, only, reason }) {
 			if (!key.startsWith("biome.")) continue;
 			rows.push({ key, value, allowed: baseline.metrics?.[key] ?? 0, hits: [] });
 		}
+		// And the mirror image: a baseline entry the current run no longer measures must not be dropped
+		// by silence. Switching `noExplicitAny` off, renaming a rule in a biome upgrade, or a changed
+		// --reporter=json shape all make 147 `any`s stop being gated while `--check` still exits 0.
+		for (const key of Object.keys(baseline.metrics ?? {})) {
+			if (!key.startsWith("biome.") || key in current.metrics) continue;
+			problems.push(
+				`${key}: baseline ${baseline.metrics[key]} is no longer measured - the rule was switched off, renamed, or biome stopped reporting it in the expected shape (a metric that is not measured is not gated)`,
+			);
+		}
 	}
 
 	for (const row of rows) {
@@ -446,24 +707,34 @@ function run({ mode, only, reason }) {
 		if (row.allowed === undefined) {
 			problems.push(`${row.key}: ${row.value} occurrences with no baseline entry - run \`npm run qa:baseline\``);
 		} else if (row.value > row.allowed) {
-			const detail = row.hits
-				.slice(0, 8)
-				.map((h) => `\n      ${h}`)
-				.join("");
-			const more = row.hits.length > 8 ? `\n      … and ${row.hits.length - 8} more` : "";
+			const shown = full ? row.hits : row.hits.slice(0, 8);
+			const detail = shown.map((h) => `\n      ${h}`).join("");
+			const more = row.hits.length > shown.length ? `\n      … and ${row.hits.length - shown.length} more (--full)` : "";
 			problems.push(`${row.key}: ${row.value} > baseline ${row.allowed} (was ${row.allowed}, now ${row.value})${detail}${more}`);
 		} else if (row.value < row.allowed) {
 			improvements.push(`${row.key}: ${row.allowed} -> ${row.value}`);
 		}
 	}
 
-	// Per-file line budget: only shrink, and a brand-new file is allowed at its current size.
+	// Per-file line budget: existing files may only shrink; a new file starts at the issue's absolute
+	// target, so the ratchet cannot be sidestepped by adding another 2,600-line module.
+	const filesOverBudget = [];
 	if (!only || only === "fileLineBudget") {
 		for (const [file, lines] of Object.entries(current.files)) {
 			const allowed = baseline.files?.[file];
-			if (allowed !== undefined && lines > allowed) {
-				problems.push(`${file}: ${lines} lines > baseline ${allowed} (files may only shrink)`);
-			}
+			// Growth of a file that already has an entry is a rise like any other: `--write` must not
+			// quietly re-capture it, or the budget follows the file instead of constraining it.
+			const problem =
+				allowed === undefined
+					? lines > defaultBudgetFor(file)
+						? `${file}: ${lines} lines, and a new file's budget is ${defaultBudgetFor(file)} (raise deliberately: --write --reason)`
+						: undefined
+					: lines > allowed
+						? `${file}: ${lines} lines > baseline ${allowed} (files may only shrink)`
+						: undefined;
+			if (!problem) continue;
+			problems.push(problem);
+			filesOverBudget.push(problem);
 		}
 	}
 
@@ -483,37 +754,39 @@ function run({ mode, only, reason }) {
 		}
 		// The first capture has nothing to compare against; after that, any rise needs a reason. A rule
 		// that appears later (because it was switched on) still counts as an increase.
-		const initialCapture = Object.keys(baseline.metrics ?? {}).length === 0;
+		const initialCapture = !fs.existsSync(BASELINE_PATH);
 		const increasing = initialCapture
 			? []
 			: [
 					...rows.filter((r) => r.allowed !== undefined && r.value > r.allowed),
 					...rows.filter((r) => r.allowed === undefined && r.value > 0),
 				];
-		if (increasing.length > 0 && !reason) {
+		const gated = [...increasing, ...filesOverBudget];
+		if (gated.length > 0 && !reason) {
 			fail([
-				`${increasing.length} metric(s) would rise. Lower them, or record the increase with a reason:`,
+				`${gated.length} metric(s) would rise. Lower them, or record the increase with a reason:`,
 				...increasing.map((r) => `  ${r.key}: ${r.allowed} -> ${r.value}`),
+				...filesOverBudget.map((m) => `  ${m}`),
 				`  node scripts/check-quality.mjs --write --reason "why this is acceptable"`,
 			]);
 		}
 		const next = {
 			...baseline,
-			generatedFrom: process.env.GIT_SHA ?? "unrecorded",
+			generatedFrom: headSha(),
 			metrics: { ...current.metrics },
 			files: { ...current.files },
 			notes: baseline.notes ?? [],
 		};
-		if (increasing.length > 0) {
+		if (gated.length > 0) {
 			next.notes.push({
 				at: new Date().toISOString().slice(0, 10),
 				reason,
-				changes: increasing.map((r) => `${r.key}: ${r.allowed} -> ${r.value}`),
+				changes: [...increasing.map((r) => `${r.key}: ${r.allowed} -> ${r.value}`), ...filesOverBudget],
 			});
 		}
 		writeBaseline(next);
 		console.log(
-			`\nwrote ${rel(BASELINE_PATH)} (${improvements.length} metric(s) lowered${increasing.length ? `, ${increasing.length} recorded with a reason` : ""}).`,
+			`\nwrote ${rel(BASELINE_PATH)} (${improvements.length} metric(s) lowered${gated.length ? `, ${gated.length} recorded with a reason` : ""}).`,
 		);
 		return;
 	}
@@ -542,7 +815,13 @@ const only = onlyIndex >= 0 ? argv[onlyIndex + 1] : undefined;
 const reasonIndex = argv.indexOf("--reason");
 const reason = reasonIndex >= 0 ? argv[reasonIndex + 1] : undefined;
 const mode = argv.includes("--write") ? "write" : "check";
+const full = argv.includes("--full");
 
-if (mode === "write" && reason && reason.trim() === "") fail(["--reason must not be empty"]);
+if (mode === "write" && reason !== undefined) {
+	if (reason.trim() === "") fail(["--reason must not be empty"]);
+	// `--write --reason --only wiredTests` would otherwise take "--only" for the reason text.
+	if (reason.startsWith("--")) fail([`--reason must be a sentence, not a flag (got '${reason}')`]);
+}
+if (only !== undefined && only.startsWith("--")) fail([`--only must name an invariant (see --list), got '${only}'`]);
 
-run({ mode, only, reason });
+run({ mode, only, reason, full });
