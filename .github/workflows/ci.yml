@@ -16,6 +16,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The gate that made 34 type errors possible to land: strict tsc over extensions/ plus the
+  # manifests. It runs first so a broken type fails before the slower Pi-runtime matrix.
+  quality:
+    name: Quality gates (typecheck, manifests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck extensions/
+        run: npm run typecheck
+
+      - name: Validate marketplace / plugin / Pi manifests
+        run: npm run validate
+
   # Fast checks that need nothing but Node: JSON manifests and the standalone
   # node:test suites (Node >= 23.6 runs TypeScript directly).
   manifests-and-unit-tests:
@@ -33,7 +55,7 @@ jobs:
         run: node scripts/validate-marketplace.mjs
 
       - name: Run unit tests
-        run: node --test test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts
+        run: npm run test:unit
 
   # Extension suites that run inside the Pi runtime. They use mock `gh`/Pi APIs
   # and `--offline`, so no model credentials are needed.

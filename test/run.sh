@@ -14,9 +14,9 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
-UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts"
+UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts"
 
-ALL_SUITES="manifest unit observe-pr branch-observer startup-notice observe-pr-resume pr-tasks tools"
+ALL_SUITES="typecheck manifest unit observe-pr branch-observer startup-notice observe-pr-resume pr-tasks tools"
 
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
@@ -24,6 +24,9 @@ usage() {
 
 run_suite() {
   case "$1" in
+    typecheck)
+      npm run typecheck
+      ;;
     manifest)
       node scripts/validate-marketplace.mjs
       ;;
