@@ -67,13 +67,12 @@ export default function (pi: any) {
 				ui: { notify: (m: string) => notifications.push(m) },
 				sessionManager: sm,
 				model: { provider: "anthropic", id: "claude-sonnet", contextWindow: 200_000 },
+				isIdle: () => true,
 				compact: (options?: { customInstructions?: string; onComplete?: () => void }) => {
 					compactOptions = options;
 				},
 			};
 
-			// The overflow recovery failure: the provider measured a context overflow
-			// even though the chars/4 estimate is far below the window threshold.
 			await handlers.session_compact_failed(
 				{
 					reason: "overflow",
@@ -85,6 +84,10 @@ export default function (pi: any) {
 				},
 				ctx,
 			);
+			// The recovery compaction is deferred (macrotask) so it can never run inside a
+			// previous compact()'s catch block.
+			assert(!compactOptions, "ctx.compact() must not be called synchronously inside the handler");
+			await new Promise((r) => setTimeout(r, 20)); // let the deferred compaction start
 
 			// The replacement lands as content blocks in the projection, so extract the
 			// text from both shapes before checking the marker.

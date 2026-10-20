@@ -171,6 +171,11 @@ test("resolveRecoverySettings: precedence is argument > flag > settings > defaul
 	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { enabled: false } } }).enabled, false);
 	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: {} } }).enabled, true);
 	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxResultChars: -5 } } }).maxResultChars, DEFAULTS.maxResultChars);
+	assert.strictEqual(resolveRecoverySettings({}).maxRecoveryRounds, DEFAULTS.maxRecoveryRounds);
+	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 3 } } }).maxRecoveryRounds, 3);
+	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 2.9 } } }).maxRecoveryRounds, 2, "fractional rounds floor to the lower integer");
+	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 0.5 } } }).maxRecoveryRounds, DEFAULTS.maxRecoveryRounds, "sub-1 fractional falls back");
+	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 0 } } }).maxRecoveryRounds, DEFAULTS.maxRecoveryRounds);
 });
 
 test("resolveReserveTokens follows the pi resolution order", () => {
@@ -281,6 +286,7 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 		ui: { notify: () => {} },
 		sessionManager: sm,
 		model: { provider: "anthropic", id: "claude-sonnet", contextWindow: 200_000 }, // target 184k; estimate ~113k
+		isIdle: () => true,
 		compact: (options?: { customInstructions?: string; onComplete?: () => void }) => {
 			compactCallCount++;
 			compactInstructions = options?.customInstructions;
@@ -298,6 +304,11 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 		},
 		ctx,
 	);
+	// The recovery compaction is deferred (macrotask) so it can never run inside a
+	// previous compact()'s catch block: right after the handler returns it must not
+	// have started yet.
+	assert.strictEqual(compactCallCount, 0, "ctx.compact() must not be called synchronously inside the handler");
+	await new Promise((r) => setTimeout(r, 20)); // let the deferred compaction start
 
 	const projection = sm.buildSessionProjection();
 	const placeholders = projection.messages.filter(
@@ -317,12 +328,144 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 		{ reason: "manual", errorMessage: "Compaction failed: Summarization failed: generation hit the token cap", aborted: false },
 		ctx,
 	);
+	await new Promise((r) => setTimeout(r, 20)); // flush (there must be nothing scheduled)
 	const projection2 = sm.buildSessionProjection();
 	const placeholders2 = projection2.messages.filter(
 		(m) => (m as { role?: string }).role === "toolResult" && isCompressedContent((m as { content: unknown }).content),
 	);
 	assert.strictEqual(placeholders2.length, 3, "no further candidates; the last 5 stay intact");
 	assert.strictEqual(compactCallCount, 1, "a second failure must not re-trigger compaction in a loop");
+});
+
+test("recovery rounds cap: the loop stops with guidance once maxRecoveryRounds is reached", async () => {
+	const sm = SessionManager.inMemory("/tmp");
+	sm.newSession();
+	sm.appendMessage({ role: "user", content: "task" } as never);
+	const addResult = () =>
+		sm.appendMessage({
+			role: "toolResult",
+			toolCallId: `call_${Date.now()}_${Math.random()}`,
+			toolName: "bash",
+			content: [{ type: "text", text: "x\n".repeat(2_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		} as never);
+	for (let i = 0; i < 7; i++) addResult(); // 7 results, keep 5 -> 2 candidates per round
+
+	type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
+	const handlers = new Map<string, Handler>();
+	let compactCallCount = 0;
+	const notifications: string[] = [];
+	const extension = (await import("../extensions/compaction-fail-recovery.ts")).default;
+	extension({
+		registerTool: () => {},
+		registerFlag: () => {},
+		registerCommand: () => {},
+		on: (event: string, handler: Handler) => {
+			handlers.set(event, handler);
+		},
+		getSettings: () => ({ compactionRecovery: { maxRecoveryRounds: 2 } }),
+		getFlag: () => undefined,
+		sendUserMessage: () => {},
+	} as never);
+	const ctx = {
+		ui: { notify: (m: string) => notifications.push(m) },
+		sessionManager: sm,
+		model: { provider: "anthropic", id: "claude", contextWindow: 200_000 },
+		isIdle: () => true,
+		compact: () => compactCallCount++,
+	} as never;
+	const fail = (reason: "manual" | "overflow") =>
+		handlers.get("session_compact_failed")?.(
+			reason === "overflow"
+				? { reason, errorMessage: "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete", aborted: false }
+				: { reason, errorMessage: "Compaction failed: Summarization failed: generation hit the token cap", aborted: false },
+			ctx,
+		);
+	const flush = () => new Promise((r) => setTimeout(r, 20));
+
+	// Round 1: overflow - compresses the 2 candidates.
+	await fail("overflow");
+	await flush();
+	assert.strictEqual(compactCallCount, 1, "round 1 schedules a recovery compaction");
+
+	// The user keeps working: a new tool result is a new candidate.
+	addResult();
+
+	// Round 2: the re-run compaction hit the cap - compresses the new candidate.
+	await fail("manual");
+	await flush();
+	assert.strictEqual(compactCallCount, 2, "round 2 schedules a recovery compaction");
+
+	// Another new candidate, then the next failure: the cap is hit.
+	addResult();
+	await fail("manual");
+	await flush();
+	assert.strictEqual(compactCallCount, 2, "round 3 must not schedule another compaction (cap)");
+	assert.ok(notifications.some((n) => n.includes("recovery rounds are exhausted")), "the user must be told the rounds are exhausted");
+	assert.ok(notifications.some((n) => n.includes("reserveTokens")), "the guidance must name the fix");
+});
+
+test("prompt resend is skipped when the session is no longer idle", async () => {
+	const sm = SessionManager.inMemory("/tmp");
+	sm.newSession();
+	sm.appendMessage({ role: "user", content: "do the big task" } as never);
+	for (let i = 0; i < 6; i++) {
+		sm.appendMessage({
+			role: "toolResult",
+			toolCallId: `call_${i}`,
+			toolName: "bash",
+			content: [{ type: "text", text: `output line ${i}\n`.repeat(3_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		} as never);
+	}
+	type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
+	const handlers = new Map<string, Handler>();
+	let onComplete: (() => void) | undefined;
+	let idle = true;
+	const resent: string[] = [];
+	const extension = (await import("../extensions/compaction-fail-recovery.ts")).default;
+	extension({
+		registerTool: () => {},
+		registerFlag: () => {},
+		registerCommand: () => {},
+		on: (event: string, handler: Handler) => {
+			handlers.set(event, handler);
+		},
+		getSettings: () => ({}),
+		getFlag: () => undefined,
+		sendUserMessage: (text: string) => {
+			resent.push(text);
+		},
+	} as never);
+	const ctx = {
+		ui: { notify: () => {} },
+		sessionManager: sm,
+		model: { provider: "anthropic", id: "claude", contextWindow: 200_000 },
+		isIdle: () => idle,
+		compact: (options?: { onComplete?: () => void }) => {
+			onComplete = options?.onComplete;
+		},
+	} as never;
+
+	await handlers.get("session_compact_failed")?.(
+		{ reason: "overflow", errorMessage: "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete", aborted: false },
+		ctx,
+	);
+	await new Promise((r) => setTimeout(r, 20));
+	assert.ok(onComplete);
+
+	// The user already started a new run while the recovery compaction ran:
+	// the completion must not resend (it would abort that run / duplicate the prompt).
+	idle = false;
+	onComplete?.();
+	assert.deepStrictEqual(resent, [], "no resend while the session is busy");
+
+	// While idle again, a completion resends normally.
+	idle = true;
+	onComplete?.();
+	assert.deepStrictEqual(resent, ["do the big task"]);
 });
 
 test("session manager round trip: context edit compresses, raw entry keeps the original", async () => {
