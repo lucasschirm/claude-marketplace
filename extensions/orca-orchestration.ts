@@ -1038,7 +1038,7 @@ function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 			);
 
 			return {
-				details: toolDetails("orca_orchestration_observe", { result: "status", action, observing: stats.isEnabled, ...capList(stats.workers.map((w) => w.dispatchId)) }),
+				details: toolDetails("orca_orchestration_observe", { result: "status", action, observing: stats.isEnabled, ...capList("dispatchIds", stats.workers.map((w) => w.dispatchId)) }),
 				content: [
 					{
 						type: "text",
@@ -1259,7 +1259,7 @@ function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 			const objectiveStr = typeof stats.objective === "string" ? stats.objective : stats.objective ? JSON.stringify(stats.objective) : "N/A";
 
 			return {
-				details: toolDetails("orca_orchestration_status", { result: "overview", activeRunId: stats.activeRunId ?? null, counts: { running: stats.runningCount, succeeded: stats.succeededCount, failed: stats.failedCount, released: stats.releasedCount }, ...capList(stats.workers.map((w) => w.dispatchId)) }),
+				details: toolDetails("orca_orchestration_status", { result: "overview", activeRunId: stats.activeRunId ?? null, counts: { running: stats.runningCount, succeeded: stats.succeededCount, failed: stats.failedCount, released: stats.releasedCount }, ...capList("dispatchIds", stats.workers.map((w) => w.dispatchId)) }),
 				content: [
 					{
 						type: "text",

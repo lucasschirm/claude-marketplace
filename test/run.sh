@@ -14,7 +14,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
-UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts"
+UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts"
 
 ALL_SUITES="typecheck manifest unit observe-pr branch-observer startup-notice observe-pr-resume pr-tasks tools"
 
@@ -25,6 +25,12 @@ usage() {
 run_suite() {
   case "$1" in
     typecheck)
+      # The gate needs the type sources (typescript + the pinned pi packages); CI installs them in
+      # the quality job. Fail with the reason instead of a bare 'tsc: not found'.
+      if [ ! -x node_modules/.bin/tsc ]; then
+        echo "typescript is not installed - run 'npm install' first (it is a devDependency)" >&2
+        exit 1
+      fi
       npm run typecheck
       ;;
     manifest)

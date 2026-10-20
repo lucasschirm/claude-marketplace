@@ -1485,7 +1485,7 @@ export default function (pi: ExtensionAPI) {
 						prNumber,
 						action: "start",
 						result: "pending_announcement_taken_over",
-						...capList(Array.from(observedPRs.keys()).map(String)),
+						...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
 					},
 				);
 			}
@@ -1589,7 +1589,7 @@ export default function (pi: ExtensionAPI) {
 					result: "observing",
 					state,
 					isDraft,
-					...capList(Array.from(observedPRs.keys()).map(String)),
+					...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
 				},
 			);
 		},

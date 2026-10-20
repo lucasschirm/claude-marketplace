@@ -10,9 +10,13 @@ export type ToolDetails = Record<string, unknown>;
 /** Cap for id lists in `details`, so a large task/worker set cannot bloat the session file. */
 export const DETAILS_LIST_CAP = 50;
 
-/** Truncates an id list and reports it, so a reader can tell a cap from an empty set. */
-export function capList(ids: string[]): { items: string[]; truncated: boolean } {
-	return { items: ids.slice(0, DETAILS_LIST_CAP), truncated: ids.length > DETAILS_LIST_CAP };
+/**
+ * Adds a capped id list to a `details` object under a name the caller chooses (`taskIds`,
+ * `dispatchIds`, ...), plus `<key>Truncated`, so a reader can tell a cap from an empty set and never
+ * has to guess what a generic `items` array referred to.
+ */
+export function capList(key: string, ids: string[]): Record<string, unknown> {
+	return { [key]: ids.slice(0, DETAILS_LIST_CAP), [`${key}Truncated`]: ids.length > DETAILS_LIST_CAP };
 }
 
 /**

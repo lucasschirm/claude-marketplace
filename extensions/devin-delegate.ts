@@ -2365,7 +2365,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					}
 				}
 				return {
-					details: toolDetails("devin_clean_worktree", { result: "pruned", ...capList(cleaned), skipped: skipped.length }),
+					details: toolDetails("devin_clean_worktree", { result: "pruned", ...capList("cleanedSessionIds", cleaned), skipped: skipped.length }),
 					content: [{ type: "text", text: lines.join("\n") }],
 				};
 			}
