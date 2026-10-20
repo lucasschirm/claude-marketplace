@@ -1,3 +1,4 @@
 .DS_Store
 test/.fake-devin-bin/
 test/.final-msg.mjs
+node_modules/

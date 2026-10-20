@@ -4,6 +4,8 @@ import { Type } from "typebox";
 import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
+import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
+import { evaluateCiVerdict } from "./lib/ci-verdict.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
@@ -109,6 +111,13 @@ class PRObserverDashboardComponent {
 			this.onClose();
 		}
 	}
+
+	/**
+	 * Required by pi-tui's `Component` (called when the theme changes or the overlay needs a full
+	 * redraw). This dashboard derives every line from live state on each render() and caches nothing,
+	 * so there is nothing to drop - implementing it is what keeps `ctx.ui.custom()` from throwing.
+	 */
+	invalidate(): void {}
 
 	render(width: number): string[] {
 		const lines: string[] = [];
@@ -514,83 +523,65 @@ export default function (pi: ExtensionAPI) {
 		if (pr.allPassedReported) return;
 		if (!ghHealth.acquireSlot()) return;
 
-		let stdout: string | undefined;
+		// The verdict is decided by evaluateCiVerdict(), which never answers "passed" for a failed
+		// `gh pr checks` call or an unusable payload. Both of those branches used to announce
+		// "All CI passed" as long as one run had completed and none had failed — the most expensive
+		// false green an agent can be handed. A non-pass verdict just waits for the next slot, and
+		// allPassedReported stays false until there is a real pass.
+		let checks: unknown;
 		let ghErr: unknown;
+		// `stale` is read only by the finally below: a stale call still releases the slot, but it
+		// must not touch ghHealth (it never saw the response) or announce anything.
+		let stale = false;
+		// acquireSlot() to release() must be exception-safe: the singleton counts a missed release
+		// as a permanently busy slot, so from then on no timer anywhere can claim a retry again.
+		// That includes JSON.parse, so it happens inside the guarded block.
 		try {
 			const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
 				cwd: pr.cwd,
 				timeout: GH_TIMEOUT_MS,
 			});
-			stdout = res.stdout;
+			// A stop or a resume-restore during the gh await must not let this stale call
+			// deliver "All CI passed" through the replacement entry's turn.
+			if (observedPRs.get(prNumber) !== pr) {
+				stale = true;
+				return;
+			}
+			checks = JSON.parse(res.stdout);
 		} catch (err) {
 			ghErr = err;
-		}
-		// A stop or a resume-restore during the gh await must not let this stale call
-		// deliver "All CI passed" through the replacement entry's turn.
-		if (observedPRs.get(prNumber) !== pr) {
-			ghHealth.release();
-			return;
-		}
-		try {
-			if (stdout !== undefined) {
-				const checks = JSON.parse(stdout);
-				if (Array.isArray(checks) && checks.length > 0) {
-					const hasPending = checks.some(
-						(c: any) =>
-							c.bucket === "pending" ||
-							["PENDING", "IN_PROGRESS", "QUEUED"].includes(String(c.state || c.status || "").toUpperCase()),
-					);
-					const hasFailed = checks.some(
-						(c: any) =>
-							["fail", "cancel"].includes(c.bucket) ||
-							["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(
-								String(c.state || c.conclusion || "").toUpperCase(),
-							),
-					);
-					const hasPassed = checks.every(
-						(c: any) =>
-							["pass", "skipping"].includes(c.bucket) ||
-							["SUCCESS", "SKIPPED", "NEUTRAL"].includes(String(c.state || c.conclusion || "").toUpperCase()),
-					);
-
-					if (!hasPending && !hasFailed && hasPassed) {
-						pr.allPassedReported = true;
-						sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-					}
-				} else if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
-					pr.allPassedReported = true;
-					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-					persistState();
-				}
-			} else if (ghErr !== undefined && !isGhAvailabilityError(ghErr)) {
-				// A non-GitHub gh failure: the run bookkeeping fallback is still meaningful
-				if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
-					pr.allPassedReported = true;
-					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-					persistState();
-				}
-				logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
+		} finally {
+			if (!stale) {
+				if (ghErr === undefined) ghHealth.recordSuccess();
+				else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
 			}
-			// A GitHub-availability failure is silent: no verdict, no message — the
-			// backoff retry re-checks the state.
-		} catch (err) {
-			// A stop or a resume-restore during the gh await must not let a stale call
-			// persist through the replacement entry.
-			if (observedPRs.get(prNumber) !== pr) return;
-			// Malformed gh output: the run bookkeeping fallback is still meaningful
-			if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
+			ghHealth.release();
+		}
+
+		try {
+			if (ghErr !== undefined) {
+				// A failed call carries no verdict at all. GitHub-availability failures stay silent
+				// (the shared backoff re-checks); any other gh failure is logged, never reported as
+				// a pass, and malformed output is treated the same way.
+				if (!isGhAvailabilityError(ghErr)) logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
+			} else if (
+				evaluateCiVerdict({
+					checks,
+					ghFailed: false,
+					// only consulted for an empty check list, where it is the remaining evidence
+					bookkeeping: { completed: pr.completedRuns.size, failed: pr.failedRuns.size },
+				}) === "passed"
+			) {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+				// Persisted so a session restart does not announce the same pass again.
 				persistState();
 			}
-			logInternal(`Error checking CI status for PR ${prNumber}`, err);
-		} finally {
-			if (ghErr === undefined) ghHealth.recordSuccess();
-			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
-			ghHealth.release();
+		} catch (err) {
+			// A throwing verdict/notify path must not escape with the slot held either.
+			logInternal(`Error evaluating CI status for PR ${prNumber}`, err);
 		}
 	}
-
 	// A run whose watcher died on a GitHub-availability error is re-watched on the next
 	// backoff slot (one timer per run, spaced by the shared health state).
 	function scheduleRewatch(prNumber: number, runId: string, cwd: string) {
@@ -1476,9 +1467,11 @@ export default function (pi: ExtensionAPI) {
 			const prNumber = parseInt(cleanStr, 10);
 
 			if (isNaN(prNumber) || prNumber <= 0) {
-				return {
-					content: [{ type: "text", text: `Invalid PR number: ${rawPr}` }],
-				};
+				return ok(`Invalid PR number: ${rawPr}`, {
+					tool: "observe_pr",
+					requested: String(rawPr ?? ""),
+					result: "invalid_pr_number",
+				});
 			}
 
 			// If the PR was auto-detected and its notice is still pending delivery (delayed timer,
@@ -1501,14 +1494,16 @@ export default function (pi: ExtensionAPI) {
 					pr.announced = true;
 				}
 				persistState();
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
-						},
-					],
-				};
+				return ok(
+					`Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
+					{
+						tool: "observe_pr",
+						prNumber,
+						action: "start",
+						result: "pending_announcement_taken_over",
+						...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
+					},
+				);
 			}
 
 			// If the agent calls the same tool for the same PR, stop observing
@@ -1516,14 +1511,12 @@ export default function (pi: ExtensionAPI) {
 				stopObserving(prNumber);
 				// (a stopped observation cancels its pending auto-start too)
 				pendingAutoStart.delete(prNumber);
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Stoping observing the PR ${prNumber}. You will no longer receive updates about the CI on this PR.`,
-						},
-					],
-				};
+				return ok(`Stoping observing the PR ${prNumber}. You will no longer receive updates about the CI on this PR.`, {
+					tool: "observe_pr",
+					prNumber,
+					action: "stop",
+					...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
+				});
 			}
 
 			// Check PR state and draft status using gh
@@ -1542,23 +1535,26 @@ export default function (pi: ExtensionAPI) {
 				if (isGhAuthError(err)) {
 					ghHealth.recordFailure();
 					const authStderr = err?.stderr || err?.message || "";
-					return {
-						content: [{ type: "text", text: `Error inspecting PR ${prNumber}: ${authStderr}` }],
-					};
+					return ok(`Error inspecting PR ${prNumber}: ${authStderr}`, {
+						tool: "observe_pr",
+						prNumber,
+						result: "gh_auth_error",
+					});
 				}
 				// A GitHub-availability failure is not reported as an error: the
 				// observation starts automatically on the first successful retry.
 				if (isGhAvailabilityError(err)) {
 					ghHealth.recordFailure();
 					pendingAutoStart.set(prNumber, { cwd: ctx.cwd });
-					return {
-						content: [
-							{
-								type: "text",
-								text: `GitHub is temporarily unreachable, so PR ${prNumber} could not be inspected. Observation will start automatically once the connection recovers.`,
-							},
-						],
-					};
+					return ok(
+						`GitHub is temporarily unreachable, so PR ${prNumber} could not be inspected. Observation will start automatically once the connection recovers.`,
+						{
+							tool: "observe_pr",
+							prNumber,
+							result: "github_unreachable",
+							autoStartPending: true,
+						},
+					);
 				}
 				const stderr = err?.stderr || err?.message || "";
 				if (
@@ -1567,13 +1563,18 @@ export default function (pi: ExtensionAPI) {
 					stderr.includes("no pull requests") ||
 					stderr.includes("404")
 				) {
-					return {
-						content: [{ type: "text", text: `PR ${prNumber} don't exist. Not possible to observe` }],
-					};
+					return ok(`PR ${prNumber} don't exist. Not possible to observe`, {
+						tool: "observe_pr",
+						prNumber,
+						result: "pr_not_found",
+					});
 				}
-				return {
-					content: [{ type: "text", text: `Error inspecting PR ${prNumber}: ${stderr}` }],
-				};
+				return ok(`Error inspecting PR ${prNumber}: ${stderr}`, {
+					tool: "observe_pr",
+					prNumber,
+					result: "gh_failed",
+					ghError: stderr.slice(0, 500),
+				});
 			}
 
 			const state = String(prData.state || "").toUpperCase();
@@ -1581,14 +1582,13 @@ export default function (pi: ExtensionAPI) {
 
 			if (state !== "OPEN" || isDraft) {
 				const reason = isDraft ? "is a draft" : `is not open (state: ${state.toLowerCase()})`;
-				return {
-					content: [
-						{
-							type: "text",
-							text: `PR ${prNumber} ${reason}. Only open and non-draft PRs can be observed.`,
-						},
-					],
-				};
+				return ok(`PR ${prNumber} ${reason}. Only open and non-draft PRs can be observed.`, {
+					tool: "observe_pr",
+					prNumber,
+					result: "not_observable",
+					state,
+					isDraft,
+				});
 			}
 
 			startObserving(prNumber, prData.comments || [], ctx.cwd, ctx.ui, { explicit: true });
@@ -1596,14 +1596,18 @@ export default function (pi: ExtensionAPI) {
 			// auto-start, if any, must not start it a second time on the next slot)
 			pendingAutoStart.delete(prNumber);
 
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
-					},
-				],
-			};
+			return ok(
+				`Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
+				{
+					tool: "observe_pr",
+					prNumber,
+					action: "start",
+					result: "observing",
+					state,
+					isDraft,
+					...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
+				},
+			);
 		},
 	});
 
@@ -1710,15 +1714,18 @@ export default function (pi: ExtensionAPI) {
 					}
 					const { stdout, stderr } = await execFileAsync("requestdb", args, { cwd: ctx.cwd });
 					const output = (stdout || stderr || "").trim();
-					return {
-						content: [{ type: "text", text: output || "Database credentials generated successfully." }],
-					};
-				} catch (err: any) {
-					const errorMsg = (err?.stdout || "") + "\n" + (err?.stderr || err?.message || String(err));
-					return {
-						content: [{ type: "text", text: `Error running requestdb:\n${errorMsg.trim()}` }],
-						isError: true,
-					};
+					// The text carries DB_PASSWORD, so it stays out of details (details reach the session file and the UI).
+					return ok(output || "Database credentials generated successfully.", {
+						tool: "requestdb",
+						fresh: Boolean(params?.new),
+						keys: parseEnvKeys(output),
+					});
+				} catch (cause: any) {
+					const errorMsg = (cause?.stdout || "") + "\n" + (cause?.stderr || cause?.message || String(cause));
+					return err(`Error running requestdb:\n${errorMsg.trim()}`, "REQUESTDB_FAILED", {
+						tool: "requestdb",
+						fresh: Boolean(params?.new),
+					});
 				}
 			},
 		});
@@ -1753,15 +1760,18 @@ export default function (pi: ExtensionAPI) {
 					}
 					const { stdout, stderr } = await execFileAsync("destroydb", args, { cwd: ctx.cwd });
 					const output = (stdout || stderr || "").trim();
-					return {
-						content: [{ type: "text", text: output || "Database destroyed successfully." }],
-					};
-				} catch (err: any) {
-					const errorMsg = (err?.stdout || "") + "\n" + (err?.stderr || err?.message || String(err));
-					return {
-						content: [{ type: "text", text: `Error running destroydb:\n${errorMsg.trim()}` }],
-						isError: true,
-					};
+					return ok(output || "Database destroyed successfully.", {
+						tool: "destroydb",
+						scope: params?.all ? "all" : "folder",
+						folder: params?.folder ?? ctx.cwd,
+					});
+				} catch (cause: any) {
+					const errorMsg = (cause?.stdout || "") + "\n" + (cause?.stderr || cause?.message || String(cause));
+					return err(`Error running destroydb:\n${errorMsg.trim()}`, "DESTROYDB_FAILED", {
+						tool: "destroydb",
+						scope: params?.all ? "all" : "folder",
+						folder: params?.folder ?? ctx.cwd,
+					});
 				}
 			},
 		});

@@ -727,6 +727,15 @@ function rootAuthor(node: GitHubReviewThreadNode): string {
 }
 
 /**
+ * Task counts per status (always all four keys, so a reader can tell zero from missing).
+ */
+export function countTasksByStatus(tasks: PRTask[]): Record<TaskStatus, number> {
+	const counts: Record<TaskStatus, number> = { UNRESOLVED: 0, BLOCKED: 0, RESOLVED: 0, STALE: 0 };
+	for (const task of tasks) counts[task.status]++;
+	return counts;
+}
+
+/**
  * Format task location string: e.g. path/to/file.ts@10-15 or path/to/file.ts@10
  */
 export function formatTaskFileLocation(task: PRTask): string {

@@ -16,8 +16,10 @@ import {
 	type GitHubCommentNode,
 } from "./lib/github-review-threads.ts";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
+import { ok, err, capList } from "./lib/tool-result.ts";
 import {
 	PRTasksManager,
+	countTasksByStatus,
 	formatTaskSummary,
 	formatTaskDetail,
 	formatLoopMessage,
@@ -51,6 +53,13 @@ class PRTasksDashboardComponent {
 			this.onClose();
 		}
 	}
+
+	/**
+	 * Required by pi-tui's `Component` (called when the theme changes or the overlay needs a full
+	 * redraw). This dashboard derives every line from live state on each render() and caches nothing,
+	 * so there is nothing to drop - implementing it is what keeps `ctx.ui.custom()` from throwing.
+	 */
+	invalidate(): void {}
 
 	render(width: number): string[] {
 		const lines: string[] = [];
@@ -621,8 +630,17 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				// (captured as checked: a sync while the edit waits may change the task)
-				const { suggestion, file, line } = task;
+				const { file, line } = task;
 				const startLine = task.startLine || line;
+				// Re-read here on purpose: the guard above narrowed `task.suggestion`, and the awaits
+				// between the two points reset that narrowing (a sync can also have dropped it).
+				const suggestion = task.suggestion;
+				if (suggestion === undefined) {
+					return {
+						kind: "error",
+						text: `Conversation ${task.conversationId} no longer carries a code suggestion; nothing was applied.`,
+					};
+				}
 				try {
 					// One edit at a time: two suggestions for the same file must not overwrite each other
 					const edit = suggestionEdits.then(() => applyCodeSuggestion(file, startLine, line, suggestion, cwd));
@@ -706,18 +724,16 @@ export default function (pi: ExtensionAPI) {
 
 	// (degraded: a not-tracked conversation can't be fetched — say so instead of "not found",
 	// so a transient outage is not mistaken for a missing conversation)
-	function notFoundResult(rawId: string | number): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+	function notFoundResult(rawId: string | number, tool: string) {
+		const details = { tool, conversationId: String(rawId) };
 		if (ghHealth.status === "degraded") {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Conversation ${rawId} is not tracked and GitHub is temporarily unreachable, so it could not be fetched (the extension is retrying in the background); try again later.`,
-					},
-				],
-			};
+			// Not an error: the task may exist, GitHub just cannot be reached right now.
+			return ok(
+				`Conversation ${rawId} is not tracked and GitHub is temporarily unreachable, so it could not be fetched (the extension is retrying in the background); try again later.`,
+				{ ...details, result: "unreachable_untracked", degraded: true },
+			);
 		}
-		return { content: [{ type: "text", text: `Error: Conversation ${rawId} not found.` }], isError: true };
+		return err(`Error: Conversation ${rawId} not found.`, "NOT_FOUND", { ...details, result: "not_found" });
 	}
 
 	async function syncAllPRs(cwd: string, explicitPr?: number, { fresh = false } = {}): Promise<void> {
@@ -915,13 +931,20 @@ export default function (pi: ExtensionAPI) {
 			const formatted = formatTaskSummary(filteredTasks, allTasks.length);
 			for (const t of filteredTasks) manager.markShown(t);
 			// (degraded: the list could not be refreshed — the cached state is valid but may be stale)
-			const staleNote =
-				ghHealth.status === "degraded"
-					? "\n(GitHub is temporarily unreachable, so this list could not be refreshed; the extension is retrying in the background.)"
-					: "";
-			return {
-				content: [{ type: "text", text: formatted + staleNote }],
-			};
+			const degraded = ghHealth.status === "degraded";
+			const staleNote = degraded
+				? "\n(GitHub is temporarily unreachable, so this list could not be refreshed; the extension is retrying in the background.)"
+				: "";
+			return ok(formatted + staleNote, {
+				tool: "pr_tasks_list",
+				prNumber: prNum ?? null,
+				showAll,
+				counts: countTasksByStatus(allTasks),
+				returned: filteredTasks.length,
+				total: allTasks.length,
+				degraded,
+				...capList("taskIds", filteredTasks.map((t) => t.conversationId)),
+			});
 		},
 	});
 
@@ -956,36 +979,41 @@ export default function (pi: ExtensionAPI) {
 				(params as any)?.accept_suggestion ?? (params as any)?.acceptSuggestion,
 			);
 
+			// A blank message stays rejected: GitHub needs a body for the reply. The details say
+			// which half is missing, so "you sent nothing" is never reported for an empty string.
 			if (!rawId || !message) {
-				return {
-					content: [{ type: "text", text: "Error: conversation_id and message are required." }],
-					isError: true,
-				};
+				return err("Error: conversation_id and message are required.", "MISSING_PARAMS", {
+					tool: "pr_task_resolve",
+					conversationId: rawId ? String(rawId) : null,
+					messageProvided: message.length > 0,
+				});
 			}
 
 			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
-				return notFoundResult(rawId);
+				return notFoundResult(rawId, "pr_task_resolve");
 			}
+
+			const taskDetails = {
+				tool: "pr_task_resolve",
+				conversationId: task.conversationId,
+				prNumber: task.prNumber,
+				file: task.file,
+				acceptSuggestion,
+			};
 
 			try {
 				const result = await resolveTask(task, message, ctx.cwd, { acceptSuggestion });
 				updateStatusUI(ctx.ui);
-				return {
-					content: [{ type: "text", text: result.text }],
-					...(result.kind === "error" ? { isError: true } : {}),
-				};
-			} catch (err: any) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error resolving conversation ${task.conversationId}: ${mutationErrorText(err)}`,
-						},
-					],
-					isError: true,
-				};
+				const details = { ...taskDetails, kind: result.kind, status: task.status };
+				return result.kind === "error" ? err(result.text, "RESOLVE_FAILED", details) : ok(result.text, details);
+			} catch (cause: any) {
+				return err(
+					`Error resolving conversation ${task.conversationId}: ${mutationErrorText(cause)}`,
+					mutationErrorCode(cause),
+					{ ...taskDetails, status: task.status },
+				);
 			}
 		},
 	});
@@ -995,6 +1023,11 @@ export default function (pi: ExtensionAPI) {
 	 * concisely (no raw stderr — the background retry covers the reconnect); anything else
 	 * keeps the detailed gh error.
 	 */
+	/** The machine-readable twin of mutationErrorText(): unreachable is a different retry story. */
+	function mutationErrorCode(err: unknown): string {
+		return isGhAvailabilityError(err) ? "GH_UNREACHABLE" : "GH_FAILED";
+	}
+
 	function mutationErrorText(err: unknown): string {
 		if (isGhAvailabilityError(err)) {
 			return "GitHub is temporarily unreachable (the extension is retrying in the background); try again later";
@@ -1021,14 +1054,22 @@ export default function (pi: ExtensionAPI) {
 			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
-				return notFoundResult(rawId);
+				return notFoundResult(rawId, "pr_task_detail");
 			}
 
 			const formatted = formatTaskDetail(task);
 			manager.markShown(task, task.replies);
-			return {
-				content: [{ type: "text", text: formatted }],
-			};
+			return ok(formatted, {
+				tool: "pr_task_detail",
+				conversationId: task.conversationId,
+				prNumber: task.prNumber,
+				file: task.file,
+				status: task.status,
+				replies: task.replies?.length ?? 0,
+				hasSuggestion: Boolean(task.suggestion),
+				isOutdated: task.isOutdated,
+				isResolvedUpstream: task.isResolvedUpstream,
+			});
 		},
 	});
 
@@ -1055,22 +1096,24 @@ export default function (pi: ExtensionAPI) {
 			const reason = String((params as any)?.reason || "").trim();
 
 			if (!rawId || !reason) {
-				return {
-					content: [{ type: "text", text: "Error: conversation_id and reason are required." }],
-					isError: true,
-				};
+				return err("Error: conversation_id and reason are required.", "MISSING_PARAMS", {
+					tool: "pr_task_blocked",
+					conversationId: rawId ? String(rawId) : null,
+					hasReason: Boolean(reason),
+				});
 			}
 
 			const task = await findTaskSyncing(rawId, ctx.cwd);
 
 			if (!task) {
-				return notFoundResult(rawId);
+				return notFoundResult(rawId, "pr_task_blocked");
 			}
 
-			const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+			const text = (t: string, extra: Record<string, unknown> = {}) =>
+				ok(t, { tool: "pr_task_blocked", conversationId: task.conversationId, prNumber: task.prNumber, ...extra });
 			const upstreamResult = (state: UpstreamState, note: string) => {
 				updateStatusUI(ctx.ui);
-				return text(describeUpstreamState(task, state, note));
+				return text(describeUpstreamState(task, state, note), { upstreamState: state, posted: false });
 			};
 
 			try {
@@ -1081,7 +1124,13 @@ export default function (pi: ExtensionAPI) {
 
 					// Those replies may already answer the question: show them instead of blocking
 					const unseen = showUnseenReplies(task, "blocked", "pr_task_blocked", "answer your question");
-					if (unseen) return { ...text(unseen), isError: true };
+					if (unseen)
+						return err(unseen, "UNSEEN_USER_REPLIES", {
+							tool: "pr_task_blocked",
+							conversationId: task.conversationId,
+							prNumber: task.prNumber,
+							posted: false,
+						});
 
 					const outcome = await replyToTaskThread(task, reason, folder);
 					if (outcome.kind !== "replied") return upstreamResult(outcome.kind, "The blocked reason was not posted.");
@@ -1094,18 +1143,15 @@ export default function (pi: ExtensionAPI) {
 					updateStatusUI(ctx.ui);
 					return text(
 						`Conversation ${task.conversationId} is now marked as Blocked. When a user replies to this conversation, it will be automatically unblocked.`,
+						{ status: task.status, posted: true },
 					);
 				});
-			} catch (err: any) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Error marking conversation ${task.conversationId} as blocked: ${mutationErrorText(err)}`,
-						},
-					],
-					isError: true,
-				};
+			} catch (cause: any) {
+				return err(
+					`Error marking conversation ${task.conversationId} as blocked: ${mutationErrorText(cause)}`,
+					mutationErrorCode(cause),
+					{ tool: "pr_task_blocked", conversationId: task.conversationId, prNumber: task.prNumber, posted: false },
+				);
 			}
 		},
 	});

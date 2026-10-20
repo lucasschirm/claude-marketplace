@@ -407,17 +407,79 @@ export function extractCodeSuggestion(body: string): { hasSuggestion: boolean; s
 }
 
 /**
+ * True when `target` is inside `root` (never equal to it). `path.relative` rather than
+ * `startsWith`, so `/repo-evil/x` is not mistaken for a path inside `/repo`.
+ *
+ * POSIX-only in practice: Windows drive-relative forms (`C:foo`, `C:..`) are not
+ * special-cased. resolveRepoFilePath rejects every absolute path first, and CI runs on
+ * Linux - adding drive-letter rules with no Windows job to execute them would ship
+ * untested behaviour.
+ */
+export function isInsideDir(root: string, target: string): boolean {
+	const rel = path.relative(path.resolve(root), path.resolve(target));
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
+ * Resolves a GitHub-reported file path against the repository root and refuses anything that does not
+ * land inside it. This edits the working tree, so containment is checked before any I/O: a suggestion
+ * payload is external input, and an absolute path or `../../` segments used to reach the filesystem
+ * straight through.
+ */
+export async function resolveRepoFilePath(repoRootDir: string, filePath: string): Promise<string> {
+	if (!filePath) throw new Error("suggestion path is empty");
+	if (filePath.includes("\0")) throw new Error("suggestion path contains a NUL byte");
+	if (path.isAbsolute(filePath)) {
+		throw new Error(`suggestion path '${filePath}' must be repository-relative`);
+	}
+	const root = path.resolve(repoRootDir);
+	const absolute = path.resolve(root, filePath);
+	if (!isInsideDir(root, absolute)) {
+		throw new Error(`suggestion path '${filePath}' resolves outside the repository (${root})`);
+	}
+	const relativeSegments = absolute.slice(root.length + 1).split(path.sep);
+	if (relativeSegments.some((segment) => segment.toLowerCase() === ".git")) {
+		// Unreachable from the GitHub API, which never suggests .git paths - but a write into
+		// hooks/ or config is a code-execution primitive, not just a bad edit. Every segment, and
+		// case-insensitively: on a case-insensitive filesystem `.GIT` resolves into the real .git,
+		// and the realpath re-check below does not re-apply this rule.
+		throw new Error(`suggestion path '${filePath}' targets the git directory`);
+	}
+	return absolute;
+}
+
+/**
  * Applies a code suggestion to the local workspace file.
+ *
+ * `startLine`/`endLine` arrive from the GraphQL API, where a comment on a deleted line has no line
+ * number at all: they are optional here and validated, because a missing one used to pass the range
+ * check below (`undefined > lines.length` is false), make `slice(startIdx, undefined)` span the rest
+ * of the file and `splice(startIdx, NaN, …)` delete nothing - inserting the suggestion instead of
+ * replacing the reviewed lines.
  */
 export async function applyCodeSuggestion(
 	filePath: string,
-	startLine: number,
-	endLine: number,
+	startLine: number | undefined,
+	endLine: number | undefined,
 	suggestedCode: string,
 	cwd: string,
 ): Promise<void> {
+	if (
+		typeof startLine !== "number" ||
+		typeof endLine !== "number" ||
+		!Number.isInteger(startLine) ||
+		!Number.isInteger(endLine) ||
+		startLine > endLine
+	) {
+		throw new Error(
+			`suggestion lines ${String(startLine)}-${String(endLine)} are not a usable line range; ` +
+				"the comment is probably on a deleted line, so its suggestion cannot be applied",
+		);
+	}
+
 	// GitHub paths are relative to the repository root, which cwd may be below
-	const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(await repoRoot(cwd), filePath);
+	const root = await repoRoot(cwd);
+	const absolutePath = await resolveRepoFilePath(root, filePath);
 	const fileContent = await fs.readFile(absolutePath, "utf-8");
 	// Each line keeps its own terminator, so line endings outside the replaced range never change
 	const lines = fileContent.split(/(?<=\n)/);
@@ -443,5 +505,12 @@ export async function applyCodeSuggestion(
 		// Deleting the last lines of a file without a final newline: the new last line has none either
 		lines[startIdx - 1] = lines[startIdx - 1].replace(/\r?\n$/, "");
 	}
-	await fs.writeFile(absolutePath, lines.join(""), "utf-8");
+	// The lexical check above cannot see symlinks. Resolve them and write the *resolved* target, so
+	// the containment decision and the write are about the same file - writing the unresolved path
+	// would leave a window in which the link is swapped to point outside the repository.
+	const [realRoot, realTarget] = await Promise.all([fs.realpath(root), fs.realpath(absolutePath)]);
+	if (!isInsideDir(realRoot, realTarget)) {
+		throw new Error(`suggestion path '${filePath}' resolves outside the repository through a link (${realTarget})`);
+	}
+	await fs.writeFile(realTarget, lines.join(""), "utf-8");
 }

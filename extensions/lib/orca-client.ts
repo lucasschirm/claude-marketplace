@@ -9,6 +9,11 @@ export interface OrcaCommandOptions {
 	cwd?: string;
 	timeoutMs?: number;
 	env?: Record<string, string | undefined>;
+	/**
+	 * The command's stdout is terminal text rather than an envelope (e.g. `worker-read`). Only for
+	 * those commands is unparseable output a success; everywhere else it is a BAD_JSON failure.
+	 */
+	expectText?: boolean;
 }
 
 export interface OrcaEnvelope<T = any> {
@@ -48,6 +53,8 @@ export interface OrcaWorkerRow {
 			worker?: string;
 			dispatch?: string;
 			detail?: string;
+			/** Short free-text description of what the worker is doing right now. */
+			activity?: string;
 		};
 		outcome?: "succeeded" | "failed" | string;
 		liveness?: {
@@ -161,6 +168,17 @@ export function resolveOrcaCmd(): string {
 }
 
 /**
+ * "message (CODE)" from a failed envelope, for tool text and user-facing notices. A caller that
+ * reports a failure must not reduce it to an empty result: a coordinator told "no workers" will
+ * dispatch work that is already running.
+ */
+export function orcaErrorText(env: { error?: { code?: string; message: string } }): string {
+	// String(): an envelope from another tool version may carry a non-string message.
+	const message = String(env.error?.message ?? "").trim() || "unknown error";
+	return env.error?.code ? `${message} (${env.error.code})` : message;
+}
+
+/**
  * Executes an Orca CLI command with JSON formatting and returns the parsed envelope.
  */
 export async function execOrca<T = any>(args: string[], options: OrcaCommandOptions = {}): Promise<OrcaEnvelope<T>> {
@@ -184,9 +202,18 @@ export async function execOrca<T = any>(args: string[], options: OrcaCommandOpti
 		try {
 			return JSON.parse(stdout) as OrcaEnvelope<T>;
 		} catch (parseErr: any) {
+			// Reporting unparseable output as ok:true is how a failed CLI call used to look like an
+			// empty worker list or "no messages". `expectText` commands are the deliberate exception.
+			if (options.expectText) {
+				return { ok: true, result: stdout.trim() as unknown as T };
+			}
 			return {
-				ok: true,
-				result: stdout.trim() as any,
+				ok: false,
+				error: {
+					code: "BAD_JSON",
+					message: `Orca CLI returned output that is not JSON: ${parseErr?.message || String(parseErr)}`,
+					details: { raw: stdout.trim().slice(0, 2048) },
+				},
 			};
 		}
 	} catch (err: any) {

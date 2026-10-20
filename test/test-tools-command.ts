@@ -170,6 +170,30 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 	comp.handleInput("\x1b");
 	assert(closed === true, "Escape in list view invokes onClose callback");
 
+	// 2b. PageUp/PageDown must scroll the details view, using the CSI bytes a terminal sends.
+	// The key ids live in pi-tui's KeyId union, so a misspelling is a compile error; what the
+	// typechecker cannot pin is whether the sequences reach matchesKey() and scroll, so pin it here.
+	console.log("Test 2b: Testing details-view paging with the real key sequences...");
+	const manyProps: Record<string, unknown> = {};
+	for (let i = 0; i < 40; i++) manyProps[`param_${i}`] = { type: "string" };
+	const pagingComp = new ToolsManagerComponent(
+		[{ name: "wide_tool", description: "A tool with many parameters", parameters: { type: "object", required: [], properties: manyProps } } as any],
+		new Set<string>(["wide_tool"]),
+		mockTheme,
+		() => {},
+		() => {},
+	);
+	pagingComp.handleInput("\x1b[C"); // right arrow: open the details view
+	assert(pagingComp.getViewMode() === "details", "Details view opened for paging");
+	const pageTop = pagingComp.render(80);
+	pagingComp.handleInput("\x1b[6~"); // PageDown
+	const pageScrolled = pagingComp.render(80);
+	assert(pageScrolled.join("|") !== pageTop.join("|"), "PageDown scrolls the details view");
+	pagingComp.handleInput("\x1b[5~"); // PageUp
+	pagingComp.handleInput("\x1b[5~"); // PageUp again, clamping at the top
+	const pageBack = pagingComp.render(80);
+	assert(pageBack.join("|") === pageTop.join("|"), "PageUp returns to the top of the details view");
+
 	// 3. Register real tools extension and verify command registration and API calls
 	console.log("Test 3: Testing tools extension in Pi runtime...");
 	toolsExtension(pi);

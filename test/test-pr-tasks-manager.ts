@@ -13,6 +13,7 @@ import {
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { tmpGitRepo } from "./helpers/git-repo.ts";
 
 interface ThreadOpts {
 	id: string;
@@ -891,7 +892,9 @@ test("a reply re-issued with CRLF line endings still carries over as the same re
 });
 
 test("applyCodeSuggestion replaces exactly the range and keeps every other line ending", async () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pr-tasks-apply-"));
+	// A git repo, and the file named relative to it: applyCodeSuggestion resolves every path through
+	// the repository root and refuses anything absolute or outside it, so it can edit the workspace.
+	const dir = tmpGitRepo("pr-tasks-apply-");
 	const file = path.join(dir, "f.txt");
 	const cases: Array<[string, number, number, string, string]> = [
 		["a\nb\nc\n", 2, 2, "B\n", "a\nB\nc\n"],
@@ -906,12 +909,12 @@ test("applyCodeSuggestion replaces exactly the range and keeps every other line 
 	try {
 		for (const [input, start, end, suggestion, expected] of cases) {
 			fs.writeFileSync(file, input);
-			await applyCodeSuggestion(file, start, end, suggestion, dir);
+			await applyCodeSuggestion("f.txt", start, end, suggestion, dir);
 			assert.strictEqual(fs.readFileSync(file, "utf-8"), expected, JSON.stringify([input, start, end]));
 		}
 		fs.writeFileSync(file, "a\nb");
-		await assert.rejects(applyCodeSuggestion(file, 3, 4, "x\n", dir), /not in the file/);
-		await assert.rejects(applyCodeSuggestion(file, 0, 1, "x\n", dir), /not in the file/);
+		await assert.rejects(applyCodeSuggestion("f.txt", 3, 4, "x\n", dir), /not in the file/);
+		await assert.rejects(applyCodeSuggestion("f.txt", 0, 1, "x\n", dir), /not in the file/);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
