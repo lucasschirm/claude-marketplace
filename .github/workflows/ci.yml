@@ -17,7 +17,8 @@ concurrency:
 
 jobs:
   # The gate that made 34 type errors possible to land: strict tsc over extensions/ plus the
-  # manifests. It runs first so a broken type fails before the slower Pi-runtime matrix.
+  # manifests. The slower jobs wait for it, so a broken type fails in ~1 minute instead of after
+  # the whole Pi-runtime matrix.
   quality:
     name: Quality gates (typecheck, manifests)
     runs-on: ubuntu-latest
@@ -38,10 +39,10 @@ jobs:
       - name: Validate marketplace / plugin / Pi manifests
         run: npm run validate
 
-  # Fast checks that need nothing but Node: JSON manifests and the standalone
-  # node:test suites (Node >= 23.6 runs TypeScript directly).
+  # Standalone node:test suites (Node >= 23.6 runs TypeScript directly) plus the manifests.
   manifests-and-unit-tests:
     name: Manifests & unit tests
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -50,9 +51,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          cache: npm
+
+      # npm run test:unit delegates to test/run.sh, which is also where the suite list lives.
+      - run: npm ci
 
       - name: Validate marketplace / plugin / Pi manifests
-        run: node scripts/validate-marketplace.mjs
+        run: npm run validate
 
       - name: Run unit tests
         run: npm run test:unit
@@ -63,6 +68,7 @@ jobs:
   # sessions, and test-orca-orchestration.sh needs a live Orca backend.
   pi-extension-tests:
     name: Pi extension tests (${{ matrix.suite }})
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -76,6 +82,7 @@ jobs:
           - observe-pr-resume
           - pr-tasks
           - pr-tasks-gh-failure
+          - pr-tasks-reconcile
           - tools
     steps:
       - uses: actions/checkout@v4
@@ -83,6 +90,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          cache: npm
+
+      - run: npm ci
 
       - name: Install Pi
         run: npm install -g @earendil-works/pi-coding-agent@^1.3.0

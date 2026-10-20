@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "test": "bash test/run.sh",
-    "test:unit": "node --test test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts",
+    "test:unit": "bash test/run.sh unit",
     "typecheck": "tsc --noEmit",
     "validate": "node scripts/validate-marketplace.mjs"
   },
@@ -24,18 +24,26 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@earendil-works/pi-tui": "^1.3.0",
     "typebox": "*"
   },
   "engines": {
     "node": ">=23.6"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@earendil-works/pi-tui": "1.3.0",
+    "@earendil-works/pi-coding-agent": "^1.3.0",
+    "@earendil-works/pi-tui": "^1.3.0",
     "@types/node": "^24.0.0",
-    "typebox": "1.4.2",
+    "typebox": "^1.4.2",
     "typescript": "^7.0.2"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   }
 }
