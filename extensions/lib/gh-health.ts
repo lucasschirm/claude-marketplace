@@ -45,6 +45,7 @@ export class GhHealth {
 	// A slot became due while claimed work was still running
 	private pendingWhileBusy = false;
 	private timer: unknown;
+	private recoverHandle: unknown;
 	private readonly retryHooks: Set<() => void> = new Set();
 
 	constructor(opts: GhHealthOptions = {}) {
@@ -127,7 +128,17 @@ export class GhHealth {
 		return this.now() - this.lastFailureAt >= this.nextIntervalMs();
 	}
 
-	/** Records a successful GitHub call: resets the backoff state. */
+	/**
+	 * Records a successful GitHub call: resets the backoff state and, on the degraded -> healthy
+	 * transition, runs the retry hooks once.
+	 *
+	 * The hooks are the only driver for work that waited out the outage (a pending observe_pr
+	 * auto-start, a pr-tasks reconciliation). They are scheduled by recordFailure alone, so without
+	 * this a recovery detected by *some other* call leaves that work stranded until the next failure
+	 * schedules a timer - and the promise given to the model ("observation will start automatically
+	 * once the connection recovers") would go silently unfulfilled. Deferred one tick, so no hook runs
+	 * inside the stack of the call that happened to succeed first.
+	 */
 	recordSuccess(): void {
 		if (this.failures === 0) return;
 		this.failures = 0;
@@ -135,6 +146,10 @@ export class GhHealth {
 		this.windowUsed = false;
 		this.pendingWhileBusy = false;
 		this.clearTimer();
+		this.recoverHandle = this.schedule(0, () => {
+			this.recoverHandle = undefined;
+			this.fireHooks();
+		});
 	}
 
 	/** Records a failed GitHub call: paces the next retry. */
@@ -155,6 +170,10 @@ export class GhHealth {
 		this.inFlight = false;
 		this.pendingWhileBusy = false;
 		this.clearTimer();
+		if (this.recoverHandle !== undefined) {
+			this.unschedule(this.recoverHandle);
+			this.recoverHandle = undefined;
+		}
 	}
 
 	private clearTimer(): void {

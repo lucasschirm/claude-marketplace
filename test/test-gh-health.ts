@@ -71,10 +71,14 @@ test("backoff timing: 30 s slots for the first 5 failures, then 10 min", () => {
 	clock.advance(600_000);
 	assert.strictEqual(hooks.length, 1);
 
-	// A success resets the state and clears the pending timer
+	// A success resets the state, clears the pending outage timer, and schedules exactly one recovery
+	// tick (the hooks are how work that waited out the outage gets driven — see the recovery tests).
 	health.recordSuccess();
 	assert.strictEqual(health.status, "healthy");
 	assert.strictEqual(health.nextRetryInMs(), 0);
+	assert.strictEqual(clock.pending(), 1, "only the recovery tick may remain scheduled");
+	clock.advance(0);
+	assert.strictEqual(hooks.length, 2, "the transition runs the hooks once");
 	assert.strictEqual(clock.pending(), 0);
 	health.recordFailure();
 	assert.strictEqual(health.nextRetryInMs(), 30_000, "after a reset the pacing restarts at 30 s");
@@ -209,4 +213,34 @@ test("a 403 rate limit is availability, not an auth error", () => {
 	assert.strictEqual(isGhAuthError(err), false, "a self-resolving rate limit must not take the auth path (which skips the auto-start)");
 	assert.strictEqual(isGhAvailabilityError(err), true, "but it still paces the background retries");
 	assert.strictEqual(isGhAuthError({ stderr: "HTTP 429: Too Many Requests" }), false);
+});
+
+test("recovery runs the retry hooks: work that waited out the outage is not stranded", () => {
+	const { health, clock, hooks } = makeHealth();
+
+	health.recordFailure();
+	health.recordFailure();
+	assert.strictEqual(health.status, "degraded");
+
+	// Recovery is detected by some *other* call succeeding — no retry slot was ever granted.
+	health.recordSuccess();
+	assert.strictEqual(health.status, "healthy");
+	assert.deepStrictEqual(hooks, [], "hooks must not run synchronously inside the recovering caller");
+
+	clock.advance(0); // the deferred tick
+	assert.deepStrictEqual(hooks, ["fired"], "a pending retry consumer (e.g. an observe_pr auto-start) must be run on recovery");
+
+	// A second success is not a transition and must not re-fire, and the outage timer is gone.
+	health.recordSuccess();
+	clock.advance(60_000);
+	assert.strictEqual(hooks.length, 1, "recovery hooks fire once per degraded -> healthy transition");
+});
+
+test("reset drops a pending recovery tick", () => {
+	const { health, clock, hooks } = makeHealth();
+	health.recordFailure();
+	health.recordSuccess();
+	health.reset();
+	clock.advance(0);
+	assert.deepStrictEqual(hooks, [], "nothing may run after reset()");
 });

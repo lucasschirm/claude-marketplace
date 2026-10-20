@@ -26,7 +26,7 @@
     "extensions/lib/ci-verdict.ts": 66,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
-    "extensions/lib/gh-health.ts": 255,
+    "extensions/lib/gh-health.ts": 274,
     "extensions/lib/github-review-threads.ts": 500,
     "extensions/lib/orca-client.ts": 576,
     "extensions/lib/pr-tasks-manager.ts": 837,
@@ -43,7 +43,14 @@
       "changes": [
         "globalThisOwnership: 0 -> 20"
       ]
+    },
+    {
+      "at": "2026-10-20",
+      "reason": "extensions/lib/gh-health.ts 255 -> 274: recordSuccess now runs the retry hooks on the degraded->healthy transition, so a pending observe_pr auto-start cannot strand until the next failure schedules a timer (root cause of the observe-pr-gh-failure CI failure on PR #37).",
+      "changes": [
+        "extensions/lib/gh-health.ts: 274 lines > baseline 255 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "500cf41b79a0c681d71f50b823cee2a34b63c878"
+  "generatedFrom": "19c3182"
 }
