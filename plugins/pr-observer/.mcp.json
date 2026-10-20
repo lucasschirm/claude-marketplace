@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pr-observer": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/src/mcp-server.ts"]
+    }
+  }
+}
