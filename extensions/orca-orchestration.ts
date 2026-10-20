@@ -191,6 +191,14 @@ export class OrcaDashboardComponent {
 		}
 	}
 
+	/**
+	 * Required by pi-tui's `Component` (called when the theme changes or the overlay needs a full
+	 * redraw). This dashboard derives every line from live state on each render() and caches nothing,
+	 * so there is nothing to drop - implementing it is what keeps `ctx.ui.custom()` from throwing.
+	 */
+	invalidate(): void {}
+
+
 	render(width: number): string[] {
 		const lines: string[] = [];
 		const th = this.theme;

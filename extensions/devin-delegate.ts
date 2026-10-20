@@ -487,6 +487,10 @@ class DevinDashboardComponent {
 			lines.push(truncateToWidth(`  ${th.fg("muted", "Use Up/Down to scroll, Left to return to session list, 'q' to close:")}`, width));
 			lines.push("");
 
+			// `invalidate()` drops the transcript; re-read it so a theme change does not blank the view.
+			if (this.cachedMessages.length === 0) {
+				this.cachedMessages = this.readSessionMessages(s, 50);
+			}
 			if (this.cachedMessages.length === 0) {
 				lines.push(truncateToWidth(`  ${th.fg("dim", "No messages recorded yet.")}`, width));
 			} else {
@@ -499,6 +503,14 @@ class DevinDashboardComponent {
 
 		lines.push("");
 		return lines;
+	}
+
+	/**
+	 * Required by pi-tui's `Component`: the transcript is this component's only cached state, and
+	 * render() re-reads it lazily, so a theme change or a full redraw simply starts from empty.
+	 */
+	invalidate(): void {
+		this.cachedMessages = [];
 	}
 }
 
