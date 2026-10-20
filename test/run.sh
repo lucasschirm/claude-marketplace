@@ -14,7 +14,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
-UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts"
+UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts"
 
 ALL_SUITES="typecheck manifest unit observe-pr observe-pr-gh-failure branch-observer startup-notice observe-pr-resume pr-tasks pr-tasks-gh-failure tools"
 

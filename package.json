@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "test": "bash test/run.sh",
-    "test:unit": "node --test test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts",
+    "test:unit": "node --test test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts",
     "typecheck": "tsc --noEmit",
     "validate": "node scripts/validate-marketplace.mjs"
   },

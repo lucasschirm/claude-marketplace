@@ -364,3 +364,32 @@ guidelines render one line each; the four dashboards survive `ui.custom()` inval
 
 **Counts after P0:** type errors `34 → 0`; unit tests `94 → 110`; CI suites `8 → 9`; tools returning
 `details` `0/19 → 19/19`; dashboards implementing `invalidate()` `1/5 → 5/5`.
+
+### Rebase onto main (PR #33, `lib/gh-health.ts`)
+
+Main was six commits ahead when this branch was pushed: PR #33 added a shared
+GitHub-availability singleton (`ghHealth`), degraded messaging, `mutationErrorText()`
+and `notFoundResult()`, plus two Pi-runtime failure suites. Conflicts were resolved by
+layering the P0 work **on top of** that design rather than around it:
+
+- `notFoundResult(rawId)` became `notFoundResult(rawId, tool)` and returns `ok()`/`err()`
+  with `details` (the degraded branch is not an error, and now says so structurally);
+  a new `mutationErrorCode(err)` is the machine-readable twin of `mutationErrorText()`.
+- `observe_pr` gained `details` on main's two new branches (auth failure, and
+  availability failure with `pendingAutoStart`).
+- `checkAllCIPassed` kept main's slot acquisition, identity guards, logging and health
+  recording, with only the verdict replaced.
+
+**A regression the rebase caught.** The first cut of `evaluateCiVerdict` returned
+`unknown` for `gh pr checks` answering `[]`, which broke T4 of
+`test-observe-pr-gh-failure`: an empty check list is legitimate, and there the observer's
+own run bookkeeping is the only evidence. The verdict now takes
+`bookkeeping: { completed, failed }`, consulted *only* for an empty list; a failed call,
+an unparseable body or a non-array payload stays `unknown`, which is the hole F2
+described (`test(qa)`/`fix(qa)` refinement commits).
+
+**Also wired up while here:** `test-observe-pr-gh-failure.ts`,
+`test-pr-tasks-gh-failure.ts` (previously in neither `test/run.sh` nor CI) and
+`test-gh-health.ts` now run as part of the suites — CI is 11 suites, `npm run test:unit`
+is 126 tests. `test-pr-tasks-reconcile.ts` is still an orphan (it loads the extension, so
+it needs a `pi -ne -e` suite; left as follow-up rather than half-wired here).
