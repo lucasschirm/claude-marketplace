@@ -47,16 +47,16 @@ A cross-platform plugin providing Model Context Protocol (MCP) tools, skills, an
 
 #### Install in Devin CLI
 
-From GitHub:
+Install directly from the GitHub repository:
 
 ```bash
 devin plugins install lucasschirm/claude-marketplace#plugins/pr-observer
 ```
 
-Or locally from this repository:
+Or using the full git URL:
 
 ```bash
-devin plugins install --local ./plugins/pr-observer
+devin plugins install https://github.com/lucasschirm/claude-marketplace.git#plugins/pr-observer
 ```
 
 #### Capabilities in Devin CLI
