@@ -154,6 +154,12 @@ export class GhHealth {
 
 	/** Records a failed GitHub call: paces the next retry. */
 	recordFailure(): void {
+		// A failure supersedes a recovery tick that has not run yet: the outage timer scheduled below is now
+		// the driver, and running both would drive every hook twice in the same window.
+		if (this.recoverHandle !== undefined) {
+			this.unschedule(this.recoverHandle);
+			this.recoverHandle = undefined;
+		}
 		this.failures += 1;
 		this.lastFailureAt = this.now();
 		this.windowUsed = false;

@@ -244,3 +244,14 @@ test("reset drops a pending recovery tick", () => {
 	clock.advance(0);
 	assert.deepStrictEqual(hooks, [], "nothing may run after reset()");
 });
+
+test("a failure supersedes a recovery tick that has not run yet", () => {
+	const { health, clock, hooks } = makeHealth();
+	health.recordFailure();
+	health.recordSuccess(); // schedules the recovery tick
+	health.recordFailure(); // the outage resumed before the tick could run
+	clock.advance(0);
+	assert.deepStrictEqual(hooks, [], "only the outage timer may drive the hooks now");
+	clock.advance(30_000);
+	assert.deepStrictEqual(hooks, ["fired"], "the outage retry slot still fires exactly once");
+});
