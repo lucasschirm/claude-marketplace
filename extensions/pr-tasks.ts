@@ -631,8 +631,17 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 				// (captured as checked: a sync while the edit waits may change the task)
-				const { suggestion, file, line } = task;
+				const { file, line } = task;
 				const startLine = task.startLine || line;
+				// Re-read here on purpose: the guard above narrowed `task.suggestion`, and the awaits
+				// between the two points reset that narrowing (a sync can also have dropped it).
+				const suggestion = task.suggestion;
+				if (suggestion === undefined) {
+					return {
+						kind: "error",
+						text: `Conversation ${task.conversationId} no longer carries a code suggestion; nothing was applied.`,
+					};
+				}
 				try {
 					// One edit at a time: two suggestions for the same file must not overwrite each other
 					const edit = suggestionEdits.then(() => applyCodeSuggestion(file, startLine, line, suggestion, cwd));
