@@ -5,6 +5,7 @@ import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_pro
 import { promisify } from "node:util";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
+import { evaluateCiVerdict } from "./lib/ci-verdict.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
@@ -523,83 +524,48 @@ export default function (pi: ExtensionAPI) {
 		if (pr.allPassedReported) return;
 		if (!ghHealth.acquireSlot()) return;
 
-		let stdout: string | undefined;
+		// The verdict is decided by evaluateCiVerdict(), which never answers "passed" for a failed
+		// `gh pr checks` call or an unusable payload. Both of those branches used to announce
+		// "All CI passed" as long as one run had completed and none had failed — the most expensive
+		// false green an agent can be handed. A non-pass verdict just waits for the next slot, and
+		// allPassedReported stays false until there is a real pass.
+		let checks: unknown;
 		let ghErr: unknown;
 		try {
 			const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
 				cwd: pr.cwd,
 				timeout: GH_TIMEOUT_MS,
 			});
-			stdout = res.stdout;
+			checks = JSON.parse(res.stdout);
 		} catch (err) {
 			ghErr = err;
 		}
+
 		// A stop or a resume-restore during the gh await must not let this stale call
 		// deliver "All CI passed" through the replacement entry's turn.
 		if (observedPRs.get(prNumber) !== pr) {
 			ghHealth.release();
 			return;
 		}
-		try {
-			if (stdout !== undefined) {
-				const checks = JSON.parse(stdout);
-				if (Array.isArray(checks) && checks.length > 0) {
-					const hasPending = checks.some(
-						(c: any) =>
-							c.bucket === "pending" ||
-							["PENDING", "IN_PROGRESS", "QUEUED"].includes(String(c.state || c.status || "").toUpperCase()),
-					);
-					const hasFailed = checks.some(
-						(c: any) =>
-							["fail", "cancel"].includes(c.bucket) ||
-							["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(
-								String(c.state || c.conclusion || "").toUpperCase(),
-							),
-					);
-					const hasPassed = checks.every(
-						(c: any) =>
-							["pass", "skipping"].includes(c.bucket) ||
-							["SUCCESS", "SKIPPED", "NEUTRAL"].includes(String(c.state || c.conclusion || "").toUpperCase()),
-					);
 
-					if (!hasPending && !hasFailed && hasPassed) {
-						pr.allPassedReported = true;
-						sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-					}
-				} else if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
-					pr.allPassedReported = true;
-					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-					persistState();
-				}
-			} else if (ghErr !== undefined && !isGhAvailabilityError(ghErr)) {
-				// A non-GitHub gh failure: the run bookkeeping fallback is still meaningful
-				if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
-					pr.allPassedReported = true;
-					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-					persistState();
-				}
-				logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
-			}
-			// A GitHub-availability failure is silent: no verdict, no message — the
-			// backoff retry re-checks the state.
-		} catch (err) {
-			// A stop or a resume-restore during the gh await must not let a stale call
-			// persist through the replacement entry.
-			if (observedPRs.get(prNumber) !== pr) return;
-			// Malformed gh output: the run bookkeeping fallback is still meaningful
-			if (pr.completedRuns.size > 0 && pr.failedRuns.size === 0) {
+		try {
+			if (ghErr !== undefined) {
+				// A failed call carries no verdict at all. GitHub-availability failures stay silent
+				// (the shared backoff re-checks); any other gh failure is logged, never reported as
+				// a pass, and malformed output is treated the same way.
+				if (!isGhAvailabilityError(ghErr)) logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
+			} else if (evaluateCiVerdict({ checks, ghFailed: false }) === "passed") {
 				pr.allPassedReported = true;
 				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+				// Persisted so a session restart does not announce the same pass again.
 				persistState();
 			}
-			logInternal(`Error checking CI status for PR ${prNumber}`, err);
 		} finally {
 			if (ghErr === undefined) ghHealth.recordSuccess();
 			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
 			ghHealth.release();
 		}
 	}
-
 	// A run whose watcher died on a GitHub-availability error is re-watched on the next
 	// backoff slot (one timer per run, spaced by the shared health state).
 	function scheduleRewatch(prNumber: number, runId: string, cwd: string) {
