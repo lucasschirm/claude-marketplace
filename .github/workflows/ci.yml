@@ -46,6 +46,9 @@ jobs:
       - name: Repo invariants and quality ratchet
         run: npm run check
 
+      - name: The invariants are proven to bite (fixtures against a copy of the tree)
+        run: bash test/run.sh quality-fixtures
+
       - name: Validate marketplace / plugin / Pi manifests
         run: npm run validate
 
