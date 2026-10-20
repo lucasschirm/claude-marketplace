@@ -9,8 +9,22 @@ import * as path from "node:path";
  * `applyCodeSuggestion` resolves every path through `git rev-parse --show-toplevel`, so anything
  * exercising it needs a real repository to resolve against.
  */
-export function tmpGitRepo(prefix = "pr-task-repo-"): string {
+const created: string[] = [];
+
+/** A throwaway directory in tmpdir, registered for cleanupTmpDirs(). */
+export function tmpDir(prefix = "pr-task-dir-"): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	created.push(dir);
+	return dir;
+}
+
+export function tmpGitRepo(prefix = "pr-task-repo-"): string {
+	const dir = tmpDir(prefix);
 	cp.execFileSync("git", ["init", "-q", dir]);
 	return dir;
+}
+
+/** Remove everything this module created; call from node:test's after() hook. */
+export function cleanupTmpDirs(): void {
+	for (const dir of created.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 }

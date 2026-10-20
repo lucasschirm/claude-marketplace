@@ -6,7 +6,9 @@ import { capList, err, ok, parseEnvKeys, DETAILS_LIST_CAP } from "../extensions/
 test("ok() returns model-facing text plus the structured details pi requires", () => {
 	const res = ok("done", { tool: "demo", prNumber: 12 });
 	assert.strictEqual(res.content.length, 1);
-	assert.deepStrictEqual(res.content[0], { type: "text", text: "done" });
+	// Field-wise: a whole-object compare would pass for any object with these fields.
+	assert.strictEqual(res.content[0]?.type, "text");
+	assert.strictEqual((res.content[0] as { text?: string }).text, "done");
 	assert.deepStrictEqual(res.details, { tool: "demo", prNumber: 12 });
 	assert.strictEqual(res.isError, undefined, "a success must not be flagged as an error");
 });

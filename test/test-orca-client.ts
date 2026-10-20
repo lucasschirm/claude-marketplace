@@ -1,10 +1,20 @@
 // Run with: node --test test/test-orca-client.ts
-import { test } from "node:test";
+import { after, test } from "node:test";
 import * as assert from "node:assert";
 import { execOrca } from "../extensions/lib/orca-client.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+
+const originalOrcaCmd = process.env.ORCA_CLI_COMMAND;
+const created: string[] = [];
+
+after(() => {
+	// Never leave a fake `orca` resolvable: later suites in this process would exec it.
+	if (originalOrcaCmd === undefined) delete process.env.ORCA_CLI_COMMAND;
+	else process.env.ORCA_CLI_COMMAND = originalOrcaCmd;
+	for (const dir of created.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 /**
  * A fake `orca` CLI: `ORCA_CLI_COMMAND` is already honoured by resolveOrcaCmd(), so pointing it at a
@@ -12,6 +22,7 @@ import * as path from "node:path";
  */
 function fakeOrca(body: string, exitCode = 0): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orca-fake-"));
+	created.push(dir);
 	const file = path.join(dir, "orca");
 	fs.writeFileSync(
 		file,
@@ -50,6 +61,7 @@ test("a valid envelope is parsed", skipOnWindows, async () => {
 
 test("a failing exit without usable output stays EXEC_ERROR", skipOnWindows, async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orca-fake-"));
+	created.push(dir);
 	const file = path.join(dir, "orca");
 	fs.writeFileSync(file, "#!/bin/sh\necho \"boom\" >&2\nexit 3\n", { mode: 0o755 });
 	process.env.ORCA_CLI_COMMAND = file;

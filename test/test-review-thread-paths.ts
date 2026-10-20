@@ -1,5 +1,5 @@
 // Run with: node --test test/test-review-thread-paths.ts
-import { test } from "node:test";
+import { after, test } from "node:test";
 import * as assert from "node:assert";
 import {
 	applyCodeSuggestion,
@@ -7,11 +7,13 @@ import {
 	resolveRepoFilePath,
 } from "../extensions/lib/github-review-threads.ts";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { tmpGitRepo } from "./helpers/git-repo.ts";
+import { cleanupTmpDirs, tmpDir, tmpGitRepo } from "./helpers/git-repo.ts";
 
 const tmpRepo = () => tmpGitRepo("pr-task-path-");
+
+// Nothing may be left behind in tmpdir: the unit suites run in parallel in CI.
+after(cleanupTmpDirs);
 
 test("isInsideDir contains by path relation, not by string prefix", () => {
 	assert.strictEqual(isInsideDir("/repo", "/repo/src/a.ts"), true);
@@ -33,7 +35,7 @@ test("resolveRepoFilePath keeps repository-relative paths inside the repo", asyn
 
 test("applyCodeSuggestion refuses a path that escapes the repository without writing it", async () => {
 	const repo = tmpRepo();
-	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pr-task-outside-"));
+	const outside = tmpDir("pr-task-outside-");
 	const victim = path.join(outside, "victim.txt");
 	fs.writeFileSync(victim, "keep me\n", "utf-8");
 
@@ -69,7 +71,7 @@ test("a suggestion inside the repo is still applied", async () => {
 
 test("a symlinked target cannot carry the write outside the repository", async () => {
 	const repo = tmpRepo();
-	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pr-task-outside2-"));
+	const outside = tmpDir("pr-task-outside2-");
 	const victim = path.join(outside, "victim.txt");
 	fs.writeFileSync(victim, "keep me\n", "utf-8");
 	fs.symlinkSync(victim, path.join(repo, "link.txt"));
