@@ -458,7 +458,7 @@ function run({ mode, only, reason }) {
 	}
 
 	// Per-file line budget: only shrink, and a brand-new file is allowed at its current size.
-	if (!only) {
+	if (!only || only === "fileLineBudget") {
 		for (const [file, lines] of Object.entries(current.files)) {
 			const allowed = baseline.files?.[file];
 			if (allowed !== undefined && lines > allowed) {
@@ -474,6 +474,13 @@ function run({ mode, only, reason }) {
 	}
 
 	if (mode === "write") {
+		// --only evaluates one invariant; writing from a partial measurement would drop every other
+		// entry, including all biome.* metrics.
+		if (only) {
+			fail([
+				"--write must run without --only: a partial measurement would rewrite the baseline and lose the metrics that were not measured",
+			]);
+		}
 		// The first capture has nothing to compare against; after that, any rise needs a reason. A rule
 		// that appears later (because it was switched on) still counts as an increase.
 		const initialCapture = Object.keys(baseline.metrics ?? {}).length === 0;
