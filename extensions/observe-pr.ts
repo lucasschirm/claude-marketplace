@@ -916,8 +916,12 @@ export default function (pi: ExtensionAPI) {
 
 			for (const line of lines) {
 				const runRegex = /\/actions\/runs\/(\d+)/g;
-				let match: RegExpExecArray | null;
-				while ((match = runRegex.exec(line)) !== null) {
+				// No assignment in the loop condition (biome noAssignInExpressions): the exec result is
+				// bound inside the loop and breaks on null, which is the same iteration the old
+				// `while ((match = …) !== null)` did - same regex object, same lastIndex progression.
+				for (;;) {
+					const match = runRegex.exec(line);
+					if (match === null) break;
 					const runId = match[1];
 					if (!pr.seenRuns.has(runId)) {
 						pr.seenRuns.add(runId);
