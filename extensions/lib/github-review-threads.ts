@@ -409,6 +409,11 @@ export function extractCodeSuggestion(body: string): { hasSuggestion: boolean; s
 /**
  * True when `target` is inside `root` (never equal to it). `path.relative` rather than
  * `startsWith`, so `/repo-evil/x` is not mistaken for a path inside `/repo`.
+ *
+ * POSIX-only in practice: Windows drive-relative forms (`C:foo`, `C:..`) are not
+ * special-cased. resolveRepoFilePath rejects every absolute path first, and CI runs on
+ * Linux - adding drive-letter rules with no Windows job to execute them would ship
+ * untested behaviour.
  */
 export function isInsideDir(root: string, target: string): boolean {
 	const rel = path.relative(path.resolve(root), path.resolve(target));
@@ -492,10 +497,12 @@ export async function applyCodeSuggestion(
 		// Deleting the last lines of a file without a final newline: the new last line has none either
 		lines[startIdx - 1] = lines[startIdx - 1].replace(/\r?\n$/, "");
 	}
-	// The lexical check above cannot see symlinks: re-check the real path just before writing.
+	// The lexical check above cannot see symlinks. Resolve them and write the *resolved* target, so
+	// the containment decision and the write are about the same file - writing the unresolved path
+	// would leave a window in which the link is swapped to point outside the repository.
 	const [realRoot, realTarget] = await Promise.all([fs.realpath(root), fs.realpath(absolutePath)]);
 	if (!isInsideDir(realRoot, realTarget)) {
 		throw new Error(`suggestion path '${filePath}' resolves outside the repository through a link (${realTarget})`);
 	}
-	await fs.writeFile(absolutePath, lines.join(""), "utf-8");
+	await fs.writeFile(realTarget, lines.join(""), "utf-8");
 }

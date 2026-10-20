@@ -47,9 +47,10 @@ export function parseEnvKeys(output: string): string[] {
  * `"NOT_FOUND"`, `"BAD_JSON"`, `"PATH_ESCAPE"`, ...) so callers do not parse prose.
  */
 export function err<T extends ToolDetails>(text: string, code: string, details?: T): AgentToolResult<T> {
+	// `code` last: the code the call site declared outranks anything in `details`.
 	return {
 		content: [{ type: "text", text }],
 		isError: true,
-		details: { code, ...details } as T & { code: string },
+		details: { ...details, code } as T & { code: string },
 	};
 }

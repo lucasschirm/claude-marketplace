@@ -530,22 +530,33 @@ export default function (pi: ExtensionAPI) {
 		// allPassedReported stays false until there is a real pass.
 		let checks: unknown;
 		let ghErr: unknown;
+		let stale = false;
+		// acquireSlot() to release() must be exception-safe: the singleton counts a missed release
+		// as a permanently busy slot, so from then on no timer anywhere can claim a retry again.
+		// That includes JSON.parse, so it happens inside the guarded block.
 		try {
 			const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
 				cwd: pr.cwd,
 				timeout: GH_TIMEOUT_MS,
 			});
+			// A stop or a resume-restore during the gh await must not let this stale call
+			// deliver "All CI passed" through the replacement entry's turn.
+			if (observedPRs.get(prNumber) !== pr) {
+				stale = true;
+				return;
+			}
 			checks = JSON.parse(res.stdout);
 		} catch (err) {
 			ghErr = err;
+		} finally {
+			if (!stale) {
+				if (ghErr === undefined) ghHealth.recordSuccess();
+				else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			}
+			ghHealth.release();
 		}
 
-		// A stop or a resume-restore during the gh await must not let this stale call
-		// deliver "All CI passed" through the replacement entry's turn.
-		if (observedPRs.get(prNumber) !== pr) {
-			ghHealth.release();
-			return;
-		}
+		if (stale) return;
 
 		try {
 			if (ghErr !== undefined) {
@@ -566,10 +577,9 @@ export default function (pi: ExtensionAPI) {
 				// Persisted so a session restart does not announce the same pass again.
 				persistState();
 			}
-		} finally {
-			if (ghErr === undefined) ghHealth.recordSuccess();
-			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
-			ghHealth.release();
+		} catch (err) {
+			// A throwing verdict/notify path must not escape with the slot held either.
+			logInternal(`Error evaluating CI status for PR ${prNumber}`, err);
 		}
 	}
 	// A run whose watcher died on a GitHub-availability error is re-watched on the next

@@ -979,11 +979,13 @@ export default function (pi: ExtensionAPI) {
 				(params as any)?.accept_suggestion ?? (params as any)?.acceptSuggestion,
 			);
 
+			// A blank message stays rejected: GitHub needs a body for the reply. The details say
+			// which half is missing, so "you sent nothing" is never reported for an empty string.
 			if (!rawId || !message) {
 				return err("Error: conversation_id and message are required.", "MISSING_PARAMS", {
 					tool: "pr_task_resolve",
 					conversationId: rawId ? String(rawId) : null,
-					hasMessage: Boolean(message),
+					messageProvided: message.length > 0,
 				});
 			}
 
