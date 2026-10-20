@@ -316,3 +316,51 @@ No ESLint/Biome rollout, no `check-quality.mjs`, no ratchet, no `AGENTS.md`/`.ag
 (`devin-delegate.ts` stays 2,540 lines), no `lib/exec.ts`/`lib/log.ts`, no `console.*` removal, no hermetic
 Devin/Orca suites, no coverage tooling, no `test/**` in `tsconfig.include`. Adding any of these here means the typecheck
 gate lands late — they are P1/P3 items in #35.
+
+---
+
+## 9. Execution record (P0 as implemented)
+
+| Plan item | Result |
+| --- | --- |
+| A1 toolchain | `tsconfig.json` (strict, `noEmit`, `allowImportingTsExtensions`), `engines.node >= 23.6`, pinned devDeps, lockfile, `node_modules/` gitignored. Baseline recaptured: **34 errors**. R1 cleared — all suites green with pi packages installed locally |
+| A2 `details` on 19 tools | done; **`tsc` 34 → 0** across `extensions/` |
+| A3 `invalidate()` ×4 | done (no-op where nothing is cached; devin's transcript cache is dropped and re-read lazily) |
+| A4 remaining type errors | done: dead `pageUp`/`pageDown`, `promptGuidelines[]`, `stage.activity`, implicit-`any` handler, `run-show` narrowed run id, `applyCodeSuggestion` contract |
+| A5 CI + `run.sh` | `quality` job added (npm ci → typecheck → validate); `typecheck` suite added to `ALL_SUITES` (8 → 9); unit list now `npm run test:unit` in both places |
+| B1 CI verdict | `lib/ci-verdict.ts` + 6 tests; both false-positive branches removed |
+| B2 BAD_JSON | `execOrca` returns `error.code = "BAD_JSON"`; 4 tests against an `ORCA_CLI_COMMAND` fixture in tmpdir |
+| B3 containment | `isInsideDir()` + `resolveRepoFilePath()` + integer/range guard + realpath re-check; 6 tests |
+
+**Deviations from the plan, and why:**
+
+1. **One PR, not two.** #35's P0 header says "one PR"; the two PRs the plan sketched would also have had
+   to share a branch. Commits are split by finding so a reviewer can still drop one.
+2. **`ok()`/`err()` were not forced onto every site.** Rule applied instead: single-text results go
+   through `ok()`/`err()` (`pr-tasks.ts`, `observe-pr.ts`); multi-block template literals keep their
+   literal and gain `details` from a file-local `toolDetails()` (`orca-orchestration.ts`,
+   `devin-delegate.ts`), which also injects the run/session/queue counters once.
+3. **`err()` is only used where the result already set `isError`.** `observe_pr`'s "invalid PR number",
+   "PR don't exist" and "not observable" return plain text today; turning them into error results is a
+   behaviour change, so they got `details.result` instead and keep their old `isError` semantics.
+4. **"notify after N consecutive unknowns" (B1) was not implemented.** An unknown verdict is silently
+   retried on the next poll and `allPassedReported` stays false, which is the safety-critical half.
+   Follow-up if a noisy `gh` should become visible to the user.
+5. **`execOrca` gained an `expectText` option** instead of failing on every non-JSON body:
+   `orchestration worker-read` legitimately returns a terminal tail, which `formatWorkerOutput()`
+   already handles as a string. Everything else now fails with `BAD_JSON`.
+6. **An existing test encoded the vulnerability.** `test-pr-tasks-manager.ts` applied suggestions via an
+   **absolute** path into a tmpdir, which only worked because absolute paths were accepted unchecked.
+   It now runs inside a git repo with a relative path (`test/helpers/git-repo.ts`); the whole
+   line-ending table is unchanged.
+7. **F22-3 was overstated in the review** — corrected in `docs/extensions-code-quality-review.md`: the
+   `endLine: undefined` path is not reachable from the current call site (`PRTask.line` is always
+   filled in); the reachable defect there is the un-narrowed optional `suggestion`.
+
+**Behaviour changes to check by eye in the PR:** `/tools` PageUp/PageDown scroll again and its
+guidelines render one line each; the four dashboards survive `ui.custom()` invalidation; a failing
+`gh pr checks` no longer produces "All CI passed"; `orca_orchestration_status` reports
+`BAD_JSON`/`EXEC_ERROR` instead of an empty worker list.
+
+**Counts after P0:** type errors `34 → 0`; unit tests `94 → 110`; CI suites `8 → 9`; tools returning
+`details` `0/19 → 19/19`; dashboards implementing `invalidate()` `1/5 → 5/5`.

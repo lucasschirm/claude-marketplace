@@ -139,12 +139,17 @@ or reviewer caught:
 - **`promptGuidelines` is rendered as a coerced array** (`tools.ts:401`): `ToolInfo.promptGuidelines` is
   `string[]` (`pi-coding-agent/dist/core/extensions/types.d.ts:463`), but it is passed straight to
   `wrapTextWithAnsi(…, safeWidth - 6)`, so the detail view shows comma-joined guidelines as one blob instead of lines.
-- **`applyCodeSuggestion` can receive `endLine: undefined`** (`pr-tasks.ts:573` → `github-review-threads.ts:411`):
-  a review thread's `line` is `number | null`, `startLine || line` keeps the `undefined`, and the guard
-  `endLine > lines.length || startLine > endLine` is *false* for `undefined` (NaN comparison), so the call proceeds —
-  `slice(startIdx, undefined)` then spans the rest of the file and `splice(startIdx, NaN, …)` deletes nothing,
-  inserting the suggestion instead of replacing the reviewed lines. Add an explicit
-  `!Number.isInteger(startLine) || !Number.isInteger(endLine)` guard.
+- **`applyCodeSuggestion`'s range check cannot reject non-numeric input, and its call site has an
+  unproven argument** (`pr-tasks.ts:573` → `github-review-threads.ts:411`): `endLine > lines.length ||
+  startLine > endLine` is *false* when `endLine` is not a number, so the call proceeds —
+  `slice(startIdx, undefined)` then spans the rest of the file and `splice(startIdx, NaN, …)` deletes
+  nothing, inserting the suggestion instead of replacing the reviewed lines. Reaching that state from
+  the current call site is *not* possible: `line` comes from `PRTask.line`, which the manager always
+  fills in (`pr-tasks-manager.ts:678` `node.line || node.originalLine || 1`). What the compiler does
+  flag there is the sibling argument: `suggestion` is optional, and its narrowing at `pr-tasks.ts:511`
+  is reset by the awaits between the guard and the call, so nothing proves a suggestion still exists.
+  Fixed in P0 by validating the range at the top of the function (contract, in case a future caller
+  is less careful) and re-reading `task.suggestion` at the use site.
 
 ### P2 — structure, resilience, developer experience
 
