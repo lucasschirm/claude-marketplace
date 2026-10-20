@@ -5,6 +5,11 @@
   "keywords": [
     "pi-package"
   ],
+  "scripts": {
+    "test": "bash test/run.sh",
+    "test:unit": "node --test test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts",
+    "validate": "node scripts/validate-marketplace.mjs"
+  },
   "pi": {
     "extensions": [
       "./extensions/observe-pr.ts",

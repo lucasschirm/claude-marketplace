@@ -8,13 +8,17 @@ import * as os from "node:os";
 // PR updates are discarded until that turn starts, and notifications use steer delivery.
 export default function (pi: any) {
   const handlers: Record<string, Function> = {};
+  const tools: Record<string, any> = {};
   const sent: { content: string; opts: any }[] = [];
+  const appended: Array<{ customType: string; data: any }> = [];
 
   const mockPi = {
     on(event: string, handler: Function) {
       handlers[event] = handler;
     },
-    registerTool() {},
+    registerTool(t: any) {
+      tools[t.name] = t;
+    },
     registerCommand() {},
     registerFlag() {},
     getFlag(name: string) {
@@ -24,6 +28,9 @@ export default function (pi: any) {
     setActiveTools() {},
     sendUserMessage(content: string, opts: any) {
       sent.push({ content, opts });
+    },
+    appendEntry(customType: string, data: any) {
+      appended.push({ customType, data });
     },
   };
 
@@ -52,12 +59,17 @@ exit 1
 
   ext(mockPi as any);
 
-  const ctx = { cwd: tmpDir, ui: { setStatus() {}, notify() {} }, hasUI: false };
+  const ctx = {
+    cwd: tmpDir,
+    ui: { setStatus() {}, notify() {} },
+    hasUI: false,
+    sessionManager: { getBranch: () => [] },
+  };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const assert = (cond: unknown, msg: string) => {
     if (!cond) throw new Error(msg);
   };
-  const NOTICE = "The PR 7 recently created is now being observed";
+  const NOTICE = "The PR 7 is now being observed";
 
   pi.on("session_start", async () => {
     try {
@@ -81,7 +93,38 @@ exit 1
       assert(afterSlash > 0 && sent.every((m) => m.opts?.deliverAs === "steer"), `updates must flow with deliverAs steer, got: ${JSON.stringify(sent)}`);
       console.log("✓ Test 3 Passed: notifications are delivered with steer.");
 
-      // The notice was never attached, so the next plain message carries it.
+      // An idle input arms the notice; its prompt then fails (no agent_start) and a slash
+      // command starts the next turn. The stale arm must not mark the undelivered notice.
+      const armed = await handlers.input({ text: "hello", source: "interactive" });
+      assert(
+        armed.action === "transform" && armed.text.includes(NOTICE),
+        `armed message must carry the notice, got ${JSON.stringify(armed)}`,
+      );
+      assert(
+        (await handlers.input({ text: "/skill:bar", source: "interactive" })).action === "continue",
+        "slash input must pass through unchanged",
+      );
+      handlers.agent_start({ type: "agent_start" });
+      const pr7 = ((globalThis as any).__PI_OBSERVED_PRS__ as Map<number, any> | undefined)?.get(7);
+      assert(pr7?.announced === false, "an undelivered notice must not be marked announced by the interposed turn");
+      await sleep(2200);
+      assert(sent.length > afterSlash && sent.every((m) => m.opts?.deliverAs === "steer"), `the slash turn must release suppression, got ${JSON.stringify(sent)}`);
+      console.log("✓ Test 4 Passed: a failed prompt followed by a slash turn does not consume the armed notice.");
+
+      // Same stale-arm class via a turn source that fires no input event: a custom message
+      // (pi.sendMessage(..., { triggerTurn: true })) starting a run while the arm is stale.
+      const armed2 = await handlers.input({ text: "hello", source: "interactive" });
+      assert(
+        armed2.action === "transform" && armed2.text.includes(NOTICE),
+        `armed message must carry the notice, got ${JSON.stringify(armed2)}`,
+      );
+      handlers.before_agent_start({ type: "before_agent_start", messageType: "custom" });
+      handlers.agent_start({ type: "agent_start" });
+      const pr7b = ((globalThis as any).__PI_OBSERVED_PRS__ as Map<number, any> | undefined)?.get(7);
+      assert(pr7b?.announced === false, "an undelivered notice must not be marked announced by a custom-message turn");
+      console.log("✓ Test 5 Passed: a custom-message turn does not consume the armed notice.");
+
+      // The notice was never delivered, so the next plain message re-arms and carries it.
       const res = await handlers.input({ text: "hello", source: "interactive" });
       assert(res.action === "transform" && res.text.startsWith("hello\n\n") && res.text.includes(NOTICE), `plain input must carry the notice, got: ${JSON.stringify(res)}`);
       // A failed prompt (no agent_start) must not lose the notice.
@@ -90,7 +133,7 @@ exit 1
       handlers.agent_start({ type: "agent_start" });
       const after = await handlers.input({ text: "later", source: "interactive" });
       assert(after.action === "continue", "notice must be delivered only once");
-      console.log("✓ Test 4 Passed: notice rides on the plain message, survives a failed prompt, and is delivered once.");
+      console.log("✓ Test 6 Passed: notice rides on the plain message, survives a failed prompt, and is delivered once.");
 
       console.log("✓ All startup notice tests passed successfully!");
       fs.rmSync(tmpDir, { recursive: true, force: true });
