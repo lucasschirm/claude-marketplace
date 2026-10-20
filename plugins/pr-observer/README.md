@@ -15,7 +15,7 @@ Cross-platform PR observation and conversation task management plugin for **Devi
 Install directly from the GitHub repository:
 
 ```bash
-devin plugins install lucasschirm/claude-marketplace#plugins/pr-observer
+devin plugins install "lucasschirm/claude-marketplace#plugins/pr-observer"
 ```
 
 ### Claude Code
