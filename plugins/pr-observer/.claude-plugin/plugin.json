@@ -1,0 +1,9 @@
+{
+  "name": "lsc-pr-observer",
+  "description": "Background PR CI observer and review conversation task manager for Devin CLI and Claude Code.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Lucas Caixeta",
+    "email": "lucas@ogenial.com.br"
+  }
+}
