@@ -62,6 +62,16 @@ test("applyCodeSuggestion refuses line numbers that are not a usable range", asy
 	assert.strictEqual(fs.readFileSync(path.join(repo, "a.ts"), "utf-8"), "one\ntwo\nthree\n");
 });
 
+test("a suggestion may not target the git directory", async () => {
+	const repo = tmpRepo();
+	// Unreachable through the GitHub API, but a hook or config write is code execution, not a bad edit.
+	await assert.rejects(
+		() => applyCodeSuggestion(".git/hooks/pre-commit", 1, 1, "#!/bin/sh\n", repo),
+		/targets the git directory/,
+	);
+	assert.strictEqual(fs.existsSync(path.join(repo, ".git", "hooks", "pre-commit")), false);
+});
+
 test("a suggestion inside the repo is still applied", async () => {
 	const repo = tmpRepo();
 	fs.writeFileSync(path.join(repo, "b.ts"), "one\ntwo\nthree\n", "utf-8");
@@ -69,7 +79,10 @@ test("a suggestion inside the repo is still applied", async () => {
 	assert.strictEqual(fs.readFileSync(path.join(repo, "b.ts"), "utf-8"), "one\nTWO\nthree\n");
 });
 
-test("a symlinked target cannot carry the write outside the repository", async () => {
+// fs.symlinkSync needs privileges a non-admin Windows runner does not grant.
+const skipSymlinks = process.platform === "win32" ? { skip: "needs symlinks" } : {};
+
+test("a symlinked target cannot carry the write outside the repository", skipSymlinks, async () => {
 	const repo = tmpRepo();
 	const outside = tmpDir("pr-task-outside2-");
 	const victim = path.join(outside, "victim.txt");

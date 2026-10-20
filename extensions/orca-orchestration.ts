@@ -10,6 +10,7 @@ import type { ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 import {
 	execOrca,
+	orcaErrorText,
 	resolveOrcaCmd,
 	spawnOrcaCheck,
 	removeOrcaWorktree,
@@ -100,6 +101,12 @@ export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 		),
 	]);
 
+	// A failed list call is not "nothing is running". Collapsing it into an empty list is the
+	// same failure mode F3 removed one level down: a coordinator reading "No live workers
+	// currently active." dispatches a second worker for work already in flight.
+	const workerListErr = workerListRes.ok ? undefined : orcaErrorText(workerListRes);
+	const runListErr = runListRes.ok ? undefined : orcaErrorText(runListRes);
+
 	const workers: OrcaWorkerRow[] =
 		workerListRes.ok && workerListRes.result
 			? ((workerListRes.result as any).workers || workerListRes.result.rows || (Array.isArray(workerListRes.result) ? workerListRes.result : []))
@@ -124,7 +131,7 @@ export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 		return isLive && w.terminalState !== "released";
 	});
 
-	lines.push(`Active / Live Workers (${liveWorkers.length}):`);
+	lines.push(`Active / Live Workers (${workerListErr ? "unknown" : liveWorkers.length}):`);
 	if (liveWorkers.length > 0) {
 		for (const w of liveWorkers) {
 			const state = (w.workerState || w.projection?.stage?.worker || "active").toUpperCase();
@@ -139,6 +146,8 @@ export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 				lines.push(`    Activity: ${w.projection.stage.activity}`);
 			}
 		}
+	} else if (workerListErr) {
+		lines.push(`  Unable to list workers: ${workerListErr}`);
 	} else {
 		lines.push("  No live workers currently active.");
 	}
@@ -147,13 +156,15 @@ export async function formatAllWorkersAndRuns(cwd: string): Promise<string> {
 
 	// 2. Recent Runs
 	const nonLegacyRuns = runs.filter((r: any) => r.id !== "run_legacy_local" && !r.legacy);
-	lines.push(`Recent Runs (${nonLegacyRuns.length}):`);
+	lines.push(`Recent Runs (${runListErr ? "unknown" : nonLegacyRuns.length}):`);
 	if (nonLegacyRuns.length > 0) {
 		for (const r of nonLegacyRuns.slice(0, 10)) {
 			const obj = r.objective ? ` - "${r.objective}"` : "";
 			const coord = r.coordinator_handle ? ` (Coord: ${r.coordinator_handle})` : "";
 			lines.push(`  - ${r.id || r.runId}${obj}${coord}`);
 		}
+	} else if (runListErr) {
+		lines.push(`  Unable to list Runs: ${runListErr}`);
 	} else {
 		lines.push("  No Runs registered.");
 	}
@@ -298,9 +309,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
  * The `details` block every tool result of this extension carries: which tool answered, the Run it
  * acted on and how many workers are observed here. Per-call facts go in `extra` (and win).
  */
-function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
-	return { tool, runId: activeRunId ?? null, observedWorkers: observedWorkers.size, ...extra };
-}
+	function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
+		return { tool, runId: activeRunId ?? null, observedWorkers: observedWorkers.size, ...extra };
+	}
 	let checkProcess: ChildProcess | null = null;
 	let reconcileTimer: NodeJS.Timeout | undefined;
 	let restartCheckTimer: NodeJS.Timeout | undefined;
@@ -1055,9 +1066,22 @@ function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 		},
 	};
 	pi.registerTool(observeToolDef);
+	// The alias shares the definition object, so it has to re-stamp `details.tool`: a model that
+	// called `orca_orchestration_observe_orchestration` and is told `tool:
+	// "orca_orchestration_observe"` learns the wrong name for the tool it used.
 	pi.registerTool({
 		...observeToolDef,
 		name: "orca_orchestration_observe_orchestration",
+		async execute(
+			toolCallId: string,
+			params: { action?: string; dispatch_id?: string; run_id?: string; all?: boolean },
+			signal: AbortSignal | undefined,
+			onUpdate: unknown,
+			ctx: ExtensionToolContext,
+		) {
+			const res = await observeToolDef.execute(toolCallId, params, signal, onUpdate, ctx);
+			return { ...res, details: { ...(res.details as ToolDetails), tool: "orca_orchestration_observe_orchestration" } };
+		},
 	});
 
 	// 3. orca_orchestration_status
@@ -1528,7 +1552,11 @@ function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 					ctx.ui.notify("Please specify a dispatch ID: /orchestration stop <dispatch_id>", "warning");
 					return;
 				}
-				await execOrca(["orchestration", "worker-stop", "--dispatch", target], { cwd: ctx.cwd });
+				const stopRes = await execOrca(["orchestration", "worker-stop", "--dispatch", target], { cwd: ctx.cwd });
+				if (!stopRes.ok) {
+					ctx.ui.notify(`Failed to stop worker ${target}: ${orcaErrorText(stopRes)}`, "error");
+					return;
+				}
 				const w = observedWorkers.get(target);
 				if (w) w.status = "stopped";
 				ctx.ui.notify(`Stopped worker ${target}.`, "info");
@@ -1557,7 +1585,11 @@ function toolDetails(tool: string, extra: ToolDetails = {}): ToolDetails {
 					}
 					return;
 				}
-				await execOrca(["orchestration", "worker-release", "--dispatch", target], { cwd: ctx.cwd });
+				const releaseRes = await execOrca(["orchestration", "worker-release", "--dispatch", target], { cwd: ctx.cwd });
+				if (!releaseRes.ok) {
+					ctx.ui.notify(`Failed to release worker ${target}: ${orcaErrorText(releaseRes)}`, "error");
+					return;
+				}
 				const w = observedWorkers.get(target);
 				if (w) w.status = "released";
 				ctx.ui.notify(`Released worker ${target}.`, "info");

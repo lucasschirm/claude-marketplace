@@ -530,6 +530,8 @@ export default function (pi: ExtensionAPI) {
 		// allPassedReported stays false until there is a real pass.
 		let checks: unknown;
 		let ghErr: unknown;
+		// `stale` is read only by the finally below: a stale call still releases the slot, but it
+		// must not touch ghHealth (it never saw the response) or announce anything.
 		let stale = false;
 		// acquireSlot() to release() must be exception-safe: the singleton counts a missed release
 		// as a permanently busy slot, so from then on no timer anywhere can claim a retry again.
@@ -555,8 +557,6 @@ export default function (pi: ExtensionAPI) {
 			}
 			ghHealth.release();
 		}
-
-		if (stale) return;
 
 		try {
 			if (ghErr !== undefined) {

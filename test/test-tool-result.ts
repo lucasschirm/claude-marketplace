@@ -32,7 +32,14 @@ test("capList bounds an id list under the caller's own key and reports the cut",
 });
 
 test("parseEnvKeys reports variable names and never their values", () => {
-	const out = ["DB_HOST=localhost", "DB_PORT=3306", "# a comment", "DB_PASSWORD=s3cr3t", "", "BAD LINE"].join("\n");
+	const out = [
+		"DB_HOST=localhost",
+		"export DB_PORT=3306", // the .env form a shell would source
+		"# a comment",
+		"DB_PASSWORD=s3cr3t",
+		"",
+		"BAD LINE",
+	].join("\n");
 	const keys = parseEnvKeys(out);
 	assert.deepStrictEqual(keys, ["DB_HOST", "DB_PORT", "DB_PASSWORD"]);
 	assert.ok(!JSON.stringify(keys).includes("s3cr3t"), "values must never reach details");

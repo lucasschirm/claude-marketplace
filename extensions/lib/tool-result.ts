@@ -37,7 +37,8 @@ export function ok<T extends ToolDetails>(text: string, details: T): AgentToolRe
 export function parseEnvKeys(output: string): string[] {
 	return output
 		.split("\n")
-		.map((line) => /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line)?.[1])
+		// `export KEY=value` is as valid as a bare KEY=value in the .env format these CLIs emit.
+		.map((line) => /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line)?.[1])
 		.filter((key): key is string => Boolean(key));
 }
 

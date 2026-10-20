@@ -168,6 +168,16 @@ export function resolveOrcaCmd(): string {
 }
 
 /**
+ * "message (CODE)" from a failed envelope, for tool text and user-facing notices. A caller that
+ * reports a failure must not reduce it to an empty result: a coordinator told "no workers" will
+ * dispatch work that is already running.
+ */
+export function orcaErrorText(env: { error?: { code?: string; message: string } }): string {
+	const message = env.error?.message?.trim() || "unknown error";
+	return env.error?.code ? `${message} (${env.error.code})` : message;
+}
+
+/**
  * Executes an Orca CLI command with JSON formatting and returns the parsed envelope.
  */
 export async function execOrca<T = any>(args: string[], options: OrcaCommandOptions = {}): Promise<OrcaEnvelope<T>> {
