@@ -19,32 +19,36 @@ cd "$(dirname "$0")/.."
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
 UNIT_TESTS="test/test-devin-bash-guard.ts test/test-devin-tui-safety.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-orca-status.ts"
 
-ALL_SUITES="typecheck manifest unit observe-pr observe-pr-gh-failure branch-observer startup-notice observe-pr-resume pr-tasks pr-tasks-gh-failure pr-tasks-reconcile tools"
+ALL_SUITES="typecheck lint format check manifest unit observe-pr observe-pr-gh-failure branch-observer startup-notice observe-pr-resume pr-tasks pr-tasks-gh-failure pr-tasks-reconcile tools"
 
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
 }
 
-# A test file no suite runs is a test that does not exist. Three files in this directory need a real
-# backend and are named as excluded in the header; everything else has to be referenced by this
-# runner (UNIT_TESTS or a suite) or by a suite's own .sh - otherwise it silently never executes.
-check_every_test_is_wired() {
-  # Named in the header above: they start real Devin sessions, so they are run deliberately.
-  local deliberate=" test-devin-delegate.ts test-devin-delegate-lifecycle.ts "
-  local file base
-  for file in test/test-*.ts; do
-    base="${file#test/}"
-    case "$deliberate" in *" $base "*) continue ;; esac
-    if ! grep -q -- "$base" test/run.sh test/*.sh 2>/dev/null; then
-      echo "✖ $file is wired into no suite - add it to UNIT_TESTS or to a suite runner" >&2
-      exit 1
-    fi
-  done
-}
-check_every_test_is_wired
+# A test file no suite runs is a test that does not exist. The check lives in
+# scripts/check-quality.mjs (one implementation for local runs, CI and `npm run check`); it needs no
+# installed dependencies, so it is safe to call before `npm install`.
+node scripts/check-quality.mjs --only wiredTests
 
 run_suite() {
   case "$1" in
+    lint)
+      if [ ! -x node_modules/.bin/biome ]; then
+        echo "biome is not installed - run 'npm install' first (it is a devDependency)" >&2
+        exit 1
+      fi
+      npm run lint
+      ;;
+    check)
+      npm run check
+      ;;
+    format)
+      if [ ! -x node_modules/.bin/biome ]; then
+        echo "biome is not installed - run 'npm install' first (it is a devDependency)" >&2
+        exit 1
+      fi
+      npm run format:check
+      ;;
     typecheck)
       # The gate needs the type sources (typescript + the pinned pi packages); CI installs them in
       # the quality job. Fail with the reason instead of a bare 'tsc: not found'.
