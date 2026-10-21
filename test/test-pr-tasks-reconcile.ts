@@ -260,16 +260,28 @@ export default async function (pi: any) {
 	fs.mkdirSync(binDir);
 	execSync("git init -b main", { cwd: tmpDir, stdio: "ignore" });
 	const statePath = path.join(tmpDir, "state.json");
+	const callsPath = path.join(tmpDir, "calls.log");
 
 	// state.json: { prs: { [pr]: threads[] }, invalidIds: string[], afterFailure?: { [pr]: threads[] },
-	//               failFetch?: number[], calls: string[] }
+	//               failFetch?: number[] }
+	// Recorded gh calls live in an append-only log, because a refresh syncs several PRs at once:
+	// two mock processes read-modifying-writing one JSON file would corrupt each other (real gh has
+	// no shared mutable state, so this is purely a harness concern). Small O_APPEND writes are one
+	// syscall, so appends interleave safely; state.json itself is replaced atomically.
 	// Mutations on IDs in invalidIds fail like GitHub does for a stale node ID;
 	// the first such failure swaps in `afterFailure` (GitHub now reports the new ID).
 	const mockGh = `#!/usr/bin/env node
 const fs = require("node:fs");
 const statePath = ${JSON.stringify(statePath)};
+const callsPath = ${JSON.stringify(callsPath)};
 const state = JSON.parse(fs.readFileSync(statePath, "utf-8"));
-const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
+const logCall = (c) => fs.appendFileSync(callsPath, c + "\\n");
+const callCount = () => fs.readFileSync(callsPath, "utf-8").split("\\n").filter(Boolean).length;
+const save = () => {
+  const tmp = statePath + "." + process.pid + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(state));
+  fs.renameSync(tmp, statePath);
+};
 const args = process.argv.slice(2);
 const arg = (name) => { const a = args.find((x) => x.startsWith(name + "=")); return a ? a.slice(name.length + 1) : undefined; };
 
@@ -287,7 +299,7 @@ if (args[0] === "api" && args[1] === "graphql") {
   const threadId = arg("threadId");
   if (query.includes("addPullRequestReviewThreadReply") || query.includes("resolveReviewThread")) {
     const kind = query.includes("resolveReviewThread") ? "resolve" : "reply";
-    state.calls.push(kind + ":" + threadId);
+    logCall(kind + ":" + threadId);
     if (state.invalidIds.includes(threadId)) {
       if (state.afterFailure) { Object.assign(state.prs, state.afterFailure); delete state.afterFailure; }
       save();
@@ -299,15 +311,15 @@ if (args[0] === "api" && args[1] === "graphql") {
       console.log(JSON.stringify({ data: { resolveReviewThread: { thread: { id: threadId, isResolved: true } } } }));
     } else {
       console.log(JSON.stringify({ data: { addPullRequestReviewThreadReply: { comment: {
-        id: "PRRC_posted_" + state.calls.length, databaseId: 90000 + state.calls.length,
+        id: "PRRC_posted_" + callCount(), databaseId: 90000 + callCount(),
         body: arg("body"), createdAt: "2026-10-11T00:00:00Z", author: { login: "bot" } } } } }));
     }
     process.exit(0);
   }
   if (query.includes("reviewThreads")) {
     const pr = Number(arg("pr"));
-    state.calls.push("fetch:" + pr);
-    state.calls.push("fetchcwd:" + pr + "@" + fs.realpathSync(process.cwd()));
+    logCall("fetch:" + pr);
+    logCall("fetchcwd:" + pr + "@" + fs.realpathSync(process.cwd()));
     save();
     if ((state.failFetch || []).includes(pr)) {
       console.log(JSON.stringify({ data: { repository: { pullRequest: null } } }));
@@ -324,16 +336,39 @@ process.exit(0);
 	fs.writeFileSync(path.join(binDir, "gh"), mockGh, { mode: 0o755 });
 	process.env.PATH = `${binDir}:${process.env.PATH}`;
 
-	const writeState = (s: any) => fs.writeFileSync(statePath, JSON.stringify({ invalidIds: [], calls: [], ...s }));
-	const readState = () => JSON.parse(fs.readFileSync(statePath, "utf-8"));
+	const writeState = (s: any) => {
+		const tmp = `${statePath}.writer.tmp`;
+		fs.writeFileSync(tmp, JSON.stringify({ invalidIds: [], ...s }));
+		fs.renameSync(tmp, statePath);
+		// A new scenario starts its call recording from scratch (as the old in-state list did).
+		fs.writeFileSync(callsPath, "");
+	};
+	const readState = () => {
+		const s = JSON.parse(fs.readFileSync(statePath, "utf-8"));
+		try {
+			s.calls = fs.readFileSync(callsPath, "utf-8").split("\n").filter(Boolean);
+		} catch {
+			s.calls = [];
+		}
+		return s;
+	};
 	const callsOf = (prefix: string) => readState().calls.filter((c: string) => c.startsWith(prefix));
 
 	ext(mockPi);
 	const ctx: any = { cwd: tmpDir, ui: mockUI };
+	// Syncs are scheduled on the lifecycle boundaries instead of awaited there (Pi must not stall),
+	// so a test that just changed the mock GitHub state waits for quiescence before an awaited tool
+	// call reads the result — the same ordering a real boundary produces.
+	const flush = async () => {
+		const settled = (globalThis as any).__PI_PR_TASKS_FLUSH__;
+		if (settled && !(await settled(20_000))) throw new Error("background refreshes did not settle in time");
+	};
 	const hasListedTask = async (id: number) =>
 		(await list({ show_all: true })).includes(`**Conversation Id**: ${id} `);
-	const list = async (params: any) =>
-		(await tools["pr_tasks_list"].execute("l", params, undefined, undefined, ctx)).content[0].text as string;
+	const list = async (params: any) => {
+		await flush();
+		return (await tools["pr_tasks_list"].execute("l", params, undefined, undefined, ctx)).content[0].text as string;
+	};
 	const settle = async () => {
 		let result: any;
 		for (const h of eventHandlers["agent_before_settle"] || []) {
@@ -481,6 +516,10 @@ process.exit(0);
 		writeState({
 			prs: { "101": [thread("PRRT_s6", 6001, { replies: [{ id: "PRRC_r", databaseId: 6100, body: "any update?", author: "reviewer" }] })] },
 		});
+		// settle() decides from cached state (an awaited sync here would stall the agent finishing
+		// its turn), so the change becomes visible once a refresh landed — an awaited tool sync is
+		// the deterministic way to model that boundary.
+		await list({ pr_number: 101 });
 		assert((await settle())?.continue, "a change in the open tasks resumes the nudge");
 
 		// Exhaust the cap again, then check what re-arms it.
