@@ -1,9 +1,6 @@
 import ext from "../extensions/pr-tasks.ts";
 import { PRTasksManager } from "../extensions/lib/pr-tasks-manager.ts";
-import {
-	isStaleNodeError,
-	type GitHubReviewThreadNode,
-} from "../extensions/lib/github-review-threads.ts";
+import { isStaleNodeError, type GitHubReviewThreadNode } from "../extensions/lib/github-review-threads.ts";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -64,8 +61,7 @@ function thread(
 }
 
 function managerTests(): void {
-	const open = (m: PRTasksManager, pr: number) =>
-		m.getAllTasks(pr).filter((t) => t.status === "UNRESOLVED" || t.status === "BLOCKED");
+	const open = (m: PRTasksManager, pr: number) => m.getAllTasks(pr).filter((t) => t.status === "UNRESOLVED" || t.status === "BLOCKED");
 
 	console.log("=== Manager: node ID rotation reconciles instead of duplicating ===");
 	{
@@ -141,7 +137,10 @@ function managerTests(): void {
 		const res = m.syncFromGitHubThreads(7, [thread("PRRT_A", 1100)], undefined, { repo: "o/a", cwd: "/a" });
 		assert(res.staleTasks.length === 0, "another repo's PR with the same number must not be marked stale", res);
 		assert(open(m, 7).length === 2, "both repos' tasks stay open", m.getAllTasks(7));
-		const prs = m.getPRsToSync().map((p) => `${p.cwd}|${p.prNumber}`).sort();
+		const prs = m
+			.getPRsToSync()
+			.map((p) => `${p.cwd}|${p.prNumber}`)
+			.sort();
 		assert(JSON.stringify(prs) === JSON.stringify(["/a|7", "/b|7"]), "open-task PRs keep their own folder", prs);
 	}
 	console.log("✓ repo scoping");
@@ -171,11 +170,7 @@ function managerTests(): void {
 	console.log("=== Manager: vanished threads become STALE, reported on the transition only ===");
 	{
 		const m = new PRTasksManager();
-		m.syncFromGitHubThreads(3, [
-			thread("PRRT_1", 701),
-			thread("PRRT_2", 702, { isResolved: true }),
-			thread("PRRT_3", 703),
-		]);
+		m.syncFromGitHubThreads(3, [thread("PRRT_1", 701), thread("PRRT_2", 702, { isResolved: true }), thread("PRRT_3", 703)]);
 		m.markBlocked("703", "need info");
 		// (a partial or failed fetch never reaches the manager: fetchReviewThreads throws instead)
 		let res = m.syncFromGitHubThreads(3, []);
@@ -363,8 +358,7 @@ process.exit(0);
 		const settled = (globalThis as any).__PI_PR_TASKS_FLUSH__;
 		if (settled && !(await settled(20_000))) throw new Error("background refreshes did not settle in time");
 	};
-	const hasListedTask = async (id: number) =>
-		(await list({ show_all: true })).includes(`**Conversation Id**: ${id} `);
+	const hasListedTask = async (id: number) => (await list({ show_all: true })).includes(`**Conversation Id**: ${id} `);
 	const list = async (params: any) => {
 		await flush();
 		return (await tools["pr_tasks_list"].execute("l", params, undefined, undefined, ctx)).content[0].text as string;
@@ -470,11 +464,19 @@ process.exit(0);
 	sentMessages.length = 0;
 	assert(!(await settle())?.continue && sentMessages.length === 0, "stale task does not drive the nudge", sentMessages);
 	res = await tools["pr_task_resolve"].execute("r", { conversation_id: "4001", message: "Done" }, undefined, undefined, ctx);
-	assert(!res.isError && res.content[0].text.includes("now marked as STALE"), "a still-listed rejected thread is retried, not cleared", res.content[0].text);
+	assert(
+		!res.isError && res.content[0].text.includes("now marked as STALE"),
+		"a still-listed rejected thread is retried, not cleared",
+		res.content[0].text,
+	);
 	assert(callsOf("reply:PRRT_broken").length === 2, "resolve retried the listed thread", readState().calls);
 	writeState({ prs: { "101": [], "400": [] } });
 	res = await tools["pr_task_resolve"].execute("r", { conversation_id: "4001", message: "Done" }, undefined, undefined, ctx);
-	assert(!res.isError && res.content[0].text.includes("no review thread on GitHub anymore"), "resolving a vanished stale task succeeds locally", res.content[0].text);
+	assert(
+		!res.isError && res.content[0].text.includes("no review thread on GitHub anymore"),
+		"resolving a vanished stale task succeeds locally",
+		res.content[0].text,
+	);
 	assert(callsOf("reply").length === 0, "nothing posted for the vanished thread", readState().calls);
 	console.log("✓ Scenario 4 passed");
 
@@ -550,8 +552,16 @@ process.exit(0);
 	]);
 	try {
 		await list({});
-		assert(callsOf(`fetchcwd:700@`).includes(`fetchcwd:700@${real(otherDir)}`), "observed PR synced from its own folder", readState().calls);
-		assert(callsOf(`fetchcwd:701@`).includes(`fetchcwd:701@${real(goneDir)}`), "second observed PR synced from its folder", readState().calls);
+		assert(
+			callsOf(`fetchcwd:700@`).includes(`fetchcwd:700@${real(otherDir)}`),
+			"observed PR synced from its own folder",
+			readState().calls,
+		);
+		assert(
+			callsOf(`fetchcwd:701@`).includes(`fetchcwd:701@${real(goneDir)}`),
+			"second observed PR synced from its folder",
+			readState().calls,
+		);
 		// PR 701 stops being observed and its folder is removed; its open task must
 		// still be reconciled, now from the current folder.
 		(globalThis as any).__PI_OBSERVED_PRS__ = new Map<number, any>([[700, { cwd: otherDir }]]);
@@ -617,7 +627,11 @@ process.exit(0);
 	(globalThis as any).__PI_OBSERVED_PRS__ = new Map<number, any>([[900, { cwd: removedDir }]]);
 	try {
 		await list({});
-		assert(callsOf("fetch:900").length === 0, "an observed PR with a removed folder must not be synced from the current one", readState().calls);
+		assert(
+			callsOf("fetch:900").length === 0,
+			"an observed PR with a removed folder must not be synced from the current one",
+			readState().calls,
+		);
 		assert(!(await hasListedTask(9001)), "no task created from the current folder's PR #900");
 	} finally {
 		delete (globalThis as any).__PI_OBSERVED_PRS__;

@@ -347,13 +347,7 @@ process.exit(0);
 
 	// Test 2: pr_task_detail
 	console.log("\n=== Test 2: Testing pr_task_detail ===");
-	const detailRes = await tools["pr_task_detail"].execute(
-		"call2",
-		{ conversation_id: "1001" },
-		undefined,
-		undefined,
-		toolCtx,
-	);
+	const detailRes = await tools["pr_task_detail"].execute("call2", { conversation_id: "1001" }, undefined, undefined, toolCtx);
 	const detailText = detailRes.content[0].text;
 	console.log("pr_task_detail output:\n", detailText);
 
@@ -457,9 +451,7 @@ process.exit(0);
 	}
 
 	console.log("Sent agent messages after sync:", sentMessages);
-	const unblockNotification = sentMessages.find((m) =>
-		m.includes("The task 1002 you blocked received a reply from the user"),
-	);
+	const unblockNotification = sentMessages.find((m) => m.includes("The task 1002 you blocked received a reply from the user"));
 	if (!unblockNotification) {
 		console.error("Test 7 Failed: Agent was not notified of user reply to blocked task");
 		process.exit(1);
@@ -564,13 +556,23 @@ process.exit(0);
 	const t10b = mkThread("PRRT_10b", 1010, "src/rename.ts", "Rename this variable");
 	killThread("PRRT_10a");
 	writeState("extra_threads.json", [t10b, t11, t12, t13, t14]);
-	const res10 = await tools["pr_task_resolve"].execute("call10", { conversation_id: "1010", message: "Renamed" }, undefined, undefined, toolCtx);
+	const res10 = await tools["pr_task_resolve"].execute(
+		"call10",
+		{ conversation_id: "1010", message: "Renamed" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res10.content[0].text);
 	if (res10.isError || !res10.content[0].text.includes("resolved successfully")) {
 		console.error("Test 10 Failed: resolve should succeed against the current thread node");
 		process.exit(1);
 	}
-	if (readLog("replies.log").includes("PRRT_10a") || !readLog("replies.log").includes("PRRT_10b") || !readLog("resolved_ids.log").includes("PRRT_10b")) {
+	if (
+		readLog("replies.log").includes("PRRT_10a") ||
+		!readLog("replies.log").includes("PRRT_10b") ||
+		!readLog("resolved_ids.log").includes("PRRT_10b")
+	) {
 		console.error("Test 10 Failed: reply/resolve did not target the current thread node", readLog("replies.log"));
 		process.exit(1);
 	}
@@ -587,7 +589,13 @@ process.exit(0);
 	killThread("PRRT_11a");
 	writeState("extra_threads.json", [t10b, t11b, t12, t13, t14]);
 	const repliesBefore11 = readLog("replies.log").length;
-	const res11 = await tools["pr_task_resolve"].execute("call11", { conversation_id: "1011", message: "Done" }, undefined, undefined, toolCtx);
+	const res11 = await tools["pr_task_resolve"].execute(
+		"call11",
+		{ conversation_id: "1011", message: "Done" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res11.content[0].text);
 	if (res11.isError || !res11.content[0].text.includes("already resolved")) {
 		console.error("Test 11 Failed: expected an 'already resolved' success result");
@@ -597,7 +605,11 @@ process.exit(0);
 		console.error("Test 11 Failed: no reply should be posted to an upstream-resolved conversation");
 		process.exit(1);
 	}
-	if (!(await listTasks(true)).includes("**Conversation Id**: 2011 (2026-10-09T10:00:00Z by reviewer_eve)\n**Conversation message**: Handle the null case\n**File**: src/merge.ts@9\n**Status**: RESOLVED")) {
+	if (
+		!(await listTasks(true)).includes(
+			"**Conversation Id**: 2011 (2026-10-09T10:00:00Z by reviewer_eve)\n**Conversation message**: Handle the null case\n**File**: src/merge.ts@9\n**Status**: RESOLVED",
+		)
+	) {
 		console.error("Test 11 Failed: task 1011 should be RESOLVED and re-linked to the re-posted thread (as 2011)");
 		process.exit(1);
 	}
@@ -608,13 +620,23 @@ process.exit(0);
 	killThread("PRRT_12");
 	writeState("extra_threads.json", [t10b, t11b, t13, t14]);
 	const repliesBefore12 = readLog("replies.log").length;
-	const res12 = await tools["pr_task_blocked"].execute("call12", { conversation_id: "1012", reason: "Need input" }, undefined, undefined, toolCtx);
+	const res12 = await tools["pr_task_blocked"].execute(
+		"call12",
+		{ conversation_id: "1012", reason: "Need input" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res12.content[0].text);
 	if (res12.isError || !res12.content[0].text.includes("marked as STALE") || readLog("replies.log").length !== repliesBefore12) {
 		console.error("Test 12 Failed: expected the task to be marked STALE without posting");
 		process.exit(1);
 	}
-	if (!(await listTasks()).includes("**Conversation Id**: 1012 (2026-10-09T10:00:00Z by reviewer_eve)\n**Conversation message**: Is this still needed?\n**File**: src/gone.ts@5\n**Status**: STALE")) {
+	if (
+		!(await listTasks()).includes(
+			"**Conversation Id**: 1012 (2026-10-09T10:00:00Z by reviewer_eve)\n**Conversation message**: Is this still needed?\n**File**: src/gone.ts@5\n**Status**: STALE",
+		)
+	) {
 		console.error("Test 12 Failed: stale task should be listed with STALE status");
 		process.exit(1);
 	}
@@ -628,8 +650,17 @@ process.exit(0);
 	console.log("\n=== Test 13: pr_task_resolve retries with the re-synced thread ID ===");
 	const t13b = mkThread("PRRT_13b", 1013, "src/lag.ts", "Add a test for this");
 	killThread("PRRT_13a");
-	writeState("extra_threads_seq.json", [[t10b, t11b, t13, t14], [t10b, t11b, t13b, t14]]);
-	const res13 = await tools["pr_task_resolve"].execute("call13", { conversation_id: "1013", message: "Added" }, undefined, undefined, toolCtx);
+	writeState("extra_threads_seq.json", [
+		[t10b, t11b, t13, t14],
+		[t10b, t11b, t13b, t14],
+	]);
+	const res13 = await tools["pr_task_resolve"].execute(
+		"call13",
+		{ conversation_id: "1013", message: "Added" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res13.content[0].text);
 	if (res13.isError || !res13.content[0].text.includes("resolved successfully") || !readLog("resolved_ids.log").includes("PRRT_13b")) {
 		console.error("Test 13 Failed: expected the retry to resolve the current thread node");
@@ -672,8 +703,20 @@ process.exit(0);
 	const t16 = mkThread("PRRT_16", 1016, "src/suggest.ts", "Use\n```suggestion\nB\n```", { line: 2 });
 	writeState("extra_threads.json", [t10b, t11b, t13b, t14, t16]);
 	await listTasks();
-	writeState("extra_threads.json", [t10b, t11b, t13b, t14, { ...t16, comments: { nodes: [{ ...t16.comments.nodes[0], body: "Use\n```suggestion\nrm -rf\n```" }] } }]);
-	const res16 = await tools["pr_task_resolve"].execute("call16", { conversation_id: "1016", message: "Applied", accept_suggestion: true }, undefined, undefined, toolCtx);
+	writeState("extra_threads.json", [
+		t10b,
+		t11b,
+		t13b,
+		t14,
+		{ ...t16, comments: { nodes: [{ ...t16.comments.nodes[0], body: "Use\n```suggestion\nrm -rf\n```" }] } },
+	]);
+	const res16 = await tools["pr_task_resolve"].execute(
+		"call16",
+		{ conversation_id: "1016", message: "Applied", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res16.content[0].text);
 	if (!res16.isError || !res16.content[0].text.includes("changed on GitHub") || fs.readFileSync(suggestionFile, "utf-8") !== "a\nb\nc\n") {
 		console.error("Test 16 Failed: a changed suggestion must not be applied");
@@ -684,15 +727,29 @@ process.exit(0);
 	// Test 17: the reviewer re-opens a resolved conversation -> it is open again and can be resolved again
 	console.log("\n=== Test 17: a conversation re-opened by the reviewer is tracked and resolvable again ===");
 	writeState("reopened.json", ["PRRT_2"]);
-	if (!(await listTasks()).includes("**Conversation Id**: 1002 (2026-10-08T17:10:00Z by reviewer_bob)\n**Conversation message**: Why did we write this?\n**File**: src/sample.ts@3\n**Status**: UNRESOLVED")) {
+	if (
+		!(await listTasks()).includes(
+			"**Conversation Id**: 1002 (2026-10-08T17:10:00Z by reviewer_bob)\n**Conversation message**: Why did we write this?\n**File**: src/sample.ts@3\n**Status**: UNRESOLVED",
+		)
+	) {
 		console.error("Test 17 Failed: the re-opened conversation should be UNRESOLVED again");
 		process.exit(1);
 	}
 	await tools["pr_task_detail"].execute("detail17", { conversation_id: "1002" }, undefined, undefined, toolCtx); // the agent reads it again
 	const repliesBefore17 = readLog("replies.log").filter((id) => id === "PRRT_2").length;
-	const res17 = await tools["pr_task_resolve"].execute("call17", { conversation_id: "1002", message: "Re-resolving" }, undefined, undefined, toolCtx);
+	const res17 = await tools["pr_task_resolve"].execute(
+		"call17",
+		{ conversation_id: "1002", message: "Re-resolving" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res17.content[0].text);
-	if (res17.isError || !res17.content[0].text.includes("resolved successfully") || readLog("replies.log").filter((id) => id === "PRRT_2").length !== repliesBefore17 + 1) {
+	if (
+		res17.isError ||
+		!res17.content[0].text.includes("resolved successfully") ||
+		readLog("replies.log").filter((id) => id === "PRRT_2").length !== repliesBefore17 + 1
+	) {
 		console.error("Test 17 Failed: a conversation still open on GitHub must be replied to and resolved");
 		process.exit(1);
 	}
@@ -703,13 +760,30 @@ process.exit(0);
 	const t18 = mkThread("PRRT_18", 1018, "src/retry.ts", "Simplify this");
 	writeState("extra_threads.json", [t10b, t11b, t13b, t14, t16, t18]);
 	fs.writeFileSync(path.join(stateDir, "resolve_fails"), "1");
-	const res18a = await tools["pr_task_resolve"].execute("call18a", { conversation_id: "1018", message: "Retry me" }, undefined, undefined, toolCtx);
+	const res18a = await tools["pr_task_resolve"].execute(
+		"call18a",
+		{ conversation_id: "1018", message: "Retry me" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("First result:", res18a.content[0].text);
 	fs.rmSync(path.join(stateDir, "resolve_fails"));
 	const repliesAfter18a = readLog("replies.log").length;
-	const res18b = await tools["pr_task_resolve"].execute("call18b", { conversation_id: "1018", message: "Retry me" }, undefined, undefined, toolCtx);
+	const res18b = await tools["pr_task_resolve"].execute(
+		"call18b",
+		{ conversation_id: "1018", message: "Retry me" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Retry result:", res18b.content[0].text);
-	if (!res18a.isError || res18b.isError || !res18b.content[0].text.includes("already been posted") || readLog("replies.log").length !== repliesAfter18a) {
+	if (
+		!res18a.isError ||
+		res18b.isError ||
+		!res18b.content[0].text.includes("already been posted") ||
+		readLog("replies.log").length !== repliesAfter18a
+	) {
 		console.error("Test 18 Failed: the retry should only resolve the thread");
 		process.exit(1);
 	}
@@ -723,7 +797,13 @@ process.exit(0);
 	await tools["pr_task_resolve"].execute("call19a", { conversation_id: "1019", message: "First" }, undefined, undefined, toolCtx);
 	fs.rmSync(path.join(stateDir, "resolve_fails"));
 	const repliesAfter19a = readLog("replies.log").length;
-	const res19 = await tools["pr_task_resolve"].execute("call19b", { conversation_id: "1019", message: "Second, different" }, undefined, undefined, toolCtx);
+	const res19 = await tools["pr_task_resolve"].execute(
+		"call19b",
+		{ conversation_id: "1019", message: "Second, different" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res19.content[0].text);
 	if (res19.isError || readLog("replies.log").length !== repliesAfter19a + 1 || res19.content[0].text.includes("already been posted")) {
 		console.error("Test 19 Failed: a different message must be posted");
@@ -741,7 +821,13 @@ process.exit(0);
 		[t10b, t11b, t13b, t14, t16, t18, t19, t20],
 		[t10b, t11b, t13b, t14, t16, t18, t19, mkThread("PRRT_20b", 1020, "src/race.ts", "Fix the race")],
 	]);
-	const res20 = await tools["pr_task_resolve"].execute("call20", { conversation_id: "1020", message: "Fixed" }, undefined, undefined, toolCtx);
+	const res20 = await tools["pr_task_resolve"].execute(
+		"call20",
+		{ conversation_id: "1020", message: "Fixed" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res20.content[0].text);
 	if (res20.isError || !readLog("resolved_ids.log").includes("PRRT_20b")) {
 		console.error("Test 20 Failed: expected the current thread node to be resolved");
@@ -757,12 +843,21 @@ process.exit(0);
 	await listTasks();
 	fs.writeFileSync(path.join(stateDir, "threads_fail"), "1");
 	const repliesBefore21 = readLog("replies.log").length;
-	const res21 = await tools["pr_task_resolve"].execute("call21", { conversation_id: "1021", message: "Checked" }, undefined, undefined, toolCtx);
+	const res21 = await tools["pr_task_resolve"].execute(
+		"call21",
+		{ conversation_id: "1021", message: "Checked" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	fs.rmSync(path.join(stateDir, "threads_fail"));
 	console.log("Result:", res21.content[0].text);
 	if (
 		!res21.isError ||
-		!(res21.content[0].text.includes("could not check the conversation on GitHub") || res21.content[0].text.includes("temporarily unreachable")) ||
+		!(
+			res21.content[0].text.includes("could not check the conversation on GitHub") ||
+			res21.content[0].text.includes("temporarily unreachable")
+		) ||
 		readLog("replies.log").length !== repliesBefore21
 	) {
 		console.error("Test 21 Failed: expected an error and no reply");
@@ -775,12 +870,35 @@ process.exit(0);
 	const multiFile = path.join(tmpDir, "src", "multi.ts");
 	fs.writeFileSync(multiFile, "one\ntwo\nthree\n");
 	const t22 = mkThread("PRRT_22", 1022, "src/multi.ts", "Split\n```suggestion\ntwo-a\ntwo-b\n```", { line: 2 });
-	writeState("extra_threads.json", [t10b, t11b, t13b, t14, t16, t18, t19, mkThread("PRRT_20b", 1020, "src/race.ts", "Fix the race"), t21, t22]);
+	writeState("extra_threads.json", [
+		t10b,
+		t11b,
+		t13b,
+		t14,
+		t16,
+		t18,
+		t19,
+		mkThread("PRRT_20b", 1020, "src/race.ts", "Fix the race"),
+		t21,
+		t22,
+	]);
 	await listTasks();
 	fs.writeFileSync(path.join(stateDir, "reply_fails"), "1");
-	const res22a = await tools["pr_task_resolve"].execute("call22a", { conversation_id: "1022", message: "Split it", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res22a = await tools["pr_task_resolve"].execute(
+		"call22a",
+		{ conversation_id: "1022", message: "Split it", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	fs.rmSync(path.join(stateDir, "reply_fails"));
-	const res22b = await tools["pr_task_resolve"].execute("call22b", { conversation_id: "1022", message: "Split it", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res22b = await tools["pr_task_resolve"].execute(
+		"call22b",
+		{ conversation_id: "1022", message: "Split it", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Results:", res22a.content[0].text, "|", res22b.content[0].text);
 	const multi = fs.readFileSync(multiFile, "utf-8");
 	if (!res22a.isError || res22b.isError || multi !== "one\ntwo-a\ntwo-b\nthree\n") {
@@ -795,10 +913,30 @@ process.exit(0);
 	const base23 = [t10b, t11b, t13b, t14, t16, t18, t19, mkThread("PRRT_20b", 1020, "src/race.ts", "Fix the race"), t21, t22];
 	writeState("extra_threads.json", [...base23, t23]);
 	await listTasks();
-	const answered23 = { ...t23, comments: { nodes: [...t23.comments.nodes, { id: "PRRC_23_answer", databaseId: 2301, body: "Use approach B", createdAt: "2026-10-09T12:00:00Z", author: { login: "reviewer_eve" } }] } };
+	const answered23 = {
+		...t23,
+		comments: {
+			nodes: [
+				...t23.comments.nodes,
+				{
+					id: "PRRC_23_answer",
+					databaseId: 2301,
+					body: "Use approach B",
+					createdAt: "2026-10-09T12:00:00Z",
+					author: { login: "reviewer_eve" },
+				},
+			],
+		},
+	};
 	writeState("extra_threads.json", [...base23, answered23]);
 	const repliesBefore23 = readLog("replies.log").length;
-	const res23 = await tools["pr_task_blocked"].execute("call23", { conversation_id: "1023", reason: "Which one?" }, undefined, undefined, toolCtx);
+	const res23 = await tools["pr_task_blocked"].execute(
+		"call23",
+		{ conversation_id: "1023", reason: "Which one?" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res23.content[0].text);
 	if (!res23.isError || !res23.content[0].text.includes("Use approach B") || readLog("replies.log").length !== repliesBefore23) {
 		console.error("Test 23 Failed: blocking must be declined and the new reply surfaced");
@@ -808,9 +946,19 @@ process.exit(0);
 
 	// Test 24: resolving a task that is already STALE clears it locally
 	console.log("\n=== Test 24: pr_task_resolve clears an already STALE task ===");
-	const res24 = await tools["pr_task_resolve"].execute("call24", { conversation_id: "1012", message: "@alice handled elsewhere" }, undefined, undefined, toolCtx);
+	const res24 = await tools["pr_task_resolve"].execute(
+		"call24",
+		{ conversation_id: "1012", message: "@alice handled elsewhere" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res24.content[0].text);
-	if (res24.isError || !res24.content[0].text.includes("now marked as resolved") || (await listTasks()).includes("**Conversation Id**: 1012")) {
+	if (
+		res24.isError ||
+		!res24.content[0].text.includes("now marked as resolved") ||
+		(await listTasks()).includes("**Conversation Id**: 1012")
+	) {
 		console.error("Test 24 Failed: an already STALE task should be marked resolved");
 		process.exit(1);
 	}
@@ -823,7 +971,13 @@ process.exit(0);
 	const t25 = { ...mkThread("PRRT_25", 1025, "src/outdated.ts", "Use\n```suggestion\nz\n```"), isOutdated: true, line: null };
 	writeState("extra_threads.json", [...base23, answered23, t25]);
 	await listTasks();
-	const res25 = await tools["pr_task_resolve"].execute("call25", { conversation_id: "1025", message: "Applied", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res25 = await tools["pr_task_resolve"].execute(
+		"call25",
+		{ conversation_id: "1025", message: "Applied", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res25.content[0].text);
 	if (!res25.isError || !res25.content[0].text.includes("outdated") || fs.readFileSync(outdatedFile, "utf-8") !== "x\ny\n") {
 		console.error("Test 25 Failed: an outdated suggestion must not be applied");
@@ -834,10 +988,20 @@ process.exit(0);
 	// Test 26: an already STALE task whose rejected thread is still listed is retried, not cleared
 	// (GitHub still listing the thread means it may exist)
 	console.log("\n=== Test 26: pr_task_resolve retries a listed dead thread and keeps the task STALE ===");
-	const res26 = await tools["pr_task_resolve"].execute("call26", { conversation_id: "1014", message: "Documented" }, undefined, undefined, toolCtx);
+	const res26 = await tools["pr_task_resolve"].execute(
+		"call26",
+		{ conversation_id: "1014", message: "Documented" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res26.content[0].text);
 	const list26 = await listTasks();
-	if (res26.isError || !res26.content[0].text.includes("marked as STALE") || !/Conversation Id\*\*: 1014[^]*?\*\*Status\*\*: STALE/.test(list26)) {
+	if (
+		res26.isError ||
+		!res26.content[0].text.includes("marked as STALE") ||
+		!/Conversation Id\*\*: 1014[^]*?\*\*Status\*\*: STALE/.test(list26)
+	) {
 		console.error("Test 26 Failed: a listed dead thread should be retried and the task kept STALE");
 		process.exit(1);
 	}
@@ -849,7 +1013,13 @@ process.exit(0);
 	fs.writeFileSync(unseenFile, "p\nq\n");
 	const t27 = mkThread("PRRT_27", 1027, "src/unseen.ts", "Use\n```suggestion\nQ\n```", { line: 2 });
 	writeState("extra_threads.json", [...base23, answered23, t25, t27]);
-	const res27 = await tools["pr_task_resolve"].execute("call27", { conversation_id: "1027", message: "Applied", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res27 = await tools["pr_task_resolve"].execute(
+		"call27",
+		{ conversation_id: "1027", message: "Applied", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res27.content[0].text);
 	if (!res27.isError || !res27.content[0].text.includes("haven't been shown") || fs.readFileSync(unseenFile, "utf-8") !== "p\nq\n") {
 		console.error("Test 27 Failed: an unseen suggestion must not be applied");
@@ -863,15 +1033,41 @@ process.exit(0);
 	const base28 = [...base23, answered23, t25, t27];
 	writeState("extra_threads.json", [...base28, t28]);
 	await listTasks();
-	const block28 = await tools["pr_task_blocked"].execute("call28a", { conversation_id: "1028", reason: "Need the config name" }, undefined, undefined, toolCtx);
+	const block28 = await tools["pr_task_blocked"].execute(
+		"call28a",
+		{ conversation_id: "1028", reason: "Need the config name" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	if (block28.isError) {
 		console.error("Test 28 Failed: initial block failed", block28.content[0].text);
 		process.exit(1);
 	}
-	const answered28 = { ...t28, comments: { nodes: [...t28.comments.nodes, { id: "PRRC_28_answer", databaseId: 2801, body: "Use prod.yaml", createdAt: "2026-10-09T13:00:00Z", author: { login: "reviewer_eve" } }] } };
+	const answered28 = {
+		...t28,
+		comments: {
+			nodes: [
+				...t28.comments.nodes,
+				{
+					id: "PRRC_28_answer",
+					databaseId: 2801,
+					body: "Use prod.yaml",
+					createdAt: "2026-10-09T13:00:00Z",
+					author: { login: "reviewer_eve" },
+				},
+			],
+		},
+	};
 	writeState("extra_threads.json", [...base28, answered28]);
 	const repliesBefore28 = readLog("replies.log").length;
-	const res28 = await tools["pr_task_blocked"].execute("call28b", { conversation_id: "1028", reason: "Still need it" }, undefined, undefined, toolCtx);
+	const res28 = await tools["pr_task_blocked"].execute(
+		"call28b",
+		{ conversation_id: "1028", reason: "Still need it" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res28.content[0].text);
 	if (!res28.isError || !res28.content[0].text.includes("Use prod.yaml") || readLog("replies.log").length !== repliesBefore28) {
 		console.error("Test 28 Failed: the unblocking reply must be surfaced instead of re-blocking");
@@ -886,7 +1082,13 @@ process.exit(0);
 	const t29 = mkThread("PRRT_29", 1029, "src/crlf.ts", "Use\n```suggestion\nTWO\n```", { line: 2 });
 	writeState("extra_threads.json", [...base28, answered28, t29]);
 	await listTasks();
-	const res29 = await tools["pr_task_resolve"].execute("call29", { conversation_id: "1029", message: "Applied", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res29 = await tools["pr_task_resolve"].execute(
+		"call29",
+		{ conversation_id: "1029", message: "Applied", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res29.content[0].text);
 	if (res29.isError || fs.readFileSync(crlfFile, "utf-8") !== "one\r\nTWO\r\nthree\r\n") {
 		console.error("Test 29 Failed: expected the suggestion applied with CRLF kept", JSON.stringify(fs.readFileSync(crlfFile, "utf-8")));
@@ -896,10 +1098,23 @@ process.exit(0);
 
 	// Test 30: once GitHub stops listing the rejected thread, resolving the STALE task clears it
 	console.log("\n=== Test 30: pr_task_resolve clears a dead-thread STALE task once its thread is unlisted ===");
-	writeState("extra_threads.json", [...base28, answered28, t29].filter((t) => t.id !== "PRRT_14"));
-	const res30 = await tools["pr_task_resolve"].execute("call30", { conversation_id: "1014", message: "Documented" }, undefined, undefined, toolCtx);
+	writeState(
+		"extra_threads.json",
+		[...base28, answered28, t29].filter((t) => t.id !== "PRRT_14"),
+	);
+	const res30 = await tools["pr_task_resolve"].execute(
+		"call30",
+		{ conversation_id: "1014", message: "Documented" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res30.content[0].text);
-	if (res30.isError || !res30.content[0].text.includes("now marked as resolved") || (await listTasks()).includes("**Conversation Id**: 1014")) {
+	if (
+		res30.isError ||
+		!res30.content[0].text.includes("now marked as resolved") ||
+		(await listTasks()).includes("**Conversation Id**: 1014")
+	) {
 		console.error("Test 30 Failed: an unlisted dead-thread STALE task should be cleared");
 		process.exit(1);
 	}
@@ -919,9 +1134,19 @@ process.exit(0);
 	}
 	dead.splice(dead.indexOf("PRRT_31"), 1);
 	writeState("dead_ids.json", dead);
-	const res31 = await tools["pr_task_blocked"].execute("call31b", { conversation_id: "1031", reason: "Need the timeout value" }, undefined, undefined, toolCtx);
+	const res31 = await tools["pr_task_blocked"].execute(
+		"call31b",
+		{ conversation_id: "1031", reason: "Need the timeout value" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res31.content[0].text);
-	if (res31.isError || !res31.content[0].text.includes("now marked as Blocked") || !/Conversation Id\*\*: 1031[^]*?\*\*Status\*\*: BLOCKED/.test(await listTasks())) {
+	if (
+		res31.isError ||
+		!res31.content[0].text.includes("now marked as Blocked") ||
+		!/Conversation Id\*\*: 1031[^]*?\*\*Status\*\*: BLOCKED/.test(await listTasks())
+	) {
 		console.error("Test 31 Failed: the task should be BLOCKED once its thread accepts the reply");
 		process.exit(1);
 	}
@@ -938,7 +1163,12 @@ process.exit(0);
 		tools["pr_task_resolve"].execute("call32b", { conversation_id: "1032", message: "Renamed" }, undefined, undefined, toolCtx),
 	]);
 	console.log("Results:", r32a.content[0].text, "|", r32b.content[0].text);
-	if (readLog("replies.log").length !== repliesBefore32 + 1 || r32a.isError || r32b.isError || !r32b.content[0].text.includes("already resolved")) {
+	if (
+		readLog("replies.log").length !== repliesBefore32 + 1 ||
+		r32a.isError ||
+		r32b.isError ||
+		!r32b.content[0].text.includes("already resolved")
+	) {
 		console.error("Test 32 Failed: expected exactly one reply and the second call to find the conversation resolved");
 		process.exit(1);
 	}
@@ -951,7 +1181,13 @@ process.exit(0);
 	await listTasks();
 	writeState("extra_threads.json", [...base31, t31, t32]);
 	await listTasks();
-	const res33 = await tools["pr_task_resolve"].execute("call33", { conversation_id: "1033", message: "Applied", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res33 = await tools["pr_task_resolve"].execute(
+		"call33",
+		{ conversation_id: "1033", message: "Applied", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res33.content[0].text);
 	if (!res33.isError || !res33.content[0].text.includes("is STALE") || !(await listTasks()).includes("**Conversation Id**: 1033")) {
 		console.error("Test 33 Failed: accept_suggestion on a STALE task must be refused and the task kept");
@@ -964,17 +1200,30 @@ process.exit(0);
 	const t34 = mkThread("PRRT_34", 1034, "src/long.ts", "Which format?");
 	writeState("extra_threads.json", [...base31, t31, t32, t34]);
 	await listTasks();
-	const block34 = await tools["pr_task_blocked"].execute("call34", { conversation_id: "1034", reason: "Need the format" }, undefined, undefined, toolCtx);
+	const block34 = await tools["pr_task_blocked"].execute(
+		"call34",
+		{ conversation_id: "1034", reason: "Need the format" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	if (block34.isError) {
 		console.error("Test 34 Failed: initial block failed", block34.content[0].text);
 		process.exit(1);
 	}
 	const long34 = { ...t34, comments: { totalCount: 150, nodes: t34.comments.nodes } };
 	writeState("extra_threads.json", [...base31, t31, t32, long34]);
-	writeState("latest_comments.json", { PRRT_34: [{ id: "PRRC_34_answer", databaseId: 3401, body: "Use JSON", createdAt: "2026-10-09T14:00:00Z", author: { login: "reviewer_eve" } }] });
+	writeState("latest_comments.json", {
+		PRRT_34: [
+			{ id: "PRRC_34_answer", databaseId: 3401, body: "Use JSON", createdAt: "2026-10-09T14:00:00Z", author: { login: "reviewer_eve" } },
+		],
+	});
 	sentMessages.length = 0;
 	await listTasks();
-	if (!sentMessages.some((m) => m.includes("Use JSON")) || !/Conversation Id\*\*: 1034[^]*?\*\*Status\*\*: UNRESOLVED/.test(await listTasks())) {
+	if (
+		!sentMessages.some((m) => m.includes("Use JSON")) ||
+		!/Conversation Id\*\*: 1034[^]*?\*\*Status\*\*: UNRESOLVED/.test(await listTasks())
+	) {
 		console.error("Test 34 Failed: the newest reply of a long thread should unblock the task", sentMessages);
 		process.exit(1);
 	}
@@ -987,7 +1236,11 @@ process.exit(0);
 	await tasksCmd.handler('reply 1014 "Any update?"', { ...toolCtx, mode: "headless", hasUI: false });
 	const note35 = notifications[notifications.length - 1];
 	console.log("Notification:", note35);
-	if (note35?.type !== "warning" || !note35.msg.includes("no review thread on GitHub anymore") || readLog("replies.log").length !== repliesBefore35) {
+	if (
+		note35?.type !== "warning" ||
+		!note35.msg.includes("no review thread on GitHub anymore") ||
+		readLog("replies.log").length !== repliesBefore35
+	) {
 		console.error("Test 35 Failed: expected a warning and no reply");
 		process.exit(1);
 	}
@@ -1001,7 +1254,13 @@ process.exit(0);
 	writeState("extra_threads.json", [...base31, t31, t32, t36]);
 	const subCtx = { ...toolCtx, cwd: path.join(tmpDir, "src") };
 	await tools["pr_tasks_list"].execute("list36", {}, undefined, undefined, subCtx);
-	const res36 = await tools["pr_task_resolve"].execute("call36", { conversation_id: "1036", message: "Applied", accept_suggestion: true }, undefined, undefined, subCtx);
+	const res36 = await tools["pr_task_resolve"].execute(
+		"call36",
+		{ conversation_id: "1036", message: "Applied", accept_suggestion: true },
+		undefined,
+		undefined,
+		subCtx,
+	);
 	console.log("Result:", res36.content[0].text);
 	if (res36.isError || fs.readFileSync(subFile, "utf-8") !== "s1\nS2\n") {
 		console.error("Test 36 Failed: expected the suggestion applied to src/sub.ts", fs.readFileSync(subFile, "utf-8"));
@@ -1016,7 +1275,13 @@ process.exit(0);
 	const base37 = [...base31, t31, t32, t36];
 	writeState("extra_threads.json", [...base37, t37]);
 	await listTasks();
-	const block37 = await tools["pr_task_blocked"].execute("call37", { conversation_id: "1037", reason: "Need the name" }, undefined, undefined, toolCtx);
+	const block37 = await tools["pr_task_blocked"].execute(
+		"call37",
+		{ conversation_id: "1037", reason: "Need the name" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	if (block37.isError) {
 		console.error("Test 37 Failed: initial block failed", block37.content[0].text);
 		process.exit(1);
@@ -1042,14 +1307,45 @@ process.exit(0);
 	const base38 = [...base37];
 	writeState("extra_threads.json", [...base38, t38]);
 	await listTasks();
-	const answered38 = { ...t38, comments: { nodes: [...t38.comments.nodes, { id: "PRRC_38_late", databaseId: 3801, body: "Actually, keep the old name", createdAt: "2026-10-09T15:00:00Z", author: { login: "reviewer_eve" } }] } };
+	const answered38 = {
+		...t38,
+		comments: {
+			nodes: [
+				...t38.comments.nodes,
+				{
+					id: "PRRC_38_late",
+					databaseId: 3801,
+					body: "Actually, keep the old name",
+					createdAt: "2026-10-09T15:00:00Z",
+					author: { login: "reviewer_eve" },
+				},
+			],
+		},
+	};
 	writeState("extra_threads.json", [...base38, answered38]);
 	const repliesBefore38 = readLog("replies.log").length;
-	const res38a = await tools["pr_task_resolve"].execute("call38a", { conversation_id: "1038", message: "Renamed" }, undefined, undefined, toolCtx);
+	const res38a = await tools["pr_task_resolve"].execute(
+		"call38a",
+		{ conversation_id: "1038", message: "Renamed" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("First result:", res38a.content[0].text);
-	const res38b = await tools["pr_task_resolve"].execute("call38b", { conversation_id: "1038", message: "Kept the old name" }, undefined, undefined, toolCtx);
+	const res38b = await tools["pr_task_resolve"].execute(
+		"call38b",
+		{ conversation_id: "1038", message: "Kept the old name" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Second result:", res38b.content[0].text);
-	if (!res38a.isError || !res38a.content[0].text.includes("keep the old name") || res38b.isError || readLog("replies.log").length !== repliesBefore38 + 1) {
+	if (
+		!res38a.isError ||
+		!res38a.content[0].text.includes("keep the old name") ||
+		res38b.isError ||
+		readLog("replies.log").length !== repliesBefore38 + 1
+	) {
 		console.error("Test 38 Failed: the late reply must be shown first, then the resolve goes through");
 		process.exit(1);
 	}
@@ -1068,7 +1364,11 @@ process.exit(0);
 	} finally {
 		(globalThis as any).__PI_OBSERVED_PRS__ = observedBefore;
 	}
-	if (!/Conversation Id\*\*: 1039[^]*?\*\*Status\*\*: RESOLVED/.test(await tools["pr_tasks_list"].execute("list39", { show_all: true }, undefined, undefined, toolCtx).then((r: any) => r.content[0].text))) {
+	if (
+		!/Conversation Id\*\*: 1039[^]*?\*\*Status\*\*: RESOLVED/.test(
+			await tools["pr_tasks_list"].execute("list39", { show_all: true }, undefined, undefined, toolCtx).then((r: any) => r.content[0].text),
+		)
+	) {
 		console.error("Test 39 Failed: the unobserved PR's task should have synced to RESOLVED");
 		process.exit(1);
 	}
@@ -1082,10 +1382,22 @@ process.exit(0);
 	writeState("extra_threads.json", [...base38, answered38, t40]);
 	await listTasks();
 	fs.writeFileSync(path.join(stateDir, "resolve_fails"), "1");
-	const res40a = await tools["pr_task_resolve"].execute("call40a", { conversation_id: "1040", message: "Fixed", accept_suggestion: true }, undefined, undefined, toolCtx);
+	const res40a = await tools["pr_task_resolve"].execute(
+		"call40a",
+		{ conversation_id: "1040", message: "Fixed", accept_suggestion: true },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	fs.rmSync(path.join(stateDir, "resolve_fails"));
 	const replies40 = readLog("replies.log").length;
-	const res40b = await tools["pr_task_resolve"].execute("call40b", { conversation_id: "1040", message: "Fixed" }, undefined, undefined, toolCtx);
+	const res40b = await tools["pr_task_resolve"].execute(
+		"call40b",
+		{ conversation_id: "1040", message: "Fixed" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Results:", res40a.content[0].text, "|", res40b.content[0].text);
 	if (!res40a.isError || res40b.isError || readLog("replies.log").length !== replies40 || fs.readFileSync(f40, "utf-8") !== "r1\nR2\n") {
 		console.error("Test 40 Failed: the retry should only resolve");
@@ -1126,10 +1438,27 @@ process.exit(0);
 	await listTasks();
 	writeState("extra_threads.json", [...base42, { ...t42, comments: { nodes: [{ ...t42.comments.nodes[0], body: "Rename it to bar" }] } }]);
 	const replies42 = readLog("replies.log").length;
-	const res42a = await tools["pr_task_resolve"].execute("call42a", { conversation_id: "1042", message: "Renamed to foo" }, undefined, undefined, toolCtx);
+	const res42a = await tools["pr_task_resolve"].execute(
+		"call42a",
+		{ conversation_id: "1042", message: "Renamed to foo" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("First result:", res42a.content[0].text);
-	const res42b = await tools["pr_task_resolve"].execute("call42b", { conversation_id: "1042", message: "Renamed to bar" }, undefined, undefined, toolCtx);
-	if (!res42a.isError || !res42a.content[0].text.includes("Rename it to bar") || res42b.isError || readLog("replies.log").length !== replies42 + 1) {
+	const res42b = await tools["pr_task_resolve"].execute(
+		"call42b",
+		{ conversation_id: "1042", message: "Renamed to bar" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
+	if (
+		!res42a.isError ||
+		!res42a.content[0].text.includes("Rename it to bar") ||
+		res42b.isError ||
+		readLog("replies.log").length !== replies42 + 1
+	) {
 		console.error("Test 42 Failed: the edited comment must be shown first, then the resolve goes through");
 		process.exit(1);
 	}
@@ -1142,13 +1471,34 @@ process.exit(0);
 	writeState("extra_threads.json", [...base43, t43]);
 	await listTasks();
 	fs.writeFileSync(path.join(stateDir, "resolve_fails"), "1");
-	const res43a = await tools["pr_task_resolve"].execute("call43a", { conversation_id: "1043", message: "Inlined" }, undefined, undefined, toolCtx);
+	const res43a = await tools["pr_task_resolve"].execute(
+		"call43a",
+		{ conversation_id: "1043", message: "Inlined" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	fs.rmSync(path.join(stateDir, "resolve_fails"));
-	writeState("extra_threads.json", [...base43, { ...t43, comments: { nodes: [{ ...t43.comments.nodes[0], body: "Inline this, and drop the helper" }] } }]);
+	writeState("extra_threads.json", [
+		...base43,
+		{ ...t43, comments: { nodes: [{ ...t43.comments.nodes[0], body: "Inline this, and drop the helper" }] } },
+	]);
 	const replies43 = readLog("replies.log").length;
-	const res43b = await tools["pr_task_resolve"].execute("call43b", { conversation_id: "1043", message: "Inlined" }, undefined, undefined, toolCtx);
+	const res43b = await tools["pr_task_resolve"].execute(
+		"call43b",
+		{ conversation_id: "1043", message: "Inlined" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Retry result:", res43b.content[0].text);
-	const res43c = await tools["pr_task_resolve"].execute("call43c", { conversation_id: "1043", message: "Inlined" }, undefined, undefined, toolCtx);
+	const res43c = await tools["pr_task_resolve"].execute(
+		"call43c",
+		{ conversation_id: "1043", message: "Inlined" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Third result:", res43c.content[0].text);
 	if (
 		!res43a.isError ||
@@ -1169,7 +1519,13 @@ process.exit(0);
 	const t44 = mkThread("PRRT_44", 1044, "src/shown.ts", "Which approach?");
 	writeState("extra_threads.json", [...base44, t44]);
 	await listTasks();
-	const block44 = await tools["pr_task_blocked"].execute("call44", { conversation_id: "1044", reason: "Need the approach" }, undefined, undefined, toolCtx);
+	const block44 = await tools["pr_task_blocked"].execute(
+		"call44",
+		{ conversation_id: "1044", reason: "Need the approach" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	if (block44.isError) {
 		console.error("Test 44 Failed: initial block failed", block44.content[0].text);
 		process.exit(1);
@@ -1181,13 +1537,25 @@ process.exit(0);
 			comments: {
 				nodes: [
 					...t44.comments.nodes,
-					{ id: "PRRC_44_answer", databaseId: 4401, body: "Use the cache", createdAt: "2026-10-09T16:00:00Z", author: { login: "reviewer_eve" } },
+					{
+						id: "PRRC_44_answer",
+						databaseId: 4401,
+						body: "Use the cache",
+						createdAt: "2026-10-09T16:00:00Z",
+						author: { login: "reviewer_eve" },
+					},
 				],
 			},
 		},
 	]);
 	sentMessages.length = 0;
-	const res44 = await tools["pr_task_resolve"].execute("call44b", { conversation_id: "1044", message: "Done" }, undefined, undefined, toolCtx);
+	const res44 = await tools["pr_task_resolve"].execute(
+		"call44b",
+		{ conversation_id: "1044", message: "Done" },
+		undefined,
+		undefined,
+		toolCtx,
+	);
 	console.log("Result:", res44.content[0].text);
 	if (!res44.isError || !res44.content[0].text.includes("Use the cache") || sentMessages.some((m) => m.includes("1044"))) {
 		console.error("Test 44 Failed: the reply shown by the refusal must not be notified again", sentMessages);

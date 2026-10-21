@@ -32,9 +32,7 @@ function toolResult(entryId: string, chars: number, order: number, toolName = "b
 const TOKEN_BUDGET = { totalTokens: 100_000, targetTokens: 90_000, keepRecent: 5 };
 
 test("planCompression: nothing to do when the context already fits", () => {
-	const plan = planCompression({ totalTokens: 50_000, targetTokens: 90_000, keepRecent: 5 }, [
-		toolResult("a", 40_000, 0),
-	]);
+	const plan = planCompression({ totalTokens: 50_000, targetTokens: 90_000, keepRecent: 5 }, [toolResult("a", 40_000, 0)]);
 	assert.strictEqual(plan.alreadyFits, true);
 	assert.strictEqual(plan.selected.length, 0);
 });
@@ -89,14 +87,13 @@ test("planCompression: stops as soon as the context fits", () => {
 });
 
 test("planCompression: skips already-compressed and too-small results", () => {
-	const results = [
-		toolResult("already", 20_000, 0),
-		toolResult("tiny", 100, 1),
-		toolResult("ok", 20_000, 2),
-	];
+	const results = [toolResult("already", 20_000, 0), toolResult("tiny", 100, 1), toolResult("ok", 20_000, 2)];
 	results[0].blocks = [{ type: "text", text: buildCompressionPlaceholder("already", "bash", 20_000) }];
 	const plan = planCompression({ totalTokens: 100_000, targetTokens: 10_000, keepRecent: 0, minChars: 1_000 }, results);
-	assert.deepStrictEqual(plan.selected.map((s) => s.entryId), ["ok"]);
+	assert.deepStrictEqual(
+		plan.selected.map((s) => s.entryId),
+		["ok"],
+	);
 });
 
 test("planCompression: placeholders carry the entry id and the marker", () => {
@@ -133,8 +130,7 @@ test("estimate helpers mirror the chars/4 heuristic", () => {
 test("isRecoverableCompactionFailure matches the overflow recovery error", () => {
 	const overflowError = {
 		reason: "overflow" as const,
-		errorMessage:
-			"Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+		errorMessage: "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete",
 		aborted: false,
 	};
 	assert.ok(isRecoverableCompactionFailure(overflowError), "the user-reported error must be recoverable");
@@ -167,15 +163,33 @@ test("resolveRecoverySettings: precedence is argument > flag > settings > defaul
 	assert.strictEqual(resolveRecoverySettings({ settings }).keepRecentToolResults, 3);
 	assert.strictEqual(resolveRecoverySettings({ settings, flag: "8" }).keepRecentToolResults, 8);
 	assert.strictEqual(resolveRecoverySettings({ settings, flag: "8", arg: "2" }).keepRecentToolResults, 2);
-	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { keepRecentToolResults: -1 } } }).keepRecentToolResults, DEFAULTS.keepRecentToolResults, "invalid setting falls back to the default");
+	assert.strictEqual(
+		resolveRecoverySettings({ settings: { compactionRecovery: { keepRecentToolResults: -1 } } }).keepRecentToolResults,
+		DEFAULTS.keepRecentToolResults,
+		"invalid setting falls back to the default",
+	);
 	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { enabled: false } } }).enabled, false);
 	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: {} } }).enabled, true);
-	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxResultChars: -5 } } }).maxResultChars, DEFAULTS.maxResultChars);
+	assert.strictEqual(
+		resolveRecoverySettings({ settings: { compactionRecovery: { maxResultChars: -5 } } }).maxResultChars,
+		DEFAULTS.maxResultChars,
+	);
 	assert.strictEqual(resolveRecoverySettings({}).maxRecoveryRounds, DEFAULTS.maxRecoveryRounds);
 	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 3 } } }).maxRecoveryRounds, 3);
-	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 2.9 } } }).maxRecoveryRounds, 2, "fractional rounds floor to the lower integer");
-	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 0.5 } } }).maxRecoveryRounds, DEFAULTS.maxRecoveryRounds, "sub-1 fractional falls back");
-	assert.strictEqual(resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 0 } } }).maxRecoveryRounds, DEFAULTS.maxRecoveryRounds);
+	assert.strictEqual(
+		resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 2.9 } } }).maxRecoveryRounds,
+		2,
+		"fractional rounds floor to the lower integer",
+	);
+	assert.strictEqual(
+		resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 0.5 } } }).maxRecoveryRounds,
+		DEFAULTS.maxRecoveryRounds,
+		"sub-1 fractional falls back",
+	);
+	assert.strictEqual(
+		resolveRecoverySettings({ settings: { compactionRecovery: { maxRecoveryRounds: 0 } } }).maxRecoveryRounds,
+		DEFAULTS.maxRecoveryRounds,
+	);
 });
 
 test("resolveReserveTokens follows the pi resolution order", () => {
@@ -213,7 +227,10 @@ test("resolveCompactionInstructions: settings override the token-cap-aware defau
 		resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: "  Keep only the task goal.  " } }),
 		"Keep only the task goal.",
 	);
-	assert.strictEqual(resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: "   " } }), DEFAULT_COMPACT_INSTRUCTIONS);
+	assert.strictEqual(
+		resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: "   " } }),
+		DEFAULT_COMPACT_INSTRUCTIONS,
+	);
 	assert.strictEqual(resolveCompactionInstructions({ compactionRecovery: { compactionInstructions: 42 } }), DEFAULT_COMPACT_INSTRUCTIONS);
 });
 
@@ -229,7 +246,11 @@ test("lastUserPromptText returns the most recent user prompt", () => {
 	);
 	assert.strictEqual(lastUserPromptText([{ role: "assistant", content: [] }]), undefined);
 	assert.strictEqual(lastUserPromptText([{ role: "user", content: "   " }]), undefined);
-	assert.strictEqual(lastUserPromptText([{ role: "user", content: [{ type: "image" }] }]), undefined, "image-only prompts are not resended");
+	assert.strictEqual(
+		lastUserPromptText([{ role: "user", content: [{ type: "image" }] }]),
+		undefined,
+		"image-only prompts are not resended",
+	);
 });
 
 test("planCompression: compressAll compresses every candidate regardless of the estimate", () => {
@@ -240,7 +261,11 @@ test("planCompression: compressAll compresses every candidate regardless of the 
 	);
 	assert.strictEqual(plan.alreadyFits, false);
 	assert.strictEqual(plan.selected.length, 3, "all candidates except the last 5 must be compressed");
-	assert.deepStrictEqual(plan.selected.map((s) => s.entryId), ["t0", "t1", "t2"], "largest first, oldest on ties");
+	assert.deepStrictEqual(
+		plan.selected.map((s) => s.entryId),
+		["t0", "t1", "t2"],
+		"largest first, oldest on ties",
+	);
 });
 
 test("recovery flow: failed compaction compresses, re-runs compaction, resends the prompt", async () => {
@@ -316,7 +341,11 @@ test("recovery flow: failed compaction compresses, re-runs compaction, resends t
 	);
 	assert.strictEqual(placeholders.length, 3, "the 3 oldest candidates are compressed (last 5 kept)");
 	assert.ok(compactOptions, "pi's compaction must be re-run after the compression");
-	assert.strictEqual(compactInstructions, DEFAULT_COMPACT_INSTRUCTIONS, "the recovery appends the token-cap-aware instructions to the compaction prompt");
+	assert.strictEqual(
+		compactInstructions,
+		DEFAULT_COMPACT_INSTRUCTIONS,
+		"the recovery appends the token-cap-aware instructions to the compaction prompt",
+	);
 
 	// The real runtime runs the compaction once idle; on success the handler resends the prompt.
 	compactOptions?.onComplete?.();
@@ -378,7 +407,12 @@ test("recovery rounds cap: the loop stops with guidance once maxRecoveryRounds i
 	const fail = (reason: "manual" | "overflow") =>
 		handlers.get("session_compact_failed")?.(
 			reason === "overflow"
-				? { reason, errorMessage: "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete", aborted: false }
+				? {
+						reason,
+						errorMessage:
+							"Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+						aborted: false,
+					}
 				: { reason, errorMessage: "Compaction failed: Summarization failed: generation hit the token cap", aborted: false },
 			ctx,
 		);
@@ -402,8 +436,14 @@ test("recovery rounds cap: the loop stops with guidance once maxRecoveryRounds i
 	await fail("manual");
 	await flush();
 	assert.strictEqual(compactCallCount, 2, "round 3 must not schedule another compaction (cap)");
-	assert.ok(notifications.some((n) => n.includes("recovery rounds are exhausted")), "the user must be told the rounds are exhausted");
-	assert.ok(notifications.some((n) => n.includes("reserveTokens")), "the guidance must name the fix");
+	assert.ok(
+		notifications.some((n) => n.includes("recovery rounds are exhausted")),
+		"the user must be told the rounds are exhausted",
+	);
+	assert.ok(
+		notifications.some((n) => n.includes("reserveTokens")),
+		"the guidance must name the fix",
+	);
 });
 
 test("prompt resend is skipped when the session is no longer idle", async () => {
@@ -450,7 +490,11 @@ test("prompt resend is skipped when the session is no longer idle", async () => 
 	} as never;
 
 	await handlers.get("session_compact_failed")?.(
-		{ reason: "overflow", errorMessage: "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete", aborted: false },
+		{
+			reason: "overflow",
+			errorMessage: "Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete",
+			aborted: false,
+		},
 		ctx,
 	);
 	await new Promise((r) => setTimeout(r, 20));
@@ -485,15 +529,14 @@ test("session manager round trip: context edit compresses, raw entry keeps the o
 
 	// Projected context shows the compressed placeholder...
 	const projection = sm.buildSessionProjection();
-	const projectedResult = projection.messages.find((m) => (m as { role?: string }).role === "toolResult") as {
-		content: { type: string; text?: string }[];
-	} | undefined;
+	const projectedResult = projection.messages.find((m) => (m as { role?: string }).role === "toolResult") as
+		| {
+				content: { type: string; text?: string }[];
+		  }
+		| undefined;
 	assert.ok(projectedResult, "the tool result must stay in context");
 	assert.ok(isCompressedContent(projectedResult?.content ?? []), "the projected content must be the placeholder");
-	assert.ok(
-		(projectedResult?.content[0]?.text ?? "").includes(resultEntryId),
-		"the placeholder must point at the original entry id",
-	);
+	assert.ok((projectedResult?.content[0]?.text ?? "").includes(resultEntryId), "the placeholder must point at the original entry id");
 
 	// ...the raw entry (what ctx_memory resolves) still holds the original.
 	const raw = sm.getEntry(resultEntryId) as { message?: { content?: { type: string; text?: string }[] } };

@@ -57,11 +57,7 @@ export function evaluateCiVerdict({ checks, ghFailed, bookkeeping }: CiVerdictIn
 	if (checks.some((row) => FAILED_BUCKETS.includes(bucketOf(row)) || FAILED_STATES.includes(stateOf(row).toUpperCase()))) {
 		return "failed";
 	}
-	if (
-		checks.every(
-			(row) => PASSED_BUCKETS.includes(bucketOf(row)) || PASSED_STATES.includes(stateOf(row).toUpperCase()),
-		)
-	) {
+	if (checks.every((row) => PASSED_BUCKETS.includes(bucketOf(row)) || PASSED_STATES.includes(stateOf(row).toUpperCase()))) {
 		return "passed";
 	}
 	// Rows in a shape we do not understand: say nothing rather than guess.

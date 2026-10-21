@@ -1,0 +1,106 @@
+{
+  "metrics": {
+    "execLocation": 25,
+    "execTimeout": 25,
+    "mutationResultChecked": 0,
+    "globalThisOwnership": 33,
+    "jsonParseLocation": 27,
+    "noStdioWrites": 0,
+    "emptyCatch": 53,
+    "piExtensionsMatchDisk": 0,
+    "noUnusedLibs": 0,
+    "wiredTests": 0,
+    "frontmatter": 0,
+    "biome.style/useTemplate": 7,
+    "biome.complexity/noExcessiveCognitiveComplexity": 53,
+    "biome.complexity/useOptionalChain": 8,
+    "biome.suspicious/noExplicitAny": 160,
+    "biome.style/noNonNullAssertion": 5,
+    "biome.suspicious/noConsole": 10,
+    "biome.suspicious/noGlobalIsNan": 8,
+    "biome.correctness/noUnusedImports": 1,
+    "biome.correctness/noUnusedFunctionParameters": 1
+  },
+  "files": {
+    "extensions/compaction-fail-recovery.ts": 734,
+    "extensions/devin-delegate.ts": 2684,
+    "extensions/lib/ci-verdict.ts": 66,
+    "extensions/lib/devin-bash-guard.ts": 277,
+    "extensions/lib/devin-diagnostics.ts": 69,
+    "extensions/lib/extension-log.ts": 135,
+    "extensions/lib/gh-health.ts": 280,
+    "extensions/lib/github-review-threads.ts": 590,
+    "extensions/lib/nonblocking.ts": 494,
+    "extensions/lib/orca-client.ts": 572,
+    "extensions/lib/pr-tasks-manager.ts": 849,
+    "extensions/lib/tool-result.ts": 60,
+    "extensions/observe-pr.ts": 1992,
+    "extensions/orca-orchestration.ts": 1735,
+    "extensions/pr-tasks.ts": 1505,
+    "extensions/tools.ts": 627
+  },
+  "notes": [
+    {
+      "at": "2026-10-20",
+      "reason": "globalThisOwnership was measured with a detector that missed dot-access writes ((globalThis as any).KEY =) and delete statements; the metric now counts 11 assignments + 9 deletes and excludes the 5 if-guard reads. No new debt: same 20 sites that already existed.",
+      "changes": [
+        "globalThisOwnership: 0 -> 20"
+      ]
+    },
+    {
+      "at": "2026-10-20",
+      "reason": "extensions/lib/gh-health.ts 255 -> 274: recordSuccess now runs the retry hooks on the degraded->healthy transition, so a pending observe_pr auto-start cannot strand until the next failure schedules a timer (root cause of the observe-pr-gh-failure CI failure on PR #37).",
+      "changes": [
+        "extensions/lib/gh-health.ts: 274 lines > baseline 255 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-20",
+      "reason": "gh-health.ts 274->280 (a failure supersedes an unrun recovery tick, so hooks cannot be driven twice in one window); github-review-threads.ts 500->524 (a root that IS git metadata is refused: relative to <repo>/.git the path config has no .git segment, so the segment test could not see it).",
+      "changes": [
+        "extensions/lib/gh-health.ts: 280 lines > baseline 274 (files may only shrink)",
+        "extensions/lib/github-review-threads.ts: 524 lines > baseline 500 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-21",
+      "reason": "two deliberate widenings in one commit: record biomeConfigHash (debt figures are only comparable to the biome.jsonc that produced them), and let github-review-threads.ts 524->590 after the metadata-identity and resolved-target guards",
+      "changes": [
+        "extensions/lib/github-review-threads.ts: 590 lines > baseline 524 (files may only shrink)",
+        "biome.jsonc changed since these numbers were recorded (unrecorded -> 184447d011b421d7): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-10-21",
+      "reason": "merge of main (PRs #41/#42): debt inherited from the compaction-recovery work, not introduced here - compaction-fail-recovery.ts (734 lines) and extension-log.ts are new, observe-pr.ts/pr-tasks.ts grew, and any 147->152, cognitive 51->52, useOptionalChain 6->8, globalThis 20->25 all come from those files. Lowering them is P2 work tracked in issue #35; recording rather than silently re-capturing is the point.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 51 -> 52",
+        "biome.complexity/useOptionalChain: 6 -> 8",
+        "biome.suspicious/noExplicitAny: 147 -> 152",
+        "globalThisOwnership: 20 -> 25",
+        "extensions/compaction-fail-recovery.ts: 734 lines, and a new file's budget is 300 (raise deliberately: --write --reason)",
+        "extensions/devin-delegate.ts: 2624 lines > baseline 2620 (files may only shrink)",
+        "extensions/observe-pr.ts: 1890 lines > baseline 1770 (files may only shrink)",
+        "extensions/orca-orchestration.ts: 1649 lines > baseline 1648 (files may only shrink)",
+        "extensions/pr-tasks.ts: 1382 lines > baseline 1270 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-21",
+      "reason": "Inherited from merging main PRs 43 and 44: boot-nonblocking and the pr-observer engine grew globalThis writes 25 to 33, empty catches 47 to 53, any 152 to 160, cognitive 52 to 53, and five files grew; measured against origin/main the merged tree matches main exactly, so none of it originates here.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 52 -> 53",
+        "biome.suspicious/noExplicitAny: 152 -> 160",
+        "emptyCatch: 47 -> 53",
+        "globalThisOwnership: 25 -> 33",
+        "extensions/devin-delegate.ts: 2684 lines > baseline 2624 (files may only shrink)",
+        "extensions/lib/pr-tasks-manager.ts: 849 lines > baseline 837 (files may only shrink)",
+        "extensions/observe-pr.ts: 1992 lines > baseline 1890 (files may only shrink)",
+        "extensions/orca-orchestration.ts: 1735 lines > baseline 1649 (files may only shrink)",
+        "extensions/pr-tasks.ts: 1505 lines > baseline 1382 (files may only shrink)"
+      ]
+    }
+  ],
+  "generatedFrom": "76295b3",
+  "biomeConfigHash": "184447d011b421d7"
+}

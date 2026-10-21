@@ -20,9 +20,7 @@ function makeFakeClock() {
 		const until = nowMs + ms;
 		// Fire all timers that come due, in due-time order
 		for (;;) {
-			const due = timers
-				.filter((t) => t.at <= until)
-				.sort((a, b) => a.at - b.at);
+			const due = timers.filter((t) => t.at <= until).sort((a, b) => a.at - b.at);
 			if (due.length === 0) break;
 			const t = due[0];
 			nowMs = t.at;
@@ -73,10 +71,14 @@ test("backoff timing: 30 s slots for the first 5 failures, then 10 min", () => {
 	clock.advance(600_000);
 	assert.strictEqual(hooks.length, 1);
 
-	// A success resets the state and clears the pending timer
+	// A success resets the state, clears the pending outage timer, and schedules exactly one recovery
+	// tick (the hooks are how work that waited out the outage gets driven — see the recovery tests).
 	health.recordSuccess();
 	assert.strictEqual(health.status, "healthy");
 	assert.strictEqual(health.nextRetryInMs(), 0);
+	assert.strictEqual(clock.pending(), 1, "only the recovery tick may remain scheduled");
+	clock.advance(0);
+	assert.strictEqual(hooks.length, 2, "the transition runs the hooks once");
 	assert.strictEqual(clock.pending(), 0);
 	health.recordFailure();
 	assert.strictEqual(health.nextRetryInMs(), 30_000, "after a reset the pacing restarts at 30 s");
@@ -124,10 +126,7 @@ test("availability errors are classified (network, timeout, rate limit, auth)", 
 	assert.strictEqual(isGhAvailabilityError({ code: "ETIMEDOUT" }), true);
 	assert.strictEqual(isGhAvailabilityError({ code: "ECONNREFUSED" }), true);
 	assert.strictEqual(isGhAvailabilityError({ code: "ECONNRESET" }), true);
-	assert.strictEqual(
-		isGhAvailabilityError({ stderr: "gh: failed to connect: dial tcp 140.107.20.17:443: i/o timeout" }),
-		true,
-	);
+	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: failed to connect: dial tcp 140.107.20.17:443: i/o timeout" }), true);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: HTTP 429: You have exceeded a secondary rate limit" }), true);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: HTTP 503 Service Unavailable" }), true);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "gh: token expired or unauthorized" }), true);
@@ -149,8 +148,16 @@ test("auth errors are classified (and are also availability errors)", () => {
 	assert.strictEqual(isGhAuthError({ stderr: "gh: authentication failed" }), true);
 	assert.strictEqual(isGhAuthError({ stderr: "gh: bad credentials" }), true);
 	assert.strictEqual(isGhAuthError(new Error("Command failed: gh api ...\nHTTP 401: Unauthorized")), true);
-	assert.strictEqual(isGhAvailabilityError({ stderr: "graphql error: token expired or unauthorized" }), true, "auth failures pace the background retries too");
-	assert.strictEqual(isGhAuthError({ stderr: "failed to connect: dial tcp 1.2.3.4:443: i/o timeout" }), false, "a plain network failure is not an auth error");
+	assert.strictEqual(
+		isGhAvailabilityError({ stderr: "graphql error: token expired or unauthorized" }),
+		true,
+		"auth failures pace the background retries too",
+	);
+	assert.strictEqual(
+		isGhAuthError({ stderr: "failed to connect: dial tcp 1.2.3.4:443: i/o timeout" }),
+		false,
+		"a plain network failure is not an auth error",
+	);
 	assert.strictEqual(isGhAuthError({ stderr: "Could not resolve to a PullRequest with the number 999" }), false);
 	assert.strictEqual(isGhAuthError("HTTP 502 Bad Gateway"), false);
 });
@@ -181,12 +188,24 @@ test("a release while the slot became due re-fires the hooks (pendingWhileBusy)"
 });
 
 test("common gh network error strings are classified", () => {
-	assert.strictEqual(isGhAvailabilityError({ stderr: 'Get "https://api.github.com/...": context deadline exceeded' }), true, "Go HTTP client timeout");
+	assert.strictEqual(
+		isGhAvailabilityError({ stderr: 'Get "https://api.github.com/...": context deadline exceeded' }),
+		true,
+		"Go HTTP client timeout",
+	);
 	assert.strictEqual(isGhAvailabilityError({ stderr: "streaming response: unexpected EOF" }), true, "dropped mid-response");
 	assert.strictEqual(isGhAvailabilityError({ code: "ENOENT" }), true, "missing gh binary paces (no 1 Hz respawn loop)");
 	assert.strictEqual(isGhAvailabilityError(new Error("spawn gh ENOENT")), true);
-	assert.strictEqual(isGhAvailabilityError({ stderr: "To auth to GitHub with gh, run: gh auth login" }), true, "not-logged-in paces the background");
-	assert.strictEqual(isGhAuthError({ stderr: "To auth to GitHub with gh, run: gh auth login" }), true, "not-logged-in surfaces on explicit calls");
+	assert.strictEqual(
+		isGhAvailabilityError({ stderr: "To auth to GitHub with gh, run: gh auth login" }),
+		true,
+		"not-logged-in paces the background",
+	);
+	assert.strictEqual(
+		isGhAuthError({ stderr: "To auth to GitHub with gh, run: gh auth login" }),
+		true,
+		"not-logged-in surfaces on explicit calls",
+	);
 });
 
 test("a 403 rate limit is availability, not an auth error", () => {
@@ -194,4 +213,45 @@ test("a 403 rate limit is availability, not an auth error", () => {
 	assert.strictEqual(isGhAuthError(err), false, "a self-resolving rate limit must not take the auth path (which skips the auto-start)");
 	assert.strictEqual(isGhAvailabilityError(err), true, "but it still paces the background retries");
 	assert.strictEqual(isGhAuthError({ stderr: "HTTP 429: Too Many Requests" }), false);
+});
+
+test("recovery runs the retry hooks: work that waited out the outage is not stranded", () => {
+	const { health, clock, hooks } = makeHealth();
+
+	health.recordFailure();
+	health.recordFailure();
+	assert.strictEqual(health.status, "degraded");
+
+	// Recovery is detected by some *other* call succeeding — no retry slot was ever granted.
+	health.recordSuccess();
+	assert.strictEqual(health.status, "healthy");
+	assert.deepStrictEqual(hooks, [], "hooks must not run synchronously inside the recovering caller");
+
+	clock.advance(0); // the deferred tick
+	assert.deepStrictEqual(hooks, ["fired"], "a pending retry consumer (e.g. an observe_pr auto-start) must be run on recovery");
+
+	// A second success is not a transition and must not re-fire, and the outage timer is gone.
+	health.recordSuccess();
+	clock.advance(60_000);
+	assert.strictEqual(hooks.length, 1, "recovery hooks fire once per degraded -> healthy transition");
+});
+
+test("reset drops a pending recovery tick", () => {
+	const { health, clock, hooks } = makeHealth();
+	health.recordFailure();
+	health.recordSuccess();
+	health.reset();
+	clock.advance(0);
+	assert.deepStrictEqual(hooks, [], "nothing may run after reset()");
+});
+
+test("a failure supersedes a recovery tick that has not run yet", () => {
+	const { health, clock, hooks } = makeHealth();
+	health.recordFailure();
+	health.recordSuccess(); // schedules the recovery tick
+	health.recordFailure(); // the outage resumed before the tick could run
+	clock.advance(0);
+	assert.deepStrictEqual(hooks, [], "only the outage timer may drive the hooks now");
+	clock.advance(30_000);
+	assert.deepStrictEqual(hooks, ["fired"], "the outage retry slot still fires exactly once");
 });

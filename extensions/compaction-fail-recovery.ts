@@ -70,12 +70,7 @@
  * trace the recovery flow in `~/.pi/agent/logs/compaction-recovery.jsonl`: each
  * compaction failure, what was compressed, the compaction retry and the prompt resend.
  */
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	ExtensionToolContext,
-	SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { logDebug, logError, logWarn } from "./lib/extension-log.ts";
 
@@ -271,10 +266,7 @@ export interface CompressionPlan {
  * ties), skipping the most recent `keepRecent` and anything already compressed, and
  * stops as soon as the estimated context fits under targetTokens.
  */
-export function planCompression(
-	budget: CompressionBudget,
-	results: readonly ToolResultInput[],
-): CompressionPlan {
+export function planCompression(budget: CompressionBudget, results: readonly ToolResultInput[]): CompressionPlan {
 	if (!budget.compressAll && budget.totalTokens <= budget.targetTokens) {
 		return { selected: [], alreadyFits: true, totalTokens: budget.totalTokens, targetTokens: budget.targetTokens };
 	}
@@ -313,11 +305,7 @@ export function planCompression(
  * failure ("Context overflow recovery failed: ...") and any non-aborted compaction
  * failure whose error shows the summarization hit the output token cap.
  */
-export function isRecoverableCompactionFailure(event: {
-	reason: string;
-	errorMessage?: string;
-	aborted: boolean;
-}): boolean {
+export function isRecoverableCompactionFailure(event: { reason: string; errorMessage?: string; aborted: boolean }): boolean {
 	if (event.aborted) return false;
 	if (event.reason === "overflow") return true;
 	return /token cap|summary is incomplete/i.test(event.errorMessage ?? "");
@@ -488,10 +476,7 @@ async function runCompressionPass(
 	if (!settings.enabled) return { compressed: 0, freedTokens: 0, skipped: true };
 	const projection = ctx.sessionManager.buildSessionProjection();
 	const inputs = projectedToolResultInputs(projection.entries);
-	const plan = planCompression(
-		{ totalTokens: 0, targetTokens: 0, keepRecent: settings.keepRecentToolResults, compressAll: true },
-		inputs,
-	);
+	const plan = planCompression({ totalTokens: 0, targetTokens: 0, keepRecent: settings.keepRecentToolResults, compressAll: true }, inputs);
 	logDebug(LOG_SCOPE, "compression-pass", {
 		candidates: inputs.length,
 		selected: plan.selected.length,
@@ -630,16 +615,10 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 				return;
 			}
 			if (result.compressed === 0) {
-				ctx.ui.notify(
-					"Nothing to compress: the context already fits, or only the most recent tool call responses remain.",
-					"info",
-				);
+				ctx.ui.notify("Nothing to compress: the context already fits, or only the most recent tool call responses remain.", "info");
 				return;
 			}
-			ctx.ui.notify(
-				`Compressed ${result.compressed} tool call responses (~${result.freedTokens.toLocaleString()} tokens freed)`,
-				"info",
-			);
+			ctx.ui.notify(`Compressed ${result.compressed} tool call responses (~${result.freedTokens.toLocaleString()} tokens freed)`, "info");
 			// Re-run pi's compaction so it decides what stays in context, with the
 			// recovery's token-cap-aware custom instructions.
 			ctx.ui.notify("Running compaction so it decides what to keep in context...", "info");
@@ -679,9 +658,10 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 			// For interrupted runs (overflow recovery, mid-run threshold compaction) the
 			// prompt that was in flight is resent once the recovery compaction succeeds.
 			// A manual /compact failure has no prompt to resend.
-			const lastPrompt = event.reason === "manual" ? undefined : lastUserPromptText(
-				ctx.sessionManager.buildSessionProjection().messages as unknown as MessageLike[],
-			);
+			const lastPrompt =
+				event.reason === "manual"
+					? undefined
+					: lastUserPromptText(ctx.sessionManager.buildSessionProjection().messages as unknown as MessageLike[]);
 			const result = await runCompressionPass(pi, ctx);
 			if (result.skipped) return;
 			logDebug(LOG_SCOPE, "compressed", { compressed: result.compressed, freedTokens: result.freedTokens });
@@ -708,7 +688,7 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 			// failed re-run emits session_compact_failed from inside compact()'s catch
 			// block, and a synchronous nested compact() gets its abort controller
 			// cleared by the outer compact()'s finally - its own failure path then
-			// crashes with a TypeError before emitting compaction_end / 
+			// crashes with a TypeError before emitting compaction_end /
 			// session_compact_failed, leaving the TUI stuck on a compaction that never
 			// finishes. A macrotask runs only after the previous compact() has fully
 			// unwound (and the interrupted run has settled), so the new compact()
@@ -742,10 +722,7 @@ export default function compactionFailRecovery(pi: ExtensionAPI) {
 					});
 				} catch (error) {
 					logError(LOG_SCOPE, "compact-schedule-failed", error);
-					ctx.ui.notify(
-						`Recovery compaction could not start: ${error instanceof Error ? error.message : String(error)}`,
-						"warning",
-					);
+					ctx.ui.notify(`Recovery compaction could not start: ${error instanceof Error ? error.message : String(error)}`, "warning");
 				}
 			}, 0);
 		} catch (error) {

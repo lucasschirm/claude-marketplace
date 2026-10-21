@@ -1,0 +1,7 @@
+# Revisions ignored by `git blame`.
+#
+# After adding a SHA here, run:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub also honours this file for blame views in the repository.
+
+d2c586ad5da32321c002286c09b5d2e513db7c66	style: apply biome format (P1 decision D1a)

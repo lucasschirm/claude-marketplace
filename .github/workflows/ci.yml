@@ -16,11 +16,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The gate that made 34 type errors possible to land: strict tsc over extensions/ plus the
-  # manifests. The slower jobs wait for it, so a broken type fails in ~1 minute instead of after
-  # the whole Pi-runtime matrix.
+  # The gate that made 34 type errors possible to land, now covering the whole cheap surface: strict
+  # tsc, biome lint, formatting stability, the repo invariants and the quality ratchet, and the
+  # manifests. The slower jobs wait for it, so a defect stops the run in ~1 minute instead of after the
+  # whole Pi-runtime matrix.
   quality:
-    name: Quality gates (typecheck, manifests)
+    name: Quality gates (typecheck, lint, format, invariants, manifests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -35,6 +36,18 @@ jobs:
 
       - name: Typecheck extensions/
         run: npm run typecheck
+
+      - name: Lint extensions/ (biome)
+        run: npm run lint
+
+      - name: Formatting is stable (biome format, no writes)
+        run: npm run format:check
+
+      - name: Repo invariants and quality ratchet
+        run: npm run check
+
+      - name: The invariants are proven to bite (fixtures against a copy of the tree)
+        run: bash test/run.sh quality-fixtures
 
       - name: Validate marketplace / plugin / Pi manifests
         run: npm run validate

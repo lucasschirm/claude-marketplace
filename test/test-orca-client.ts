@@ -24,11 +24,7 @@ function fakeOrca(body: string, exitCode = 0): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orca-fake-"));
 	created.push(dir);
 	const file = path.join(dir, "orca");
-	fs.writeFileSync(
-		file,
-		`#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(body)}\nexit ${exitCode}\n`,
-		{ mode: 0o755 },
-	);
+	fs.writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(body)}\nexit ${exitCode}\n`, { mode: 0o755 });
 	process.env.ORCA_CLI_COMMAND = file;
 	return dir;
 }
@@ -63,7 +59,7 @@ test("a failing exit without usable output stays EXEC_ERROR", skipOnWindows, asy
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orca-fake-"));
 	created.push(dir);
 	const file = path.join(dir, "orca");
-	fs.writeFileSync(file, "#!/bin/sh\necho \"boom\" >&2\nexit 3\n", { mode: 0o755 });
+	fs.writeFileSync(file, '#!/bin/sh\necho "boom" >&2\nexit 3\n', { mode: 0o755 });
 	process.env.ORCA_CLI_COMMAND = file;
 	const res = await execOrca(["orchestration", "worker-list"]);
 	assert.strictEqual(res.ok, false);

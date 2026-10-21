@@ -188,19 +188,11 @@ exit 0
 			}
 
 			// PR 101 on branch-alpha should be auto-detected and observed
-			await waitFor(
-				() => ((globalThis as any).__PI_OBSERVED_PRS__?.size ?? 0) >= 1,
-				10000,
-				"PR 101 auto-detected",
-			);
+			await waitFor(() => ((globalThis as any).__PI_OBSERVED_PRS__?.size ?? 0) >= 1, 10000, "PR 101 auto-detected");
 			console.log("✓ PR 101 auto-detected and observed");
 
 			// Run 777 (from statusCheckRollup) should be watched
-			await waitFor(
-				() => ((globalThis as any).__PI_OBSERVED_PRS__?.get(101)?.activeRuns.size ?? 0) >= 1,
-				10000,
-				"run 777 being watched",
-			);
+			await waitFor(() => ((globalThis as any).__PI_OBSERVED_PRS__?.get(101)?.activeRuns.size ?? 0) >= 1, 10000, "run 777 being watched");
 			console.log("✓ Run 777 is being watched");
 
 			// T4-prep + outage start: an explicit observe_pr call that races the outage
@@ -210,10 +202,7 @@ exit 0
 			const toolRes = await observeTool.execute("call-1", { pr_number: 202 }, undefined, undefined, mockCtx);
 			const toolText = toolRes.content[0].text;
 			console.log("observe_pr(202) during outage:", toolText);
-			assert(
-				toolText.includes("GitHub is temporarily unreachable"),
-				`T4: expected concise unreachable status, got: ${toolText}`,
-			);
+			assert(toolText.includes("GitHub is temporarily unreachable"), `T4: expected concise unreachable status, got: ${toolText}`);
 			console.log("✓ T4-prep: observe_pr during outage returns a concise status (no raw stderr)");
 
 			// Wait out the backoff schedule (fast 5 x 1.5 s, then slow 8 s)
@@ -230,7 +219,9 @@ exit 0
 			console.log("✓ T2: no false 'All CI passed' message during the outage");
 
 			// T3: silence — no console output, no internal-error notifications
-			const noisyConsole = [...consoleErrors, ...consoleWarns].filter((c) => c.includes("observe_pr") || c.includes("timeout") || c.includes("failed to connect"));
+			const noisyConsole = [...consoleErrors, ...consoleWarns].filter(
+				(c) => c.includes("observe_pr") || c.includes("timeout") || c.includes("failed to connect"),
+			);
 			assert(noisyConsole.length === 0, `T3: console output leaked: ${JSON.stringify(noisyConsole)}`);
 			const noisyNotifications = notifications.filter((n) => n.msg.includes("observe_pr"));
 			assert(noisyNotifications.length === 0, `T3: internal error notifications leaked: ${JSON.stringify(noisyNotifications)}`);
@@ -242,13 +233,8 @@ exit 0
 				.readFileSync(path.join(tmpDir, "gh-calls.log"), "utf8")
 				.split("\n")
 				.filter((l) => l.includes(" pr view "));
-			const outageStartTs = Number.parseInt(
-				allLines.find((l) => l.includes("pr view 202"))?.slice(0, 13) ?? "0",
-				10,
-			);
-			const pvTs = allLines
-				.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10))
-				.filter((ts) => ts >= outageStartTs);
+			const outageStartTs = Number.parseInt(allLines.find((l) => l.includes("pr view 202"))?.slice(0, 13) ?? "0", 10);
+			const pvTs = allLines.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10)).filter((ts) => ts >= outageStartTs);
 			assert(pvTs.length >= 5, `T3: expected >= 5 paced 'pr view' attempts, got ${pvTs.length}`);
 			const gaps: number[] = [];
 			for (let i = 1; i < pvTs.length; i++) gaps.push(pvTs[i] - pvTs[i - 1]);
@@ -260,7 +246,9 @@ exit 0
 			assert(fastGaps.length >= 2, `T3: expected at least 2 fast-cadence gaps (1.5 s), got ${fastGaps.length}`);
 			const maxGap = Math.max(...gaps);
 			assert(maxGap >= 5000, `T3: expected a slow-cadence gap (8 s) after 5 fast failures, max gap was ${maxGap} ms`);
-			console.log(`✓ T3: gh calls paced — ${pvTs.length} attempts, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`);
+			console.log(
+				`✓ T3: gh calls paced — ${pvTs.length} attempts, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`,
+			);
 
 			// T4: recovery — outage ends, the pending observe_pr(202) must auto-start
 			fs.rmSync(path.join(tmpDir, "offline"));
@@ -268,16 +256,14 @@ exit 0
 			console.log("— GitHub recovered; waiting for polling to resume —");
 
 			await waitFor(
-				() =>
-					sentMessages.some((m) => m.includes("Comment 55 added or updated to the PR 101")),
+				() => sentMessages.some((m) => m.includes("Comment 55 added or updated to the PR 101")),
 				25000,
 				"comment update after recovery",
 			);
 			console.log("✓ T4: polling resumed after recovery (comment update delivered)");
 
 			await waitFor(
-				() =>
-					sentMessages.some((m) => m.includes("All CI passed for the PR 101")),
+				() => sentMessages.some((m) => m.includes("All CI passed for the PR 101")),
 				25000,
 				"All CI passed after run 777 re-watched to success",
 			);
@@ -287,33 +273,34 @@ exit 0
 				"T4: 'All CI passed' must be reported exactly once",
 			);
 
-			await waitFor(
-				() => ((globalThis as any).__PI_OBSERVED_PRS__?.size ?? 0) >= 2,
-				25000,
-				"PR 202 auto-start after recovery",
-			);
+			await waitFor(() => ((globalThis as any).__PI_OBSERVED_PRS__?.size ?? 0) >= 2, 25000, "PR 202 auto-start after recovery");
 			console.log("✓ T4: pending observe_pr(202) auto-started after recovery");
 
 			// T5: a CI-failure exit of `gh pr checks --watch` (exit 1, no availability
 			// error) must NOT be recorded as a GitHub failure and must NOT respawn at
 			// 1 s — the restart follows the normal 2 s interval
-				fs.writeFileSync(path.join(tmpDir, "ci_fail"), "1");
-				const ciFailTs = Date.now();
-				await sleep(15000);
-				const watchSpawns = fs
-					.readFileSync(path.join(tmpDir, "gh-calls.log"), "utf8")
-					.split("\n")
-					.filter((l) => l.includes(" pr checks 101 ") && l.includes(" --watch ")) // (PR 101 only: the other observed PR's watcher interleaves)
-					.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10))
-					.filter((ts) => ts >= ciFailTs - 2000);
-				assert(watchSpawns.length >= 2, `T5: expected the checks watcher to keep cycling, got ${watchSpawns.length} spawns`);
-				const wGaps: number[] = [];
-				for (let i = 1; i < watchSpawns.length; i++) wGaps.push(watchSpawns[i] - watchSpawns[i - 1]);
-				const wMinGap = Math.min(...wGaps);
-				assert(wMinGap >= 1500, `T5: the checks watcher respawned at ~1 s (min gap ${wMinGap} ms) — a CI-failure exit was misclassified as a GitHub failure`);
-				const falsePassed2 = sentMessages.filter((m) => m.includes("All CI passed") && m.includes("101"));
-				assert(falsePassed2.length === 1, `T5: a failing CI must not produce 'All CI passed' (saw ${falsePassed2.length})`);
-				console.log(`✓ T5: a CI-failure exit of the checks watcher is not a GitHub failure (respawn min gap ${wMinGap} ms = the 2 s interval)`);
+			fs.writeFileSync(path.join(tmpDir, "ci_fail"), "1");
+			const ciFailTs = Date.now();
+			await sleep(15000);
+			const watchSpawns = fs
+				.readFileSync(path.join(tmpDir, "gh-calls.log"), "utf8")
+				.split("\n")
+				.filter((l) => l.includes(" pr checks 101 ") && l.includes(" --watch ")) // (PR 101 only: the other observed PR's watcher interleaves)
+				.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10))
+				.filter((ts) => ts >= ciFailTs - 2000);
+			assert(watchSpawns.length >= 2, `T5: expected the checks watcher to keep cycling, got ${watchSpawns.length} spawns`);
+			const wGaps: number[] = [];
+			for (let i = 1; i < watchSpawns.length; i++) wGaps.push(watchSpawns[i] - watchSpawns[i - 1]);
+			const wMinGap = Math.min(...wGaps);
+			assert(
+				wMinGap >= 1500,
+				`T5: the checks watcher respawned at ~1 s (min gap ${wMinGap} ms) — a CI-failure exit was misclassified as a GitHub failure`,
+			);
+			const falsePassed2 = sentMessages.filter((m) => m.includes("All CI passed") && m.includes("101"));
+			assert(falsePassed2.length === 1, `T5: a failing CI must not produce 'All CI passed' (saw ${falsePassed2.length})`);
+			console.log(
+				`✓ T5: a CI-failure exit of the checks watcher is not a GitHub failure (respawn min gap ${wMinGap} ms = the 2 s interval)`,
+			);
 
 			// Final silence check (recovery path must also be quiet)
 			const noisyAfter = [...consoleErrors, ...consoleWarns].filter((c) => c.includes("observe_pr"));

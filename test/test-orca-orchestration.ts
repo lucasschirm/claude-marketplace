@@ -337,13 +337,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			const statusTool = registeredTools.get("orca_orchestration_status")!;
 
 			// 6a. Single dispatch status
-			const statusRes = await statusTool.execute(
-				"call-stat-1",
-				{ dispatch_id: "ctx-mock-1" },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const statusRes = await statusTool.execute("call-stat-1", { dispatch_id: "ctx-mock-1" }, undefined, undefined, mockCtx);
 			assert.match(statusRes.content[0].text, /Dispatch ctx-mock-1 Status/);
 			assert.match(statusRes.content[0].text, /Outcome: succeeded/);
 			assert.ok(!statusRes.content[0].text.includes("[object Object]"), "Status must not contain [object Object]");
@@ -361,24 +355,12 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			assert.ok(!outputRes.content[0].text.includes("[object Object]"), "Output read must not contain [object Object]");
 
 			// 6c. Overview status
-			const overviewRes = await statusTool.execute(
-				"call-stat-3",
-				{},
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const overviewRes = await statusTool.execute("call-stat-3", {}, undefined, undefined, mockCtx);
 			assert.match(overviewRes.content[0].text, /Active Run: run-mock-100/);
 			assert.ok(!overviewRes.content[0].text.includes("[object Object]"), "Overview must not contain [object Object]");
 
 			// 6d. All runs/workers across sessions
-			const allStatusRes = await statusTool.execute(
-				"call-stat-4",
-				{ all: true },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const allStatusRes = await statusTool.execute("call-stat-4", { all: true }, undefined, undefined, mockCtx);
 			assert.match(allStatusRes.content[0].text, /All Orchestration Runs & Workers Across Sessions/);
 			assert.match(allStatusRes.content[0].text, /run-mock-100/);
 			console.log("✓ orca_orchestration_status returned accurate, safely formatted output without [object Object]");
@@ -399,13 +381,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			// 8. Test orca_orchestration_release
 			console.log("Test 8: Testing orca_orchestration_release...");
 			const releaseTool = registeredTools.get("orca_orchestration_release")!;
-			const releaseRes = await releaseTool.execute(
-				"call-rel-1",
-				{ dispatch_id: "ctx-mock-1" },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const releaseRes = await releaseTool.execute("call-rel-1", { dispatch_id: "ctx-mock-1" }, undefined, undefined, mockCtx);
 			assert.match(releaseRes.content[0].text, /Worker terminal for dispatch ctx-mock-1 has been successfully released/);
 			console.log("✓ orca_orchestration_release released worker terminal");
 
@@ -414,7 +390,10 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			fs.mkdirSync(dirtyDir, { recursive: true });
 			// Initialize a git repo and make it dirty
 			const { execSync } = require("child_process");
-			execSync("git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b feature-test -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt", { cwd: dirtyDir });
+			execSync(
+				"git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b feature-test -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt",
+				{ cwd: dirtyDir },
+			);
 
 			const wtUnsafeRes = await releaseTool.execute(
 				"call-rel-wt-unsafe",
@@ -459,7 +438,10 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 9c. Test observe with a specific run_id having 0 workers to verify guidance
 			const zeroObserveRes = await observeTool.execute("call-obs-4", { run_id: "run-empty" }, undefined, undefined, mockCtx);
-			assert.match(zeroObserveRes.content[0].text, /If this run was started by another session you can manually start observing it by passing the parameters 'run_id'/);
+			assert.match(
+				zeroObserveRes.content[0].text,
+				/If this run was started by another session you can manually start observing it by passing the parameters 'run_id'/,
+			);
 			console.log("✓ orca_orchestration_observe reported accurate status and guidance");
 
 			// 10. Test Command Subcommands

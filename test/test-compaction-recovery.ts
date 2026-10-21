@@ -7,10 +7,7 @@
 // extension-log import, registerTool / registerFlag / registerCommand /
 // session_compact_failed), and the recovery flow works with a live
 // SessionManager projection.
-import extension,
-	{ DEFAULT_COMPACT_INSTRUCTIONS,
-		isCompressedContent,
-	} from "../extensions/compaction-fail-recovery.ts";
+import extension, { DEFAULT_COMPACT_INSTRUCTIONS, isCompressedContent } from "../extensions/compaction-fail-recovery.ts";
 import { logPath } from "../extensions/lib/extension-log.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
@@ -96,7 +93,7 @@ export default function (pi: any) {
 					? c
 					: Array.isArray(c)
 						? c.map((b: { text?: unknown }) => (typeof b.text === "string" ? b.text : "")).join("")
-					: "";
+						: "";
 			const isPlaceholder = (m: { role?: string; content?: unknown }) =>
 				isCompressedContent(m.content as string) &&
 				contentText(m.content).includes("ctx_memory") &&
@@ -106,10 +103,7 @@ export default function (pi: any) {
 				(m: { role?: string; content?: unknown }) => m.role === "toolResult" && isCompressedContent(m.content as string),
 			);
 			assert(placeholders.length === 3, `the 3 oldest candidates must be compressed (last 5 kept), got ${placeholders.length}`);
-			assert(
-				placeholders.every(isPlaceholder),
-				"placeholders must point at ctx_memory with the entry id",
-			);
+			assert(placeholders.every(isPlaceholder), "placeholders must point at ctx_memory with the entry id");
 			assert(compactOptions, "pi's compaction must be re-run after the compression");
 			assert(
 				compactOptions?.customInstructions === DEFAULT_COMPACT_INSTRUCTIONS,
@@ -119,7 +113,10 @@ export default function (pi: any) {
 			// The runtime runs the compaction once idle; on success the prompt is resent.
 			compactOptions?.onComplete?.();
 			assert(sent.length === 1 && sent[0] === "do the big task", `the overflowed prompt must be resent, got ${JSON.stringify(sent)}`);
-			assert(notifications.some((n) => n.includes("compressed 3 tool call responses")), "the user must be told what was compressed");
+			assert(
+				notifications.some((n) => n.includes("compressed 3 tool call responses")),
+				"the user must be told what was compressed",
+			);
 
 			console.log("✓ recovery flow: compress -> re-compact with custom instructions -> resend prompt");
 			console.log("✓ All compaction-recovery runtime tests passed successfully!");

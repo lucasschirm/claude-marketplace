@@ -316,7 +316,10 @@ test("the handshake succeeds when the host substitutes PLUGIN_ROOT (Devin)", asy
 	assert.ok(init.result.capabilities.tools, "the server must advertise the tools capability");
 
 	const tools = await server.call("tools/list");
-	assert.deepEqual(tools.result.tools.map((tool: { name: string }) => tool.name), TOOL_NAMES);
+	assert.deepEqual(
+		tools.result.tools.map((tool: { name: string }) => tool.name),
+		TOOL_NAMES,
+	);
 	for (const tool of tools.result.tools) {
 		assert.ok(tool.description.length > 20, `${tool.name} needs a description an agent can route on`);
 		assert.equal(tool.inputSchema.type, "object", `${tool.name} needs an object inputSchema`);
@@ -336,7 +339,16 @@ test("the handshake succeeds when the host substitutes CLAUDE_PLUGIN_ROOT (Claud
 test("the handshake succeeds when nothing is substituted and only the cache is there", async () => {
 	const gh = fakeGh({ ...BASE_STATE });
 	const home = tmpDir("pr-observer-home-");
-	const dir = path.join(home, ".devin-xdg-data", "devin", "cli", "plugins", "cache", "github.com_owner_repo_plugins_pr-observer-abc", "1.0.0");
+	const dir = path.join(
+		home,
+		".devin-xdg-data",
+		"devin",
+		"cli",
+		"plugins",
+		"cache",
+		"github.com_owner_repo_plugins_pr-observer-abc",
+		"1.0.0",
+	);
 	fs.mkdirSync(path.dirname(dir), { recursive: true });
 	fs.cpSync(PLUGIN, dir, { recursive: true });
 	const server = startServer({ home, gh, cwd: workspace() });
@@ -400,7 +412,10 @@ test("observe_pr reports the CI verdict and the conversation counts", async () =
 	assert.match(seen, /PR #7 \(octo\/widgets\)/);
 	assert.match(seen, /CI passed/);
 	assert.match(seen, /1 open/);
-	assert.ok(gh.calls().some((call) => call.includes("pr=7")), "the '#' prefix must not reach GitHub");
+	assert.ok(
+		gh.calls().some((call) => call.includes("pr=7")),
+		"the '#' prefix must not reach GitHub",
+	);
 	server.close();
 });
 
@@ -422,16 +437,24 @@ test("pr_task_resolve applies a shown suggestion, replies and resolves the threa
 	const id = "100";
 
 	// A suggestion nobody has been shown is never written to disk, and nothing is posted.
-	const tooSoon = await server.call("tools/call", { name: "pr_task_resolve", arguments: { task_id: id, message: "Done", accept_suggestion: true } });
+	const tooSoon = await server.call("tools/call", {
+		name: "pr_task_resolve",
+		arguments: { task_id: id, message: "Done", accept_suggestion: true },
+	});
 	assert.match(tooSoon.result.content[0].text, /not been shown the code suggestion/);
 	assert.match(fs.readFileSync(path.join(cwd, "src", "app.ts"), "utf8"), /MAX = 2/);
-	assert.deepEqual(gh.calls().filter((call) => call.some((a) => String(a).includes("addPullRequestReviewThreadReply"))), []);
+	assert.deepEqual(
+		gh.calls().filter((call) => call.some((a) => String(a).includes("addPullRequestReviewThreadReply"))),
+		[],
+	);
 
 	// Showing it is what makes the same call valid afterwards.
 	const listed = server.text(await server.call("tools/call", { name: "pr_task_detail", arguments: { task_id: id } }));
 	assert.match(listed, /Code Suggestion/);
 
-	const resolved = server.text(await server.call("tools/call", { name: "pr_task_resolve", arguments: { task_id: id, message: "Fixed", accept_suggestion: true } }));
+	const resolved = server.text(
+		await server.call("tools/call", { name: "pr_task_resolve", arguments: { task_id: id, message: "Fixed", accept_suggestion: true } }),
+	);
 	assert.match(resolved, new RegExp(`Resolved conversation ${id}`));
 	assert.equal(fs.readFileSync(path.join(cwd, "src", "app.ts"), "utf8"), "one\ntwo\nconst MAX = 3;\nfour\n");
 
@@ -439,7 +462,10 @@ test("pr_task_resolve applies a shown suggestion, replies and resolves the threa
 	const resolvedCalls = gh.calls().filter((call) => call.some((a) => String(a).includes("resolveReviewThread")));
 	assert.equal(posted.length, 1, "one reply per resolve");
 	assert.equal(resolvedCalls.length, 1, "the thread is resolved on GitHub");
-	assert.ok(posted[0].some((a) => String(a).startsWith("body=Fixed")), "the reviewer sees the message");
+	assert.ok(
+		posted[0].some((a) => String(a).startsWith("body=Fixed")),
+		"the reviewer sees the message",
+	);
 
 	const counts = server.text(await server.call("tools/call", { name: "observe_pr", arguments: { pr_number: 7 } }));
 	assert.match(counts, /0 open, 0 blocked, 0 stale, 1 resolved/);
@@ -451,10 +477,12 @@ test("pr_task_blocked posts the reason and reports the conversation as blocked",
 	const server = connectedServer(gh);
 	await server.call("initialize", {});
 	const listed = server.text(await server.call("tools/call", { name: "pr_tasks_list", arguments: {} }));
-		const id = listed.match(/\*\*Conversation Id\*\*: (\S+) /)?.[1];
+	const id = listed.match(/\*\*Conversation Id\*\*: (\S+) /)?.[1];
 	assert.ok(id, `no conversation id in the listing: ${listed}`);
 
-	const blocked = server.text(await server.call("tools/call", { name: "pr_task_blocked", arguments: { task_id: id, reason: "Which name?" } }));
+	const blocked = server.text(
+		await server.call("tools/call", { name: "pr_task_blocked", arguments: { task_id: id, reason: "Which name?" } }),
+	);
 	assert.match(blocked, /BLOCKED/);
 	assert.ok(gh.calls().some((call) => call.some((a) => String(a) === "body=Which name?")));
 

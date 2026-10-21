@@ -63,9 +63,13 @@ test("immediate: true starts on the current tick (slot races depend on it)", asy
 	const scope = createTaskScope("t-immediate");
 	let ranNow = false;
 	let ranLater = false;
-	scope.run("now", async () => {
-		ranNow = true;
-	}, { immediate: true });
+	scope.run(
+		"now",
+		async () => {
+			ranNow = true;
+		},
+		{ immediate: true },
+	);
 	scope.run("next-tick", async () => {
 		ranLater = true;
 	});
@@ -282,28 +286,34 @@ test("a round aborted by a session switch cannot chain a follow-up past its repl
 	releaseFirst();
 	assert.equal(await scope.flush(5_000), true);
 	assert.equal(peakNew, 1, `single-flight violated, peak concurrency ${peakNew}`);
-	assert.deepEqual(finished.filter((id) => id !== "R1"), ["R2", "R3"], "one coalesced follow-up");
+	assert.deepEqual(
+		finished.filter((id) => id !== "R1"),
+		["R2", "R3"],
+		"one coalesced follow-up",
+	);
 });
 
 test("resume() stops work the previous session left running", async () => {
 	const scope = createTaskScope("t-resume-abort");
 	let aborted = false;
 	let finished = false;
-	scope.run("orphan", (signal) => {
-		return new Promise<void>((resolve) => {
-			signal.addEventListener(
-				"abort",
-				() => {
-					aborted = true;
-					resolve();
-				},
-				{ once: true },
-			);
-			// (never resolves on its own: only being told to stop ends this work)
+	scope
+		.run("orphan", (signal) => {
+			return new Promise<void>((resolve) => {
+				signal.addEventListener(
+					"abort",
+					() => {
+						aborted = true;
+						resolve();
+					},
+					{ once: true },
+				);
+				// (never resolves on its own: only being told to stop ends this work)
+			});
+		})
+		.then(() => {
+			finished = true;
 		});
-	}).then(() => {
-		finished = true;
-	});
 	await sleep(10);
 	scope.resume();
 	await sleep(20);

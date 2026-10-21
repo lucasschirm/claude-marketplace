@@ -38,7 +38,7 @@ function fakeOrca(script: string): void {
 
 const skipOnWindows = process.platform === "win32" ? { skip: "sh fixture" } : {};
 
-test("a failed worker-list is reported, never collapsed into \"no live workers\"", skipOnWindows, async () => {
+test('a failed worker-list is reported, never collapsed into "no live workers"', skipOnWindows, async () => {
 	// exit 0 with a traceback on stdout: the shape that used to parse-fail into ok:true.
 	fakeOrca(`printf '%s\\n' 'Traceback (most recent call last): boom'`);
 	const text = await formatAllWorkersAndRuns(process.cwd());

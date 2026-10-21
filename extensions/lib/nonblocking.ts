@@ -154,12 +154,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 	 * slot replaces the work of a round that has not started yet, and keeping the first caller's opts
 	 * would run the new work under the old budget and report it against the old error handler.
 	 */
-	const start = (
-		name: string,
-		getWork: () => TaskWork,
-		getOpts: () => RunOptions | undefined,
-		onSettled?: () => void,
-	): Running => {
+	const start = (name: string, getWork: () => TaskWork, getOpts: () => RunOptions | undefined, onSettled?: () => void): Running => {
 		const controller = new AbortController();
 		let timer: NodeJS.Timeout | undefined;
 
@@ -270,7 +265,11 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		run(name, work, o) {
 			if (aborted) return Promise.resolve();
 			try {
-				return start(name, () => work, () => o).promise;
+				return start(
+					name,
+					() => work,
+					() => o,
+				).promise;
 			} catch (err) {
 				report(`[${label}] ${name} could not start: ${err instanceof Error ? err.message : String(err)}`);
 				return Promise.resolve();
@@ -329,13 +328,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
  */
 const reportedViolations = new Set<string>();
 
-export function reportBudgetViolation(
-	label: string,
-	event: string,
-	elapsedMs: number,
-	budgetMs: number,
-	log: TaskLogger,
-): void {
+export function reportBudgetViolation(label: string, event: string, elapsedMs: number, budgetMs: number, log: TaskLogger): void {
 	if (elapsedMs <= budgetMs) return;
 	const key = `${label}:${event}`;
 	if (reportedViolations.has(key)) return;
@@ -365,10 +358,7 @@ const availabilityCache = new Map<string, Promise<boolean>>();
 function pathCandidates(cmd: string): string[] {
 	if (cmd.includes("/") || cmd.includes("\\")) return [cmd];
 	const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
-	const exts =
-		process.platform === "win32"
-			? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
-			: [""];
+	const exts = process.platform === "win32" ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean) : [""];
 	const out: string[] = [];
 	for (const dir of dirs) {
 		for (const ext of exts) out.push(path.join(dir, cmd + ext));

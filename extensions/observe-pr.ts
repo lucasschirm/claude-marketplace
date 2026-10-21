@@ -126,8 +126,7 @@ class PRObserverDashboardComponent {
 
 		lines.push("");
 		const title = th.fg("accent", " PR Observer Dashboard ");
-		const headerLine =
-			th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 28)));
+		const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 28)));
 		lines.push(truncateToWidth(headerLine, width));
 		lines.push("");
 
@@ -239,13 +238,7 @@ export default async function (pi: ExtensionAPI) {
 	// Tripwire for future changes: a critical-path handler that starts awaiting I/O again is reported
 	// once (file log) instead of silently stalling every boot, message or turn.
 	function checkBudget(event: string, startedAt: number): void {
-		reportBudgetViolation(
-			"observe_pr",
-			event,
-			performance.now() - startedAt,
-			CRITICAL_BUDGET_MS[event] ?? 20,
-			logInternal,
-		);
+		reportBudgetViolation("observe_pr", event, performance.now() - startedAt, CRITICAL_BUDGET_MS[event] ?? 20, logInternal);
 	}
 
 	// A startup branch check that finishes after the user already started a turn has no message left
@@ -299,7 +292,11 @@ export default async function (pi: ExtensionAPI) {
 		if (ctxStale) return;
 		ctxStale = true;
 		disposed = true;
-		logError(EXT_LOG_SCOPE, "extension context invalidated; tearing down observer background work", new Error(`first stale call: ${caller}`));
+		logError(
+			EXT_LOG_SCOPE,
+			"extension context invalidated; tearing down observer background work",
+			new Error(`first stale call: ${caller}`),
+		);
 		try {
 			// The same teardown session_shutdown performs - this path missed that event.
 			resetObserverState();
@@ -347,11 +344,15 @@ export default async function (pi: ExtensionAPI) {
 
 	function getObserverInterval(): number {
 		// Runs inside timers and child-process callbacks: a stale context must not throw here.
-		const value = tryPi("getObserverInterval", () => {
-			const flagVal = pi.getFlag("pr-observer-interval");
-			const parsed = parseInt(String(flagVal || "60"), 10);
-			return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
-		}, 0);
+		const value = tryPi(
+			"getObserverInterval",
+			() => {
+				const flagVal = pi.getFlag("pr-observer-interval");
+				const parsed = parseInt(String(flagVal || "60"), 10);
+				return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
+			},
+			0,
+		);
 		if (value > 0) {
 			lastInterval = value;
 			return value;
@@ -722,11 +723,14 @@ export default async function (pi: ExtensionAPI) {
 		if (!pr || pr.rewatchTimers.has(runId)) return;
 		pr.rewatchTimers.set(
 			runId,
-			setTimeout(() => {
-				pr.rewatchTimers.delete(runId);
-				const current = observedPRs.get(prNumber);
-				if (current && current.activeRuns.has(runId)) guardAsync("watchRun", watchRun(prNumber, runId, cwd));
-			}, Math.max(ghHealth.nextRetryInMs(), 1000)),
+			setTimeout(
+				() => {
+					pr.rewatchTimers.delete(runId);
+					const current = observedPRs.get(prNumber);
+					if (current && current.activeRuns.has(runId)) guardAsync("watchRun", watchRun(prNumber, runId, cwd));
+				},
+				Math.max(ghHealth.nextRetryInMs(), 1000),
+			),
 		);
 	}
 
@@ -845,9 +849,7 @@ export default async function (pi: ExtensionAPI) {
 				if (!alreadyReported) {
 					const errorSummary = await getRunErrorSummary(runId, cwd);
 					if (observedPRs.get(prNumber) !== currentPr) return;
-					sendAgentMessage(
-						`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`,
-					);
+					sendAgentMessage(`The CI run ${runId} failed for the pr ${prNumber}. Investigate and fix the error: ${errorSummary}`);
 					// Persist the new failure so a resume does not re-watch + re-notify this run.
 					persistState();
 				}
@@ -869,7 +871,7 @@ export default async function (pi: ExtensionAPI) {
 		const match = url.match(/#(?:issuecomment|discussion_r|r|pullrequestreviewcomment-)(\d+)/);
 		const dbId = rawComment.databaseId ? String(rawComment.databaseId) : undefined;
 		const id = String(rawComment.id || dbId || index + 1);
-		const commentNumber = match ? match[1] : (dbId || id);
+		const commentNumber = match ? match[1] : dbId || id;
 
 		return {
 			id,
@@ -904,18 +906,16 @@ export default async function (pi: ExtensionAPI) {
 		}
 		try {
 			if (ghErr !== undefined) {
-			// A GitHub-availability failure is silent: no log, no agent message —
-			// the shared backoff retry re-polls on the next slot.
-			if (!isGhAvailabilityError(ghErr)) logInternal(`Error polling PR ${prNumber}`, ghErr);
-			return;
-		}
+				// A GitHub-availability failure is silent: no log, no agent message —
+				// the shared backoff retry re-polls on the next slot.
+				if (!isGhAvailabilityError(ghErr)) logInternal(`Error polling PR ${prNumber}`, ghErr);
+				return;
+			}
 
 			const state = String(data.state || "").toUpperCase();
 			if (state === "MERGED" || state === "CLOSED") {
 				const status = state === "MERGED" ? "merged" : "canceled";
-				sendAgentMessage(
-					`Stoping observing the pr ${prNumber}. The PR was ${status}. You will no longer receive updates about this PR.`,
-				);
+				sendAgentMessage(`Stoping observing the pr ${prNumber}. The PR was ${status}. You will no longer receive updates about this PR.`);
 				stopObserving(prNumber);
 				if (typeof (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ === "function") {
 					try {
@@ -1001,10 +1001,13 @@ export default async function (pi: ExtensionAPI) {
 		let slotHeld = false;
 		if (ghHealth.status === "degraded") {
 			if (!ghHealth.acquireSlot()) {
-				pr.restartTimer = setTimeout(() => {
-					const livePr = observedPRs.get(prNumber);
-					if (livePr) startChecksProcess(livePr);
-				}, Math.max(ghHealth.nextRetryInMs(), 1000));
+				pr.restartTimer = setTimeout(
+					() => {
+						const livePr = observedPRs.get(prNumber);
+						if (livePr) startChecksProcess(livePr);
+					},
+					Math.max(ghHealth.nextRetryInMs(), 1000),
+				);
 				return;
 			}
 			slotHeld = true;
@@ -1024,10 +1027,13 @@ export default async function (pi: ExtensionAPI) {
 			const ghDown = isGhAvailabilityError(err);
 			if (ghDown) ghHealth.recordFailure();
 			else logInternal(`Error spawning gh pr checks for PR ${prNumber}`, err);
-			pr.restartTimer = setTimeout(() => {
-				const livePr = observedPRs.get(prNumber);
-				if (livePr) startChecksProcess(livePr);
-			}, ghDown || ghHealth.status === "degraded" ? Math.max(ghHealth.nextRetryInMs(), 1000) : interval * 1000);
+			pr.restartTimer = setTimeout(
+				() => {
+					const livePr = observedPRs.get(prNumber);
+					if (livePr) startChecksProcess(livePr);
+				},
+				ghDown || ghHealth.status === "degraded" ? Math.max(ghHealth.nextRetryInMs(), 1000) : interval * 1000,
+			);
 			return;
 		}
 
@@ -1049,8 +1055,12 @@ export default async function (pi: ExtensionAPI) {
 
 			for (const line of lines) {
 				const runRegex = /\/actions\/runs\/(\d+)/g;
-				let match: RegExpExecArray | null;
-				while ((match = runRegex.exec(line)) !== null) {
+				// No assignment in the loop condition (biome noAssignInExpressions): the exec result is
+				// bound inside the loop and breaks on null, which is the same iteration the old
+				// `while ((match = …) !== null)` did - same regex object, same lastIndex progression.
+				for (;;) {
+					const match = runRegex.exec(line);
+					if (match === null) break;
 					const runId = match[1];
 					if (!pr.seenRuns.has(runId)) {
 						pr.seenRuns.add(runId);
@@ -1091,10 +1101,7 @@ export default async function (pi: ExtensionAPI) {
 			// Re-check: a stop may have happened during the poll.
 			const currentPr = observedPRs.get(prNumber);
 			if (!currentPr || currentPr.checksProcess !== checksProc) return;
-			const delay =
-				ghDown || ghHealth.status === "degraded"
-					? Math.max(ghHealth.nextRetryInMs(), 1000)
-					: interval * 1000;
+			const delay = ghDown || ghHealth.status === "degraded" ? Math.max(ghHealth.nextRetryInMs(), 1000) : interval * 1000;
 			currentPr.restartTimer = setTimeout(() => {
 				const livePr = observedPRs.get(prNumber);
 				if (livePr) {
@@ -1298,13 +1305,7 @@ export default async function (pi: ExtensionAPI) {
 						branchToPR.set(cacheKey, prNumber);
 					}
 
-					if (
-						state === "OPEN" &&
-						!isDraft &&
-						prNumber &&
-						!observedPRs.has(prNumber) &&
-						!stoppedPRs.has(prNumber)
-					) {
+					if (state === "OPEN" && !isDraft && prNumber && !observedPRs.has(prNumber) && !stoppedPRs.has(prNumber)) {
 						startObserving(prNumber, data.comments || [], repoRoot, lastUIContext);
 
 						if (deferAnnouncements && !sessionHasRun) {
@@ -1313,9 +1314,7 @@ export default async function (pi: ExtensionAPI) {
 							continue;
 						}
 
-						const delay = process.env.PI_OBSERVE_PR_DELIVERY_DELAY
-							? parseInt(process.env.PI_OBSERVE_PR_DELIVERY_DELAY, 10)
-							: 3500;
+						const delay = process.env.PI_OBSERVE_PR_DELIVERY_DELAY ? parseInt(process.env.PI_OBSERVE_PR_DELIVERY_DELAY, 10) : 3500;
 
 						const announcementTimer = setTimeout(() => {
 							const pending = pendingAnnouncements.get(prNumber);
@@ -1515,11 +1514,10 @@ export default async function (pi: ExtensionAPI) {
 				let ghErr: unknown;
 				let data: any;
 				try {
-					const { stdout } = await execFileAsync(
-						"gh",
-						["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"],
-						{ cwd: entry.cwd, timeout: GH_TIMEOUT_MS },
-					);
+					const { stdout } = await execFileAsync("gh", ["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"], {
+						cwd: entry.cwd,
+						timeout: GH_TIMEOUT_MS,
+					});
 					data = JSON.parse(stdout);
 				} catch (err) {
 					ghErr = err;
@@ -1561,11 +1559,7 @@ export default async function (pi: ExtensionAPI) {
 				// and deferring the round to a later tick loses that race to the CI watchers' respawn —
 				// either way the poll stops getting retry attempts for the whole outage. This hook runs
 				// from a ghHealth timer, not from a path Pi awaits, so it does not need the deferral.
-				await Promise.allSettled([
-					settlePendingAutoStarts(),
-					pollAllObservedPRs(signal),
-					checkTrackedBranches(lastCwd, false, signal),
-				]);
+				await Promise.allSettled([settlePendingAutoStarts(), pollAllObservedPRs(signal), checkTrackedBranches(lastCwd, false, signal)]);
 			},
 			{ onError: (msg) => logInternal(msg), immediate: true },
 		);
@@ -1597,8 +1591,8 @@ export default async function (pi: ExtensionAPI) {
 	const AUTO_TRACKING_PROMPT_MESSAGE =
 		"Automatic PR tracking is enabled. Any pull request created for tracked branches will be automatically tracked and all updates will be sent to you. Do not poll for PR updates (for example by repeatedly running `gh`): while a PR is observed, the observer sends you messages for new comments, CI results and PR status changes. You may still use `gh` to read the details of a comment or CI failure you were notified about. When the PR is observed and you have no other work to do until CI finishes, end your turn and wait for those messages.\n\n" +
 		"# Rules\n\n" +
-		"- NEVER use \"gh\" sleep loops or \"--track\" in the bash for git updates. All CI/State/Comments updates in the PR will be automatically sent to you, but it may delay the message if you run long run bash commands with sleep loop.\n" +
-		"- Only use \"gh\" to get specific information about coments, failing CI or extend the information passed from the widget.\n" +
+		'- NEVER use "gh" sleep loops or "--track" in the bash for git updates. All CI/State/Comments updates in the PR will be automatically sent to you, but it may delay the message if you run long run bash commands with sleep loop.\n' +
+		'- Only use "gh" to get specific information about coments, failing CI or extend the information passed from the widget.\n' +
 		"- Is OK to end your work and wait for the updates from the CI if there are no other pending tasks until the PR is done or state changes.";
 
 	pi.on("before_agent_start", (event) => {
@@ -1629,9 +1623,7 @@ export default async function (pi: ExtensionAPI) {
 		}
 
 		return {
-			systemPrompt: event.systemPrompt
-				? `${event.systemPrompt}\n\n${AUTO_TRACKING_PROMPT_MESSAGE}`
-				: AUTO_TRACKING_PROMPT_MESSAGE,
+			systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${AUTO_TRACKING_PROMPT_MESSAGE}` : AUTO_TRACKING_PROMPT_MESSAGE,
 		};
 	});
 
@@ -1682,7 +1674,9 @@ export default async function (pi: ExtensionAPI) {
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || lastCwd;
 			const rawPr = (params as any)?.pr_number ?? (params as any)?.prNumber ?? (params as any)?.pr;
-			const cleanStr = String(rawPr ?? "").replace(/^#/, "").trim();
+			const cleanStr = String(rawPr ?? "")
+				.replace(/^#/, "")
+				.trim();
 			const prNumber = parseInt(cleanStr, 10);
 
 			if (isNaN(prNumber) || prNumber <= 0) {
@@ -1869,8 +1863,7 @@ export default async function (pi: ExtensionAPI) {
 					});
 				} else {
 					const stats = getStats();
-					const branchesStr =
-						stats.trackedBranches.length > 0 ? ` | Branches: ${stats.trackedBranches.join(", ")}` : "";
+					const branchesStr = stats.trackedBranches.length > 0 ? ` | Branches: ${stats.trackedBranches.join(", ")}` : "";
 					const statusText =
 						`PR Observer: ${stats.isEnabled ? "Enabled" : "Disabled"} | ${stats.prs.length} PR(s) observed${branchesStr} (Interval: ${stats.interval}s) | ` +
 						`GitHub: ${stats.github.status === "degraded" ? `unreachable (next retry in ${formatMs(stats.github.nextRetryInMs)})` : "ok"}`;
@@ -1901,10 +1894,7 @@ export default async function (pi: ExtensionAPI) {
 				}
 				ctx.ui.notify("observe_pr tool disabled.", "info");
 			} else {
-				ctx.ui.notify(
-					`Unknown subcommand '${sub}'. Available subcommands: list, enable, disable, stop <prNumber>`,
-					"warning",
-				);
+				ctx.ui.notify(`Unknown subcommand '${sub}'. Available subcommands: list, enable, disable, stop <prNumber>`, "warning");
 			}
 			updateStatusUI(ctx.ui);
 		},
@@ -1914,10 +1904,7 @@ export default async function (pi: ExtensionAPI) {
 	// `pi` invocation that loads this package (Pi awaits the factory before startup continues).
 	// Probed together rather than one awaited after the other: two serial scans of PATH is the only
 	// I/O left on the one boot path Pi still waits for.
-	const [hasRequestDb, hasDestroyDb] = await Promise.all([
-		commandExists("requestdb"),
-		commandExists("destroydb"),
-	]);
+	const [hasRequestDb, hasDestroyDb] = await Promise.all([commandExists("requestdb"), commandExists("destroydb")]);
 	if (hasRequestDb) {
 		pi.registerTool({
 			name: "requestdb",
@@ -1927,8 +1914,7 @@ export default async function (pi: ExtensionAPI) {
 			parameters: Type.Object({
 				new: Type.Optional(
 					Type.Boolean({
-						description:
-							"If true, destroys the existing database/user for this folder and creates a fresh one (-new)",
+						description: "If true, destroys the existing database/user for this folder and creates a fresh one (-new)",
 					}),
 				),
 			}),
@@ -1962,8 +1948,7 @@ export default async function (pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "destroydb",
 			label: "Destroy DB",
-			description:
-				"Tears down the isolated test database and user for the current folder or all registered test databases.",
+			description: "Tears down the isolated test database and user for the current folder or all registered test databases.",
 			parameters: Type.Object({
 				all: Type.Optional(
 					Type.Boolean({

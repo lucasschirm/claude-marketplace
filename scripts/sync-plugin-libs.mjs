@@ -51,9 +51,7 @@ export function checkPluginLibs(base = root) {
 				continue;
 			}
 			if (!fs.readFileSync(origin).equals(fs.readFileSync(copy))) {
-				problems.push(
-					`${plugin}/lib/${file}: differs from ${source}/${file} - run 'node scripts/sync-plugin-libs.mjs --write'`,
-				);
+				problems.push(`${plugin}/lib/${file}: differs from ${source}/${file} - run 'node scripts/sync-plugin-libs.mjs --write'`);
 			}
 		}
 	}

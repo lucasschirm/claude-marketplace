@@ -1,8 +1,4 @@
-import {
-	type GitHubReviewThreadNode,
-	type GitHubCommentNode,
-	extractCodeSuggestion,
-} from "./github-review-threads.ts";
+import { type GitHubReviewThreadNode, type GitHubCommentNode, extractCodeSuggestion } from "./github-review-threads.ts";
 
 // STALE: the tracked review thread no longer exists on GitHub (replaced or deleted, e.g. after a
 // PR merge), so the task can't be replied to or resolved and must not keep nudging the agent.
@@ -244,9 +240,7 @@ export class PRTasksManager {
 		const unmatched: GitHubReviewThreadNode[] = [];
 		const aliasGroups: typeof live = [];
 		for (const group of live) {
-			const task = prTasks.find(
-				(t) => !seen.has(t) && (group.ids.includes(t.threadId) || t.conversationId === group.conversationId),
-			);
+			const task = prTasks.find((t) => !seen.has(t) && (group.ids.includes(t.threadId) || t.conversationId === group.conversationId));
 			if (task) claim(task, group.node);
 			else aliasGroups.push(group);
 		}
@@ -286,9 +280,7 @@ export class PRTasksManager {
 			const task = prTasks.find(
 				(t) =>
 					!seen.has(t) &&
-					(group.ids.includes(t.threadId) ||
-						group.ids.some((id) => t.deadThreadIds?.includes(id)) ||
-						hasRoot(t, group.conversationId)),
+					(group.ids.includes(t.threadId) || group.ids.some((id) => t.deadThreadIds?.includes(id)) || hasRoot(t, group.conversationId)),
 			);
 			if (task) claim(task, group.node);
 		}
@@ -320,12 +312,7 @@ export class PRTasksManager {
 	/**
 	 * Updates a tracked task from its current GitHub thread node.
 	 */
-	private applyThreadNode(
-		existing: PRTask,
-		node: GitHubReviewThreadNode,
-		result: SyncResult,
-		fetchedAt: number,
-	): void {
+	private applyThreadNode(existing: PRTask, node: GitHubReviewThreadNode, result: SyncResult, fetchedAt: number): void {
 		const previousReplies = existing.replies;
 		const wasResolvedUpstream = existing.isResolvedUpstream;
 		// A list fetched before our own resolve can't tell whether the thread was re-opened since
@@ -377,8 +364,7 @@ export class PRTasksManager {
 			if (conversationId !== existing.conversationId && !rootDeleted) {
 				// (a replacement thread GitHub created for the same comment, e.g. on a merge, keeps the
 				// comment's creation time; a re-post is a comment created later)
-				const isRepost =
-					threadChanged && !existing.aliasIds?.includes(conversationId) && root.createdAt !== existing.createdAt;
+				const isRepost = threadChanged && !existing.aliasIds?.includes(conversationId) && root.createdAt !== existing.createdAt;
 				existing.aliasIds = [...(existing.aliasIds || []).filter((id) => id !== conversationId), existing.conversationId];
 				existing.conversationId = conversationId;
 				// (only open tasks are re-linked to a re-post)
@@ -412,9 +398,7 @@ export class PRTasksManager {
 		} else if (existing.status === "STALE") {
 			// A node GitHub rejected stays STALE while it is still listed, unless it shows new activity
 			const seenReplies = existing.seenReplies || [];
-			const hasNewActivity = existing.replies.some(
-				(r) => !previousReplies.some((p) => p.id === r.id) && !seenReplies.includes(r.id),
-			);
+			const hasNewActivity = existing.replies.some((r) => !previousReplies.some((p) => p.id === r.id) && !seenReplies.includes(r.id));
 			if (!existing.deadThreadIds?.includes(node.id) || hasNewActivity) {
 				// The thread is reachable again: restore the state it had before going stale
 				setStatus(existing, existing.blockedReason ? "BLOCKED" : "UNRESOLVED");
@@ -751,7 +735,7 @@ export function formatTaskFileLocation(task: PRTask): string {
  *
  * **Conversation Id**: <conversation-id> (<posted-date> by <posted-user>)
  * **Conversation message**: <conversation-message>
- * **File**: <file>@<line/lines> 
+ * **File**: <file>@<line/lines>
  * **Status**: <conversation-state>
  * **Replies**: <number-of-replies>
  * ------
@@ -790,7 +774,7 @@ export function formatTaskSummary(tasks: PRTask[], totalTasks: number): string {
  *
  * **Conversation ID**: <conversation-id> (<posted-date> by <posted-user>)
  * **Conversation message**: <conversation-message>
- * **File**: <file>@<line/lines> 
+ * **File**: <file>@<line/lines>
  * **Status**: <conversation state>
  * **Replies**: <number-of-replies>
  *
@@ -810,9 +794,7 @@ export function formatTaskDetail(task: PRTask): string {
 	const sections: string[] = [headerLines.join("\n")];
 
 	if (task.replies.length > 0) {
-		const replyLines = task.replies.map(
-			(r, idx) => `**Reply ${idx + 1}**: ${r.body} by ${r.author} at ${r.createdAt}`,
-		);
+		const replyLines = task.replies.map((r, idx) => `**Reply ${idx + 1}**: ${r.body} by ${r.author} at ${r.createdAt}`);
 		sections.push(replyLines.join("\n"));
 	}
 

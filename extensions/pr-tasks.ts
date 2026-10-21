@@ -85,8 +85,7 @@ class PRTasksDashboardComponent {
 
 		lines.push("");
 		const title = th.fg("accent", " PR Review Conversation Tasks ");
-		const headerLine =
-			th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 36)));
+		const headerLine = th.fg("borderMuted", "───") + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 36)));
 		lines.push(truncateToWidth(headerLine, width));
 		lines.push("");
 
@@ -114,9 +113,7 @@ class PRTasksDashboardComponent {
 				lines.push(truncateToWidth(`    ${th.fg("muted", snippet)}`, width));
 				lines.push(
 					truncateToWidth(
-						`    Author: ${task.author} | Replies: ${task.replies.length} | Suggestion: ${
-							task.hasSuggestion ? "Yes" : "No"
-						}`,
+						`    Author: ${task.author} | Replies: ${task.replies.length} | Suggestion: ${task.hasSuggestion ? "Yes" : "No"}`,
 						width,
 					),
 				);
@@ -171,7 +168,11 @@ export default function (pi: ExtensionAPI) {
 	function handleStaleContext(caller: string): void {
 		if (ctxStale) return;
 		ctxStale = true;
-		logError(EXT_LOG_SCOPE, "extension context invalidated; tearing down pr-tasks background work", new Error(`first stale call: ${caller}`));
+		logError(
+			EXT_LOG_SCOPE,
+			"extension context invalidated; tearing down pr-tasks background work",
+			new Error(`first stale call: ${caller}`),
+		);
 		try {
 			// The same teardown session_shutdown performs - this path missed that event.
 			sessionId++; // drop syncs still in flight (syncPROrThrow's session check)
@@ -223,13 +224,7 @@ export default function (pi: ExtensionAPI) {
 	// Tripwire for future changes: if a critical-path handler starts awaiting I/O again, report it
 	// once instead of silently stalling every boot, message or turn.
 	function checkBudget(event: string, startedAt: number): void {
-		reportBudgetViolation(
-			"pr_tasks",
-			event,
-			performance.now() - startedAt,
-			CRITICAL_BUDGET_MS[event] ?? 20,
-			logInternal,
-		);
+		reportBudgetViolation("pr_tasks", event, performance.now() - startedAt, CRITICAL_BUDGET_MS[event] ?? 20, logInternal);
 	}
 
 	// A scheduled sync must never surface as an unhandled rejection: the first stale-context throw
@@ -505,7 +500,9 @@ export default function (pi: ExtensionAPI) {
 				if (isGhAvailabilityError(err)) {
 					// Silent for the failure itself; the caller shows the concise message
 					ghHealth.recordFailure();
-					throw new Error("GitHub is temporarily unreachable, so the conversation state could not be checked (the extension is retrying in the background); try again later");
+					throw new Error(
+						"GitHub is temporarily unreachable, so the conversation state could not be checked (the extension is retrying in the background); try again later",
+					);
 				}
 				throw new Error(`could not check the conversation on GitHub: ${describeGhError(err)}`);
 			} finally {
@@ -963,11 +960,10 @@ export default function (pi: ExtensionAPI) {
 			// Scheduled, not awaited: Pi awaits session_start before it paints the restored transcript,
 			// so a GitHub fan-out here would freeze the TUI for seconds. The status line paints from
 			// cache now and updates again when the refresh lands.
-			tasks.schedule(
-				SYNC_ALL_KEY,
-				(signal) => inBackground("session_start", () => refreshAllPRs(signal)),
-				{ budgetMs: BOOT_BUDGET_MS, onError: taskErrorHandler("session_start") },
-			);
+			tasks.schedule(SYNC_ALL_KEY, (signal) => inBackground("session_start", () => refreshAllPRs(signal)), {
+				budgetMs: BOOT_BUDGET_MS,
+				onError: taskErrorHandler("session_start"),
+			});
 			updateStatusUI(ctx.ui);
 			checkBudget("session_start", startedAt);
 		} catch (err) {
@@ -1092,9 +1088,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		return {
-			systemPrompt: event.systemPrompt
-				? `${event.systemPrompt}\n\n${PROMPT_GUIDELINES}`
-				: PROMPT_GUIDELINES,
+			systemPrompt: event.systemPrompt ? `${event.systemPrompt}\n\n${PROMPT_GUIDELINES}` : PROMPT_GUIDELINES,
 		};
 	});
 
@@ -1139,8 +1133,7 @@ export default function (pi: ExtensionAPI) {
 			),
 			show_all: Type.Optional(
 				Type.Boolean({
-					description:
-						"If true, shows all tasks including resolved ones. By default only unresolved/blocked/stale tasks are shown.",
+					description: "If true, shows all tasks including resolved ones. By default only unresolved/blocked/stale tasks are shown.",
 				}),
 			),
 		}),
@@ -1178,7 +1171,10 @@ export default function (pi: ExtensionAPI) {
 				returned: filteredTasks.length,
 				total: allTasks.length,
 				degraded,
-				...capList("taskIds", filteredTasks.map((t) => t.conversationId)),
+				...capList(
+					"taskIds",
+					filteredTasks.map((t) => t.conversationId),
+				),
 			});
 		},
 	});
@@ -1198,8 +1194,7 @@ export default function (pi: ExtensionAPI) {
 			}),
 			accept_suggestion: Type.Optional(
 				Type.Boolean({
-					description:
-						"If true, accepts and applies the code suggestion from the conversation. Returns an error if no suggestion exists.",
+					description: "If true, accepts and applies the code suggestion from the conversation. Returns an error if no suggestion exists.",
 				}),
 			),
 		}),
@@ -1210,9 +1205,7 @@ export default function (pi: ExtensionAPI) {
 
 			const rawId = (params as any)?.conversation_id ?? (params as any)?.conversationId;
 			const message = String((params as any)?.message || "").trim();
-			const acceptSuggestion = Boolean(
-				(params as any)?.accept_suggestion ?? (params as any)?.acceptSuggestion,
-			);
+			const acceptSuggestion = Boolean((params as any)?.accept_suggestion ?? (params as any)?.acceptSuggestion);
 
 			// A blank message stays rejected: GitHub needs a body for the reply. The details say
 			// which half is missing, so "you sent nothing" is never reported for an empty string.
@@ -1244,11 +1237,10 @@ export default function (pi: ExtensionAPI) {
 				const details = { ...taskDetails, kind: result.kind, status: task.status };
 				return result.kind === "error" ? err(result.text, "RESOLVE_FAILED", details) : ok(result.text, details);
 			} catch (cause: any) {
-				return err(
-					`Error resolving conversation ${task.conversationId}: ${mutationErrorText(cause)}`,
-					mutationErrorCode(cause),
-					{ ...taskDetails, status: task.status },
-				);
+				return err(`Error resolving conversation ${task.conversationId}: ${mutationErrorText(cause)}`, mutationErrorCode(cause), {
+					...taskDetails,
+					status: task.status,
+				});
 			}
 		},
 	});
@@ -1312,8 +1304,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "pr_task_blocked",
 		label: "Mark PR Task Blocked",
-		description:
-			"Marks a PR conversation task as blocked when human intervention is required, posting the reason as a reply.",
+		description: "Marks a PR conversation task as blocked when human intervention is required, posting the reason as a reply.",
 		parameters: Type.Object({
 			conversation_id: Type.Union([Type.String(), Type.Number()], {
 				description: "The conversation ID / task ID to mark as blocked",
@@ -1382,11 +1373,12 @@ export default function (pi: ExtensionAPI) {
 					);
 				});
 			} catch (cause: any) {
-				return err(
-					`Error marking conversation ${task.conversationId} as blocked: ${mutationErrorText(cause)}`,
-					mutationErrorCode(cause),
-					{ tool: "pr_task_blocked", conversationId: task.conversationId, prNumber: task.prNumber, posted: false },
-				);
+				return err(`Error marking conversation ${task.conversationId} as blocked: ${mutationErrorText(cause)}`, mutationErrorCode(cause), {
+					tool: "pr_task_blocked",
+					conversationId: task.conversationId,
+					prNumber: task.prNumber,
+					posted: false,
+				});
 			}
 		},
 	});
@@ -1484,9 +1476,10 @@ export default function (pi: ExtensionAPI) {
 					// user writing, so the reply can unblock the task.
 					const folder = await taskFolder(task, ctx.cwd);
 					const upstream = await refreshTask(task, folder);
-					const outcome: ThreadReplyOutcome = upstream && blocksPosting(upstream, true)
-						? { kind: upstream }
-						: await replyToTaskThread(task, replyMsg, folder, { allowResolved: true, own: false });
+					const outcome: ThreadReplyOutcome =
+						upstream && blocksPosting(upstream, true)
+							? { kind: upstream }
+							: await replyToTaskThread(task, replyMsg, folder, { allowResolved: true, own: false });
 					if (outcome.kind !== "replied") {
 						updateStatusUI(ctx.ui);
 						ctx.ui.notify(describeUpstreamState(task, outcome.kind, "No reply was posted."), "warning");

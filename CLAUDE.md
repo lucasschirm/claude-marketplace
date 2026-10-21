@@ -34,7 +34,23 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
 
 ## Validating changes
 
-- `npm run validate` (`node scripts/validate-marketplace.mjs`) replaces the manual manifest checks: JSON manifests parse, every `source` resolves to a directory containing `.claude-plugin/plugin.json`, names match between `marketplace.json` and `plugin.json`, no `plugins/*` directory is missing from the manifest, and every `SKILL.md` / `agents/*.md` has `name` + `description` frontmatter.
+- `npm run qa` is the fast loop and the definition of done for any change to `extensions/`: `typecheck && lint && format:check && check && validate && test:unit`. It needs `npm install`.
+- `npm run typecheck` (`tsc --noEmit`) covers `extensions/**`. `npm run lint` runs biome (`biome.jsonc`) over `extensions/`; `npm run format` applies it everywhere and `npm run format:check` only verifies.
+- `biome.jsonc` is **part of the baseline** (`biomeConfigHash`). Change it and the biome debt figures no longer
+  mean the same thing — silencing a rule for one file moves a count exactly the way fixing that file's debt does
+  — so `npm run check` fails until you record the new configuration deliberately:
+  `npm run qa:baseline -- --write --reason "what changed and why"`. The same is true of any metric that falls to
+  zero: a fall is free, a fall to zero is a decision, and it lands in the baseline's visible `notes`.
+- `--reason` must be a sentence (four words, twenty-four characters). "." and "why this is acceptable" both
+  authorised ungating once, which is why the bar is not merely "non-empty".
+- `npm run check` (`scripts/check-quality.mjs --check`) enforces the invariants a linter cannot express: exec location and timeouts, mutating calls whose result is never read, `globalThis` ownership, where `JSON.parse` may appear, per-file line budgets, `pi.extensions` matching the files on disk, unused libs, frontmatter, and that every test file is wired into a suite. Legacy debt is **ratcheted** by `scripts/quality-baseline.json`: counts may only shrink, `npm run qa:baseline` lowers them, and an increase requires `--write --reason "..."`, which appends a visible line to the baseline's `notes`.
+- `npm run validate` (`node scripts/validate-marketplace.mjs`) checks the marketplace/plugin manifests parse, every `source` resolves, names match between `marketplace.json` and `plugin.json`, and no `plugins/*` directory is missing from the manifest.
+- `bash test/run.sh quality-fixtures` proves the gate itself bites: every invariant in `check-quality.mjs` is
+  fed a minimal violation and must fail naming the `file:line`, every exemption must not fire, and the ratchet
+  is tested against the ways a baseline gets widened under pressure. It runs on a copy of the tree in a temp
+  directory and reaches biome through the `PI_QA_BIOME` seam, so it never mutates the checkout; CI runs it in
+  the `quality` job. If you change an invariant, add its fixture in the same commit - an invariant no fixture
+  fails is an invariant that measures nothing, and four of them did when first written.
 - `npm test` (`bash test/run.sh`) runs every CI suite; `bash test/run.sh --list` lists suite names and `npm run test:unit` runs only the standalone `node --test` files. Node >= 23.6 is required (it runs TypeScript directly).
 - CI (`.github/workflows/ci.yml`) runs on every pull request, on pushes to `main`, and manually: a manifests + unit-test job, plus a matrix job per Pi extension suite (`observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`). It installs Pi from npm and needs no model credentials — the suites mock `gh`/Pi APIs and run `--offline`.
 - To smoke-test a plugin locally in Claude Code, add this repo as a marketplace (`/plugin marketplace add <path-to-this-repo>`) and install the plugin to confirm skills/agents load correctly.

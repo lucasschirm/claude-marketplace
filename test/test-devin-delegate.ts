@@ -40,14 +40,7 @@ export default function testRunner(pi: ExtensionAPI): void {
 		try {
 			// 1. Verify Tool Registrations
 			console.log("Test 1: Verifying registered tools...");
-			const expectedTools = [
-				"devin_delegate",
-				"devin_status",
-				"devin_message",
-				"devin_cancel",
-				"devin_restart",
-				"devin_clean_worktree",
-			];
+			const expectedTools = ["devin_delegate", "devin_status", "devin_message", "devin_cancel", "devin_restart", "devin_clean_worktree"];
 			for (const t of expectedTools) {
 				assert.ok(registeredTools.has(t), `Expected tool ${t} to be registered`);
 			}
@@ -123,21 +116,12 @@ export default function testRunner(pi: ExtensionAPI): void {
 				mockCtx,
 			);
 			console.log("Call 3 result (expected queued):", res3.content[0].text);
-			assert.strictEqual(
-				res3.content[0].text,
-				"Your session was queued as 1 of 1. You will receive the session id as soon it start",
-			);
+			assert.strictEqual(res3.content[0].text, "Your session was queued as 1 of 1. You will receive the session id as soon it start");
 			console.log("✓ Queue message matches user specification exactly");
 
 			// 5. Test devin_status on active session and queued task visibility
 			console.log("Test 5: Testing devin_status on session 1 and queued task visibility...");
-			const statusRes1 = await statusTool.execute(
-				"call-stat-1",
-				{ session_id: sessionId1 },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const statusRes1 = await statusTool.execute("call-stat-1", { session_id: sessionId1 }, undefined, undefined, mockCtx);
 			console.log("Status result for session 1:", statusRes1.content[0].text);
 			assert.match(statusRes1.content[0].text, new RegExp(sessionId1));
 			assert.match(statusRes1.content[0].text, /Last 3 messages:/);
@@ -148,39 +132,21 @@ export default function testRunner(pi: ExtensionAPI): void {
 
 			// 6. Test devin_cancel on queued task
 			console.log("Test 6: Testing devin_cancel on queued task q-3...");
-			const cancelResQueue = await cancelTool.execute(
-				"call-cancel-q",
-				{ session_id: "q-3" },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const cancelResQueue = await cancelTool.execute("call-cancel-q", { session_id: "q-3" }, undefined, undefined, mockCtx);
 			console.log("Cancel queued result:", cancelResQueue.content[0].text);
 			assert.strictEqual(cancelResQueue.content[0].text, "Queued session q-3 was cancelled.");
 			console.log("✓ Queued task was cleanly cancelled");
 
 			// 7. Test devin_restart guard on running session
 			console.log("Test 7: Testing devin_restart guard on currently running session 1...");
-			const restartRunningRes = await restartTool.execute(
-				"call-restart-guard",
-				{ session_id: sessionId1 },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const restartRunningRes = await restartTool.execute("call-restart-guard", { session_id: sessionId1 }, undefined, undefined, mockCtx);
 			assert.strictEqual(restartRunningRes.isError, true);
 			assert.match(restartRunningRes.content[0].text, /is currently running/);
 			console.log("✓ devin_restart prevented restarting currently running session");
 
 			// 8. Test devin_cancel on active session 2
 			console.log("Test 8: Testing devin_cancel on active session 2...");
-			const cancelResActive = await cancelTool.execute(
-				"call-cancel-act",
-				{ session_id: sessionId2 },
-				undefined,
-				undefined,
-				mockCtx,
-			);
+			const cancelResActive = await cancelTool.execute("call-cancel-act", { session_id: sessionId2 }, undefined, undefined, mockCtx);
 			console.log("Cancel active result:", cancelResActive.content[0].text);
 			assert.strictEqual(cancelResActive.content[0].text, `Session ${sessionId2} was cancelled.`);
 			console.log("✓ Active session cancelled cleanly");
@@ -228,15 +194,20 @@ export default function testRunner(pi: ExtensionAPI): void {
 			const dirtyWtDir = path.join(os.tmpdir(), "devin-dirty-wt-test");
 			fs.mkdirSync(dirtyWtDir, { recursive: true });
 			const { execSync } = require("child_process");
-			execSync("git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b test-branch -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt", { cwd: dirtyWtDir });
+			execSync(
+				"git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b test-branch -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt",
+				{ cwd: dirtyWtDir },
+			);
 
 			// Inject dummy settled session with dirty worktree
-			(registeredTools.get("devin_delegate") as any);
+			registeredTools.get("devin_delegate") as any;
 			const sessionsMap = (ext as any).__test_sessions || new Map();
 			// We can test devin_clean_worktree directly or verify safety refusal
 			const unsafeCleanRes = await cleanWtTool.execute("clean-wt-3", { session_id: "non-existent" }, undefined, undefined, mockCtx);
 			assert.strictEqual(unsafeCleanRes.isError, true);
-			try { fs.rmSync(dirtyWtDir, { recursive: true, force: true }); } catch {}
+			try {
+				fs.rmSync(dirtyWtDir, { recursive: true, force: true });
+			} catch {}
 
 			console.log("✓ devin_clean_worktree validated successfully");
 

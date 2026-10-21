@@ -15,18 +15,18 @@
  */
 
 export interface GhHealthOptions {
-  /** Interval between the first fast retries. Default 30_000 ms. */
-  fastIntervalMs?: number;
-  /** Number of fast retries before switching to the slow interval. Default 5. */
-  fastRetries?: number;
-  /** Interval used after `fastRetries` consecutive failures. Default 600_000 ms. */
-  slowIntervalMs?: number;
-  /** Injectable clock (tests). Default Date.now. */
-  now?: () => number;
-  /** Injectable timer (tests). Default setTimeout. */
-  schedule?: (ms: number, fn: () => void) => unknown;
-  /** Pairs with `schedule`. Default clearTimeout. */
-  unschedule?: (handle: unknown) => void;
+	/** Interval between the first fast retries. Default 30_000 ms. */
+	fastIntervalMs?: number;
+	/** Number of fast retries before switching to the slow interval. Default 5. */
+	fastRetries?: number;
+	/** Interval used after `fastRetries` consecutive failures. Default 600_000 ms. */
+	slowIntervalMs?: number;
+	/** Injectable clock (tests). Default Date.now. */
+	now?: () => number;
+	/** Injectable timer (tests). Default setTimeout. */
+	schedule?: (ms: number, fn: () => void) => unknown;
+	/** Pairs with `schedule`. Default clearTimeout. */
+	unschedule?: (handle: unknown) => void;
 }
 
 export class GhHealth {
@@ -45,6 +45,7 @@ export class GhHealth {
 	// A slot became due while claimed work was still running
 	private pendingWhileBusy = false;
 	private timer: unknown;
+	private recoverHandle: unknown;
 	private readonly retryHooks: Set<() => void> = new Set();
 
 	constructor(opts: GhHealthOptions = {}) {
@@ -127,7 +128,17 @@ export class GhHealth {
 		return this.now() - this.lastFailureAt >= this.nextIntervalMs();
 	}
 
-	/** Records a successful GitHub call: resets the backoff state. */
+	/**
+	 * Records a successful GitHub call: resets the backoff state and, on the degraded -> healthy
+	 * transition, runs the retry hooks once.
+	 *
+	 * The hooks are the only driver for work that waited out the outage (a pending observe_pr
+	 * auto-start, a pr-tasks reconciliation). They are scheduled by recordFailure alone, so without
+	 * this a recovery detected by *some other* call leaves that work stranded until the next failure
+	 * schedules a timer - and the promise given to the model ("observation will start automatically
+	 * once the connection recovers") would go silently unfulfilled. Deferred one tick, so no hook runs
+	 * inside the stack of the call that happened to succeed first.
+	 */
 	recordSuccess(): void {
 		if (this.failures === 0) return;
 		this.failures = 0;
@@ -135,10 +146,20 @@ export class GhHealth {
 		this.windowUsed = false;
 		this.pendingWhileBusy = false;
 		this.clearTimer();
+		this.recoverHandle = this.schedule(0, () => {
+			this.recoverHandle = undefined;
+			this.fireHooks();
+		});
 	}
 
 	/** Records a failed GitHub call: paces the next retry. */
 	recordFailure(): void {
+		// A failure supersedes a recovery tick that has not run yet: the outage timer scheduled below is now
+		// the driver, and running both would drive every hook twice in the same window.
+		if (this.recoverHandle !== undefined) {
+			this.unschedule(this.recoverHandle);
+			this.recoverHandle = undefined;
+		}
 		this.failures += 1;
 		this.lastFailureAt = this.now();
 		this.windowUsed = false;
@@ -155,6 +176,10 @@ export class GhHealth {
 		this.inFlight = false;
 		this.pendingWhileBusy = false;
 		this.clearTimer();
+		if (this.recoverHandle !== undefined) {
+			this.unschedule(this.recoverHandle);
+			this.recoverHandle = undefined;
+		}
 	}
 
 	private clearTimer(): void {
@@ -212,8 +237,7 @@ const RATE_LIMIT_PATTERNS = /rate limit|too many requests|429\b/i;
 const AVAILABILITY_PATTERNS =
 	/\b(timed? ?out|failed to connect|connection (reset|refused|aborted|closed)|dial tcp|tls handshake|no route to host|network is unreachable|unexpected eof|enoent|context deadline exceeded|unauthorized|authentication failed|token expired|bad credentials|auth login|rate limit|too many requests|http\s?502|http\s?503|http\s?500|http 429)\b/i;
 
-const AUTH_PATTERNS =
-	/(unauthorized|authentication failed|token expired|bad credentials|auth login|\b401\b|\b403\b)/i;
+const AUTH_PATTERNS = /(unauthorized|authentication failed|token expired|bad credentials|auth login|\b401\b|\b403\b)/i;
 
 /**
  * Whether a failed `gh` call is an authentication problem (token expired, bad
@@ -228,9 +252,7 @@ export function isGhAuthError(err: unknown): boolean {
 		stderr?: unknown;
 		message?: unknown;
 	};
-	const text = [e.stderr, e.stdout, e.message]
-		.filter((v): v is string => typeof v === "string" && v.length > 0)
-		.join("\n");
+	const text = [e.stderr, e.stdout, e.message].filter((v): v is string => typeof v === "string" && v.length > 0).join("\n");
 	if (RATE_LIMIT_PATTERNS.test(text)) return false; // a 403 rate limit is self-resolving, not an auth problem
 	return AUTH_PATTERNS.test(text);
 }
@@ -252,8 +274,6 @@ export function isGhAvailabilityError(err: unknown): boolean {
 	};
 	if (e.killed === true || (typeof e.signal === "string" && e.signal.length > 0)) return true;
 	if (typeof e.code === "string" && AVAILABILITY_CODES.has(e.code)) return true;
-	const text = [e.stderr, e.stdout, e.message]
-		.filter((v): v is string => typeof v === "string" && v.length > 0)
-		.join("\n");
+	const text = [e.stderr, e.stdout, e.message].filter((v): v is string => typeof v === "string" && v.length > 0).join("\n");
 	return AVAILABILITY_PATTERNS.test(text);
 }
