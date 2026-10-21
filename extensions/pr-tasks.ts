@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@ea
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import {
@@ -18,6 +19,7 @@ import {
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList } from "./lib/tool-result.ts";
 import { logError } from "./lib/extension-log.ts";
+import { createTaskScope, mapLimited, reportBudgetViolation } from "./lib/nonblocking.ts";
 import {
 	PRTasksManager,
 	countTasksByStatus,
@@ -25,6 +27,7 @@ import {
 	formatTaskDetail,
 	formatLoopMessage,
 	formatStaleNotice,
+	formatNewTaskNotice,
 	formatTaskFileLocation,
 	isListedDeadThread,
 	sameReplyBody,
@@ -37,6 +40,18 @@ const GLOBAL_GUARD_KEY = "__PI_PR_TASKS_EXTENSION_ACTIVE__";
 // Identical settle nudges (same unresolved tasks, no new replies) delivered before the extension
 // stops blocking the agent from settling
 const MAX_IDENTICAL_NUDGES = 3;
+
+// How long a background refresh may keep starting new work. A hung `gh` still obeys its own
+// per-call timeout; the budget only stops the refresh from chaining call after call.
+const SYNC_BUDGET_MS = Number.parseInt(process.env.PI_PR_TASKS_SYNC_BUDGET_MS ?? "", 10) || 45_000;
+// Boot is held to a tighter budget: it must never be what makes `pi` feel frozen.
+const BOOT_BUDGET_MS = Number.parseInt(process.env.PI_EXT_BOOT_BUDGET_MS ?? "", 10) || 5_000;
+// PRs synced per refresh at a time (serial syncing multiplies one slow call by the PR count).
+const SYNC_CONCURRENCY = 2;
+// Single-flight key of the "refresh everything I care about" task.
+const SYNC_ALL_KEY = "sync-all";
+// Budgets for the lifecycle paths Pi awaits (see extensions/lib/nonblocking.ts).
+const CRITICAL_BUDGET_MS: Record<string, number> = { session_start: 20, input: 10, turn_end: 20, agent_before_settle: 20 };
 
 class PRTasksDashboardComponent {
 	private theme: any;
@@ -161,7 +176,11 @@ export default function (pi: ExtensionAPI) {
 			// The same teardown session_shutdown performs - this path missed that event.
 			sessionId++; // drop syncs still in flight (syncPROrThrow's session check)
 			prTasksShutdown = true;
+			// Same as session_shutdown: without this, a refresh already running keeps making real gh
+			// calls until it happens to reach a guard, and its single-flight slot stays booked.
+			tasks.abort();
 			syncAllInFlight = undefined;
+			seededPRs.clear();
 			ghHealth.reset();
 			manager.clear();
 			lastNudgeSignature = "";
@@ -186,20 +205,51 @@ export default function (pi: ExtensionAPI) {
 			return fn();
 		} catch (err) {
 			if (isStaleError(err)) {
-				handleStaleContext(caller);
+				const detached = detachedCallerStore.getStore();
+				handleStaleContext(detached ? `${detached}:${caller}` : caller);
 				return fallback;
 			}
 			throw err;
 		}
 	}
 
-	// Guards a fire-and-forget observer promise so a rejection can never become an
-	// unhandled rejection (Node's default for those is to crash the process).
-	function guardAsync(what: string, p: Promise<unknown>): void {
-		void p.catch((err) => {
-			if (isStaleError(err)) handleStaleContext(what);
-			else logError(EXT_LOG_SCOPE, `${what} failed`, err);
-		});
+	// Every GitHub call this extension makes runs here, never on a path Pi awaits: the result
+	// lands afterwards as a status line, a steer message or updated task state.
+	const tasks = createTaskScope("pr_tasks", {
+		onError: (msg) => logInternal(msg),
+		budgetMs: SYNC_BUDGET_MS,
+	});
+
+	// Tripwire for future changes: if a critical-path handler starts awaiting I/O again, report it
+	// once instead of silently stalling every boot, message or turn.
+	function checkBudget(event: string, startedAt: number): void {
+		reportBudgetViolation(
+			"pr_tasks",
+			event,
+			performance.now() - startedAt,
+			CRITICAL_BUDGET_MS[event] ?? 20,
+			logInternal,
+		);
+	}
+
+	// A scheduled sync must never surface as an unhandled rejection: the first stale-context throw
+	// runs the teardown, every other failure goes to the file log.
+	function taskErrorHandler(caller: string): (msg: string) => void {
+		return (msg) => {
+			if (STALE_MARKER.test(msg)) handleStaleContext(caller);
+			else logError(EXT_LOG_SCOPE, msg);
+		};
+	}
+
+	// Stale attribution for detached work: a refresh that hits an invalidated context is reported
+	// against the boundary that scheduled it (and the inner call site), since that boundary is the
+	// one whose latency the work used to hide. Per execution, not one shared variable: several
+	// detached tasks interleave on the awaits inside a refresh, and a plain `let` would report
+	// whichever task set it last.
+	const detachedCallerStore = new AsyncLocalStorage<string>();
+
+	function inBackground<T>(caller: string, fn: () => Promise<T>): Promise<T> {
+		return detachedCallerStore.run(caller, fn);
 	}
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
@@ -345,10 +395,20 @@ export default function (pi: ExtensionAPI) {
 		const coords = await getRepoCoordinates(cwd); // (cached by fetchReviewThreads)
 		// (thrown, so an action waiting on this refresh doesn't go on from discarded state)
 		if (session !== sessionId) throw new Error("the session shut down while syncing");
-		const { unblockedTasks, repostedTasks, staleTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt, {
+		const { newTasks, unblockedTasks, repostedTasks, staleTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt, {
 			repo: `${coords.owner}/${coords.repo}`,
 			cwd,
 		});
+		// The first sync of a PR seeds silently: a boot, or a PR that just started being tracked,
+		// discovers every open conversation at once and the settle gate covers those. Afterwards a
+		// conversation GitHub reports as new has to reach the agent — `agent_before_settle` decides on
+		// cached state, so a refresh landing after the agent settled would otherwise record the task and
+		// stay silent until the next user turn (delivered as a steer it starts a turn when idle).
+		// Keyed by repository, not just the number: two folders can carry the same PR number, and the
+		// second one's first sync must still seed silently rather than announce every conversation.
+		const repoKey = `${coords.owner}/${coords.repo}#${prNumber}`;
+		const seeded = seededPRs.has(repoKey);
+		seededPRs.add(repoKey);
 
 		// Check for unblocked tasks that received user replies
 		for (const { task, latestReply } of unblockedTasks) {
@@ -365,12 +425,22 @@ export default function (pi: ExtensionAPI) {
 		// Reported once, on the transition (a task with an action in flight is reported by that action)
 		const newlyStale = staleTasks.filter((t) => !taskLocks.has(t));
 		if (newlyStale.length > 0) sendAgentMessage(formatStaleNotice(newlyStale));
+		if (seeded) {
+			// Only conversations that are actually open: a thread resolved upstream between two syncs
+			// arrives here too, and announcing it as "blocking you from stopping" would start a turn
+			// for a task that blocks nothing. (A task with an action in flight reports itself.)
+			const newlyOpen = newTasks.filter((t) => t.status === "UNRESOLVED" && !taskLocks.has(t));
+			if (newlyOpen.length > 0) sendAgentMessage(formatNewTaskNotice(newlyOpen));
+		}
 
 		updateStatusUI();
 	}
 
 	const taskLocks = new WeakMap<PRTask, Promise<unknown>>();
 	const heldNotices = new WeakMap<PRTask, Array<{ message: string; shown?: () => boolean }>>();
+	// `owner/repo#prNumber` whose first sync in this session already landed: that sync seeds the task
+	// list, so the conversations it finds are not "opened since the last check" and are not announced.
+	const seededPRs = new Set<string>();
 
 	/**
 	 * Sends a notice about a task, holding it while an action on the task is in flight (e.g. the
@@ -808,7 +878,11 @@ export default function (pi: ExtensionAPI) {
 		return err(`Error: Conversation ${rawId} not found.`, "NOT_FOUND", { ...details, result: "not_found" });
 	}
 
-	async function syncAllPRs(cwd: string, explicitPr?: number, { fresh = false } = {}): Promise<void> {
+	async function syncAllPRs(
+		cwd: string,
+		explicitPr?: number,
+		{ fresh = false, signal }: { fresh?: boolean; signal?: AbortSignal } = {},
+	): Promise<void> {
 		// Concurrent callers wait for the running sync instead of returning before it finishes, and
 		// reuse it when it covers the same PRs (unless they need a fetch started after their call)
 		for (let inFlight = syncAllInFlight; inFlight; inFlight = syncAllInFlight) {
@@ -819,12 +893,15 @@ export default function (pi: ExtensionAPI) {
 			// Each PR is synced once, from its own folder (a PR whose repository has no folder left is skipped)
 			const prs = new Map<string, { prNumber: number; cwd: string }>();
 			for (const target of await getTargetPRs(cwd, explicitPr)) {
+				if (signal?.aborted) return;
 				const folder = await folderFor(target, cwd);
 				if (folder) prs.set(`${folder}|${target.prNumber}`, { prNumber: target.prNumber, cwd: folder });
 			}
-			for (const pr of prs.values()) {
+			// Bounded fan-out: with several observed PRs a serial loop multiplies one slow call.
+			await mapLimited(Array.from(prs.values()), SYNC_CONCURRENCY, async (pr) => {
+				if (signal?.aborted) return;
 				await syncPR(pr.prNumber, pr.cwd);
-			}
+			});
 		})();
 		const entry = { run, cwd, explicitPr };
 		syncAllInFlight = entry;
@@ -837,6 +914,8 @@ export default function (pi: ExtensionAPI) {
 
 	// (test/debug hook: inspect the shared GitHub health state)
 	(globalThis as any).__PI_GH_HEALTH__ = ghHealth;
+	// (test hook: refreshes are deliberately not awaited, so tests wait for quiescence instead)
+	(globalThis as any).__PI_PR_TASKS_FLUSH__ = (timeoutMs?: number) => tasks.flush(timeoutMs);
 	// Register integration hooks for observe-pr
 	(globalThis as any).__PI_ON_PR_POLL__ = async (prNumber: number, cwd: string) => {
 		await syncPR(prNumber, cwd);
@@ -846,20 +925,51 @@ export default function (pi: ExtensionAPI) {
 		await syncPR(prNumber, cwd || lastCwd);
 	};
 
+	// One refresh round: sync every target, then paint what it found. An aborted refresh applies
+	// nothing, so state from a superseded session can never overwrite newer state.
+	async function refreshAllPRs(signal: AbortSignal): Promise<void> {
+		await syncAllPRs(lastCwd, undefined, { signal });
+		if (signal.aborted || prTasksShutdown) return;
+		// Detached work holds no ctx of its own, so this is where a finished round meets the runtime
+		// again: if the session was replaced while the round ran, the stale teardown runs here instead
+		// of the round continuing to act on a dead session.
+		if (tryPi("refreshAllPRs", () => pi.getActiveTools(), undefined) === undefined) return;
+		updateStatusUI();
+	}
+
 	// A backoff retry slot: re-sync all targets (each syncPR paces itself via the shared
 	// health state). No-op after a session shutdown.
 	ghHealth.registerRetryHook(() => {
 		if (prTasksShutdown) return;
-		guardAsync("syncAllPRs", syncAllPRs(lastCwd));
+		// immediate: this hook fires from a ghHealth timer (never a path Pi awaits), and in degraded
+		// mode the single retry slot goes to whoever claims it first — a deferred start would hand it
+		// to whatever else wakes in that tick and cost the sync its retry attempt.
+		tasks.schedule(SYNC_ALL_KEY, (signal) => inBackground("gh-backoff", () => refreshAllPRs(signal)), {
+			onError: taskErrorHandler("gh-backoff"),
+			immediate: true,
+		});
 	});
 
+	// Pi awaits session_start before it renders the restored transcript, so the first GitHub
+	// round-trip must not be awaited here: the status line shows cached counts immediately and is
+	// repainted when the refresh lands.
 	pi.on("session_start", async (_evt, ctx) => {
+		const startedAt = performance.now();
 		try {
+			tasks.resume();
 			prTasksShutdown = false;
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || process.cwd();
-			await syncAllPRs(lastCwd);
+			// Scheduled, not awaited: Pi awaits session_start before it paints the restored transcript,
+			// so a GitHub fan-out here would freeze the TUI for seconds. The status line paints from
+			// cache now and updates again when the refresh lands.
+			tasks.schedule(
+				SYNC_ALL_KEY,
+				(signal) => inBackground("session_start", () => refreshAllPRs(signal)),
+				{ budgetMs: BOOT_BUDGET_MS, onError: taskErrorHandler("session_start") },
+			);
 			updateStatusUI(ctx.ui);
+			checkBudget("session_start", startedAt);
 		} catch (err) {
 			// A stale ctx (its ui/cwd getters throw post-replacement) is the first stale
 			// detection: tear down (a session_shutdown this path missed would have).
@@ -869,26 +979,35 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("turn_end", async (_evt, ctx) => {
+		const startedAt = performance.now();
 		try {
 			if (ctx?.cwd) lastCwd = ctx.cwd;
 			if (ctx?.ui) lastUIContext = ctx.ui;
-			await syncAllPRs(lastCwd);
+			// Scheduled, not awaited: an awaited sync keeps Pi busy after every turn.
+			tasks.schedule(SYNC_ALL_KEY, (signal) => inBackground("turn_end", () => refreshAllPRs(signal)), {
+				onError: taskErrorHandler("turn_end"),
+			});
 			updateStatusUI(ctx?.ui);
+			checkBudget("turn_end", startedAt);
 		} catch (err) {
-			// A stale ctx (its ui/cwd getters throw post-replacement) is the first stale
-			// detection: tear down (a session_shutdown this path missed would have).
 			if (isStaleError(err)) handleStaleContext("turn_end");
 			else logInternal(`[pr_tasks] turn_end sync failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	});
 
-	// Loop enforcement: prevent agent from settling while unresolved tasks remain
+	// Loop enforcement: prevent agent from settling while unresolved tasks remain. Decides from
+	// the cached task state: this boundary gates the agent finishing its turn, so a GitHub
+	// round-trip never belongs in it. The refresh started here lands before the next boundary, and
+	// a task it discovers is enforced on the following settle attempt.
 	pi.on("agent_before_settle", async (_evt, ctx) => {
+		const startedAt = performance.now();
 		try {
 			if (ctx?.cwd) lastCwd = ctx.cwd;
 			if (ctx?.ui) lastUIContext = ctx.ui;
-
-			await syncAllPRs(lastCwd);
+			// Decide from cached state; the refresh this schedules lands before the next boundary.
+			tasks.schedule(SYNC_ALL_KEY, (signal) => inBackground("agent_before_settle", () => refreshAllPRs(signal)), {
+				onError: taskErrorHandler("agent_before_settle"),
+			});
 			updateStatusUI(ctx?.ui);
 
 			const unresolvedTasks = manager.getUnresolvedTasks();
@@ -939,6 +1058,9 @@ export default function (pi: ExtensionAPI) {
 			// sync: stale is the first stale detection (tear down); the rest stay in the file log.
 			if (isStaleError(err)) handleStaleContext("agent_before_settle");
 			else logInternal(`[pr_tasks] agent_before_settle failed: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			// finally, so every exit of the handler is measured — the early returns are the common path.
+			checkBudget("agent_before_settle", startedAt);
 		}
 	});
 
@@ -952,10 +1074,14 @@ export default function (pi: ExtensionAPI) {
 
 	// A new prompt from the user re-arms the nudge cap (the nudges themselves arrive as extension input)
 	pi.on("input", (event) => {
+		const startedAt = performance.now();
 		if (event.source !== "extension") {
 			lastNudgeSignature = "";
 			identicalNudgeCount = 0;
 		}
+		// `input` is awaited before the user's prompt runs: this is the path where a stall is felt as
+		// Enter doing nothing, so it is measured too.
+		checkBudget("input", startedAt);
 	});
 
 	pi.on("before_agent_start", (event) => {
@@ -973,8 +1099,11 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		// Stop every refresh: its results belong to the session that is going away.
+		tasks.abort();
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_ON_PR_POLL__;
+		delete (globalThis as any).__PI_PR_TASKS_FLUSH__;
 		delete (globalThis as any).__PI_ON_PR_CLOSED__;
 		sessionId++;
 		prTasksShutdown = true;
@@ -986,6 +1115,7 @@ export default function (pi: ExtensionAPI) {
 			logInternal(`[pr_tasks] session_shutdown ghHealth reset failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
+		seededPRs.clear();
 		lastNudgeSignature = "";
 		identicalNudgeCount = 0;
 		try {
