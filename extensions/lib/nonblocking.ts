@@ -95,7 +95,11 @@ export interface TaskScope {
 	 * cannot resurrect work on it. `resume()` reopens it for the next session.
 	 */
 	abort(): void;
-	/** Reopen an aborted scope (called from `session_start`). Also drops stale slot state. */
+	/**
+	 * Reopen the scope for a new session (called from `session_start`): stops anything the previous
+	 * session left running — its work self-guards on the signal — drops the single-flight bookkeeping,
+	 * and clears the aborted flag.
+	 */
 	resume(): void;
 	/** Tests/host hooks: wait for quiescence. Resolves false if `timeoutMs` elapsed first. */
 	flush(timeoutMs?: number): Promise<boolean>;
@@ -238,6 +242,19 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		return entry;
 	};
 
+	const stopAll = (reason: string) => {
+		for (const slot of slots.values()) {
+			slot.running = undefined;
+			slot.again = false;
+		}
+		for (const r of Array.from(running)) {
+			try {
+				r.controller.abort(new Error(reason));
+			} catch {}
+		}
+		running.clear();
+	};
+
 	const slotFor = (key: string, work: TaskWork, o?: RunOptions): Slot => {
 		let slot = slots.get(key);
 		if (!slot) {
@@ -261,12 +278,11 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		},
 
 		resume() {
+			// A new session's context invalidates whatever the previous one left running, so stop it
+			// rather than only dropping the bookkeeping: an orphan whose signal never fired would
+			// overlap the new session's work on the same single-flight key (and could never chain).
+			stopAll(`${label} reopened for a new session`);
 			aborted = false;
-			// Anything queued by the session that shut down is stale by now.
-			for (const slot of slots.values()) {
-				slot.again = false;
-				slot.running = undefined;
-			}
 		},
 
 		schedule(key, work, o) {
@@ -285,16 +301,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 
 		abort() {
 			aborted = true;
-			for (const slot of slots.values()) {
-				slot.running = undefined;
-				slot.again = false;
-			}
-			for (const r of Array.from(running)) {
-				try {
-					r.controller.abort(new Error(`${label} shut down`));
-				} catch {}
-			}
-			running.clear();
+			stopAll(`${label} shut down`);
 		},
 
 		async flush(timeoutMs = 10_000) {

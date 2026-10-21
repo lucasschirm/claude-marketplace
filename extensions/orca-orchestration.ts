@@ -459,7 +459,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		}
 	}
 
-	function startCheckProcess(ackDeliveryId?: string) {
+	function startCheckProcess() {
 		if (disposed) return;
 		stopCheckProcess();
 
@@ -467,13 +467,12 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		// resolves, and a watcher for the new run must not carry an ack recorded for the old one.
 		const runId = activeRunId;
 		const pendingAck = lastPendingAckRunId === runId ? lastPendingAckDeliveryId : undefined;
-		const ack = ackDeliveryId || pendingAck;
 		const seq = ++checkSpawnSeq;
 
 		void (async () => {
 			let proc: ChildProcess;
 			try {
-				proc = await spawnOrcaCheck(runId, { cwd: lastCwd, timeoutMs: 900000, ackDeliveryId: ack });
+				proc = await spawnOrcaCheck(runId, { cwd: lastCwd, timeoutMs: 900000, ackDeliveryId: pendingAck });
 			} catch (err) {
 				logError("orca-orchestration", "Failed to spawn orchestration check process", err);
 				return;
@@ -496,11 +495,12 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				lastPendingAckRunId = undefined;
 			}
 			checkProcess = proc;
-			wireCheckProcess(proc);
+			wireCheckProcess(proc, runId);
 		})();
 	}
 
-	function wireCheckProcess(proc: ChildProcess) {
+	/** `runId` is the run this watcher was spawned for, not whatever is current when a line arrives. */
+	function wireCheckProcess(proc: ChildProcess, runId?: string) {
 		proc.on("error", (err) => {
 			logError("orca-orchestration", "Check process error", err);
 		});
@@ -519,7 +519,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					return;
 				}
 
-				handleCheckDelivery(data);
+				handleCheckDelivery(data, runId);
 			} catch {
 				// Non-JSON output (log headers, etc.)
 			}
@@ -548,14 +548,16 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		});
 	}
 
-	function handleCheckDelivery(data: any) {
+	function handleCheckDelivery(data: any, runId?: string) {
 		const delivery: any =
 			data.result?.delivery || data.delivery || data.result || data;
 
 		const deliveryId = delivery?.deliveryId || data.result?.deliveryId || data.deliveryId;
 		if (deliveryId) {
 			lastPendingAckDeliveryId = deliveryId;
-			lastPendingAckRunId = activeRunId;
+			// The run of the watcher that delivered it: during a run switch `activeRunId` is already
+			// the next run, and an ack bound to that run would be applied where it does not belong.
+			lastPendingAckRunId = runId;
 		}
 
 		const messages =

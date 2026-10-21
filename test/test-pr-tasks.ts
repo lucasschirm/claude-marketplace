@@ -1193,6 +1193,30 @@ process.exit(0);
 	}
 	console.log("✓ Test 44 Passed: shown reply not notified twice");
 
+	// Test 45: a conversation that opens after the seeding sync must reach the agent on its own.
+	// agent_before_settle decides from cached state, so a refresh that lands after the agent settled
+	// would otherwise only record the task and stay silent until the next user turn.
+	console.log("\n=== Test 45: a newly opened conversation notifies the agent ===");
+	const t45 = mkThread("PRRT_45", 1045, "src/late.ts", "Nit: prefer const here");
+	writeState("extra_threads.json", [...base44, t44, t45]);
+	sentMessages.length = 0;
+	await (globalThis as any).__PI_ON_PR_POLL__(101, tmpDir);
+	await (globalThis as any).__PI_PR_TASKS_FLUSH__(10_000);
+	const newNotice = sentMessages.find((m) => m.includes("New PR review conversation"));
+	if (!newNotice || !newNotice.includes("1045")) {
+		console.error("Test 45 Failed: a conversation discovered after seeding must notify the agent", sentMessages);
+		process.exit(1);
+	}
+	// The same task is not "new" again: no repeat notice on the next sync.
+	sentMessages.length = 0;
+	await (globalThis as any).__PI_ON_PR_POLL__(101, tmpDir);
+	await (globalThis as any).__PI_PR_TASKS_FLUSH__(10_000);
+	if (sentMessages.some((m) => m.includes("New PR review conversation"))) {
+		console.error("Test 45 Failed: an already known task must not be announced twice", sentMessages);
+		process.exit(1);
+	}
+	console.log("✓ Test 45 Passed: newly discovered conversation notified once");
+
 	console.log("\n=== All PR Tasks Tests Passed Successfully! ===");
 	process.exit(0);
 }

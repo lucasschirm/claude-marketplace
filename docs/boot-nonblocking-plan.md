@@ -467,3 +467,41 @@ Round 4's verdict on the one-off `observe-pr-gh-failure` T4 timeout: the test fi
 `main`, the auto-start path is timing-equivalent to base (`settlePendingAutoStarts` still claims the
 retry slot first), so it is the suite's fixed wait meeting a loaded machine — worth widening
 independently of this PR.
+
+## 12. Review round 5 (Devin `swe-2-max`)
+
+Round 5 confirmed the round-4 fixes at file level and validated the chaining rule across every
+interleaving it could construct (schedule → replace → abort → resume → late settle, same-tick doubles,
+`immediate` tasks, throwing work, `flush()` racing the chain). It also answered the spawn-`'error'`
+question empirically: Node emits a synchronous spawn failure at the first microtask drain, and
+`spawnOrcaCheck` spawns last with the listener attached in the same microtask burst, so the async
+conversion is safe.
+
+One should-fix, and it is a real behaviour regression from moving the settle decision to cached state:
+
+1. **A task discovered by the post-settle refresh was recorded but never announced.**
+   `agent_before_settle` now decides from `manager.getUnresolvedTasks()` (the cache of the last
+   completed refresh) and schedules a refresh; `syncFromGitHubThreads` reports `newTasks`, which
+   `syncPROrThrow` used to discard. So a reviewer comment arriving during the final turn was added to
+   the task list while the agent settled unblocked, and nothing was said until the next user turn —
+   "the following settle attempt" in the old comment does not exist once the agent has settled.
+   Now `syncPROrThrow` notifies on `newTasks` through the same `sendAgentMessage` path the
+   unblocked/reposted/stale transitions already use. Pi's own `prompt()` (which `sendUserMessage`
+   calls) starts a turn when idle and only queues while streaming, so the notice re-engages a settled
+   agent. The **first sync of a PR seeds silently** (`seededPRs`): a boot or a newly tracked PR
+   discovers every open conversation at once, and those are covered by the settle gate. Cleared on
+   `session_shutdown` and stale teardown.
+   Covered by `pr-tasks` Test 45, verified to fail without the notification and pass with it.
+
+Nits taken from the same round:
+
+2. `startCheckProcess()`'s `ackDeliveryId` parameter was dead (all nine call sites passed nothing) —
+   removed; the pending-ack path is the only source.
+3. The pending ack's run binding now uses the run of the watcher that *delivered* the message
+   (`wireCheckProcess(proc, runId)` → `handleCheckDelivery(data, runId)`), not `activeRunId` at
+   arrival time, which during a run switch is already the next run.
+4. observe-pr's `input` tripwire measures every exit (`try/finally`), not only the transform path.
+5. `resume()` now **stops** what the previous session left running before clearing the bookkeeping,
+   instead of only dropping the bookkeeping: an orphaned round whose signal never fired used to overlap
+   the new session's work on the same single-flight key (transient peak 2) and could never chain.
+   Covered by a unit test.

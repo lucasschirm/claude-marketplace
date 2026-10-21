@@ -285,6 +285,41 @@ test("a round aborted by a session switch cannot chain a follow-up past its repl
 	assert.deepEqual(finished.filter((id) => id !== "R1"), ["R2", "R3"], "one coalesced follow-up");
 });
 
+test("resume() stops work the previous session left running", async () => {
+	const scope = createTaskScope("t-resume-abort");
+	let aborted = false;
+	let finished = false;
+	scope.run("orphan", (signal) => {
+		return new Promise<void>((resolve) => {
+			signal.addEventListener(
+				"abort",
+				() => {
+					aborted = true;
+					resolve();
+				},
+				{ once: true },
+			);
+			// (never resolves on its own: only being told to stop ends this work)
+		});
+	}).then(() => {
+		finished = true;
+	});
+	await sleep(10);
+	scope.resume();
+	await sleep(20);
+	assert.equal(aborted, true, "a run from the previous session is told to stop");
+	assert.equal(finished, true);
+	assert.equal(pendingTasks(), 0, "the orphan does not stay counted as pending");
+
+	// The scope still serves the new session.
+	let ran = false;
+	scope.run("next", async () => {
+		ran = true;
+	});
+	assert.equal(await scope.flush(2_000), true);
+	assert.equal(ran, true);
+});
+
 test("pending/flushAllTasks observe every scope", async () => {
 	const a = createTaskScope("a");
 	const b = createTaskScope("b");

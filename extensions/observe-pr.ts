@@ -1420,36 +1420,40 @@ export default async function (pi: ExtensionAPI) {
 		// performance.now(), matching checkBudget: an epoch start against the monotonic clock makes
 		// the elapsed time hugely negative, so the tripwire could never fire.
 		const startedAt = performance.now();
-		// Skill/template commands are expanded after this event, so appending text would corrupt them.
-		if (event.source === "extension") {
-			if (noticeAttached) noticeAttachBroken = true;
-			return { action: "continue" };
+		try {
+			// Skill/template commands are expanded after this event, so appending text would corrupt them.
+			if (event.source === "extension") {
+				if (noticeAttached) noticeAttachBroken = true;
+				return { action: "continue" };
+			}
+			const idle = event.streamingBehavior === undefined;
+			if (idle) userTurnPending = true;
+			if (event.text.startsWith("/")) {
+				if (noticeAttached) noticeAttachBroken = true;
+				return { action: "continue" };
+			}
+			// Never wait for the startup branch check here: `input` is awaited before the prompt runs, so a
+			// wait is the user's Enter key hanging. A notice that is not known yet simply rides the next
+			// plain message, and if a turn started first it arrives as a steer message.
+			// A message queued while the agent is streaming starts no new turn, so keep the notice for an idle one.
+			if (!idle || deferredAnnouncements.size === 0) {
+				if (noticeAttached) noticeAttachBroken = true;
+				return { action: "continue" };
+			}
+			// Keep the notice queued until the turn actually starts, so a prompt that fails is retried with it.
+			const notices = Array.from(deferredAnnouncements.values()).join("\n\n");
+			noticeAttached = true;
+			// A fresh arm supersedes any interposition recorded before it.
+			noticeAttachBroken = false;
+			// Snapshot what this message actually carries; agent_start marks only these (a PR
+			// deferred in after the transform never rode the message and must not be marked).
+			noticeAttachedFor = new Set(deferredAnnouncements.keys());
+			return { action: "transform", text: `${event.text}\n\n${notices}`, images: event.images };
+		} finally {
+			// Everything the handler does is in-memory today; measuring every exit (not just the
+			// transform path) is the alarm if that ever stops being true.
+			checkBudget("input", startedAt);
 		}
-		const idle = event.streamingBehavior === undefined;
-		if (idle) userTurnPending = true;
-		if (event.text.startsWith("/")) {
-			if (noticeAttached) noticeAttachBroken = true;
-			return { action: "continue" };
-		}
-		// Never wait for the startup branch check here: `input` is awaited before the prompt runs, so a
-		// wait is the user's Enter key hanging. A notice that is not known yet simply rides the next
-		// plain message, and if a turn started first it arrives as a steer message.
-		// A message queued while the agent is streaming starts no new turn, so keep the notice for an idle one.
-		if (!idle || deferredAnnouncements.size === 0) {
-			if (noticeAttached) noticeAttachBroken = true;
-			return { action: "continue" };
-		}
-		// Keep the notice queued until the turn actually starts, so a prompt that fails is retried with it.
-		const notices = Array.from(deferredAnnouncements.values()).join("\n\n");
-		noticeAttached = true;
-		// A fresh arm supersedes any interposition recorded before it.
-		noticeAttachBroken = false;
-		// Snapshot what this message actually carries; agent_start marks only these (a PR
-		// deferred in after the transform never rode the message and must not be marked).
-		noticeAttachedFor = new Set(deferredAnnouncements.keys());
-		// Everything above is in-memory; the tripwire is the alarm if that ever stops being true.
-		checkBudget("input", startedAt);
-		return { action: "transform", text: `${event.text}\n\n${notices}`, images: event.images };
 	});
 
 	// The user's message (with the notice) is now running, so follow-ups queue behind it.

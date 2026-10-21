@@ -27,6 +27,7 @@ import {
 	formatTaskDetail,
 	formatLoopMessage,
 	formatStaleNotice,
+	formatNewTaskNotice,
 	formatTaskFileLocation,
 	isListedDeadThread,
 	sameReplyBody,
@@ -179,6 +180,7 @@ export default function (pi: ExtensionAPI) {
 			// calls until it happens to reach a guard, and its single-flight slot stays booked.
 			tasks.abort();
 			syncAllInFlight = undefined;
+			seededPRs.clear();
 			ghHealth.reset();
 			manager.clear();
 			lastNudgeSignature = "";
@@ -393,10 +395,17 @@ export default function (pi: ExtensionAPI) {
 		const coords = await getRepoCoordinates(cwd); // (cached by fetchReviewThreads)
 		// (thrown, so an action waiting on this refresh doesn't go on from discarded state)
 		if (session !== sessionId) throw new Error("the session shut down while syncing");
-		const { unblockedTasks, repostedTasks, staleTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt, {
+		const { newTasks, unblockedTasks, repostedTasks, staleTasks } = manager.syncFromGitHubThreads(prNumber, threads, fetchedAt, {
 			repo: `${coords.owner}/${coords.repo}`,
 			cwd,
 		});
+		// The first sync of a PR seeds silently: a boot, or a PR that just started being tracked,
+		// discovers every open conversation at once and the settle gate covers those. Afterwards a
+		// conversation GitHub reports as new has to reach the agent — `agent_before_settle` decides on
+		// cached state, so a refresh landing after the agent settled would otherwise record the task and
+		// stay silent until the next user turn (delivered as a steer it starts a turn when idle).
+		const seeded = seededPRs.has(prNumber);
+		seededPRs.add(prNumber);
 
 		// Check for unblocked tasks that received user replies
 		for (const { task, latestReply } of unblockedTasks) {
@@ -413,12 +422,19 @@ export default function (pi: ExtensionAPI) {
 		// Reported once, on the transition (a task with an action in flight is reported by that action)
 		const newlyStale = staleTasks.filter((t) => !taskLocks.has(t));
 		if (newlyStale.length > 0) sendAgentMessage(formatStaleNotice(newlyStale));
+		if (seeded) {
+			const newlyOpen = newTasks.filter((t) => !taskLocks.has(t));
+			if (newlyOpen.length > 0) sendAgentMessage(formatNewTaskNotice(newlyOpen));
+		}
 
 		updateStatusUI();
 	}
 
 	const taskLocks = new WeakMap<PRTask, Promise<unknown>>();
 	const heldNotices = new WeakMap<PRTask, Array<{ message: string; shown?: () => boolean }>>();
+	// PRs whose first sync in this session already landed: that sync seeds the task list, so the
+	// conversations it finds are not "opened since the last check" and are not announced.
+	const seededPRs = new Set<number>();
 
 	/**
 	 * Sends a notice about a task, holding it while an action on the task is in flight (e.g. the
@@ -1093,6 +1109,7 @@ export default function (pi: ExtensionAPI) {
 			logInternal(`[pr_tasks] session_shutdown ghHealth reset failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
+		seededPRs.clear();
 		lastNudgeSignature = "";
 		identicalNudgeCount = 0;
 		try {
