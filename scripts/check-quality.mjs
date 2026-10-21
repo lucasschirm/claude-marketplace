@@ -290,10 +290,12 @@ function readBiomeDiagnosticJson(res) {
 
 /** Per-rule diagnostic counts over extensions/, plus whether the reporter shape was recognised; null when biome cannot run. */
 function biomeRuleCounts() {
-	// PI_QA_BIOME is a test seam (test/quality-gate-fixtures.sh): it points the metric collector at a command
-	// instead of node_modules/.bin/biome. It cannot make the gate pass on nothing: empty output is still fatal
-	// and an unrecognised shape is still fatal. It only lets a fixture simulate a biome that broke.
-	const override = process.env.PI_QA_BIOME?.trim();
+	// PI_QA_BIOME points the metric collector at a command other than node_modules/.bin/biome, and is honoured
+	// only when PI_QA_FIXTURES=1 (set by test/quality-gate-fixtures.sh), so a stray variable cannot swap out
+	// biome in ordinary use or in CI. Even inside the fixtures it cannot buy a quiet pass: empty output is
+	// fatal, an unrecognised shape is fatal, and a metric falling to zero must be reasoned - see the zero-drop
+	// rule in run().
+	const override = process.env.PI_QA_FIXTURES === "1" ? process.env.PI_QA_BIOME?.trim() || process.env.PI_QA_BIOME : undefined;
 	if (override) {
 		return readBiomeDiagnosticJson(
 			spawnSync(override, ["lint", "--reporter=json", "extensions"], {
@@ -372,7 +374,7 @@ function countEmptyCatches() {
  * `++`/`--`, which the first version of this detector missed.
  */
 const GLOBAL_WRITE_TAIL =
-	/globalThis\s*(?:as\s+[^)]{0,20}\)\s*)?(?:\[[^\]]+\]|\.[A-Za-z_$][\w$]*)\s*(?:\?\?=|\|\|=|&&=|\*\*=|<<=|>>>=|>>=|[-+/%&|^]?=|\+\+|--)(?!=)/;
+	/globalThis\s*(?:as\s+[^)]{0,20}\)\s*)?(?:\[[^\]]+\]|\.[A-Za-z_$][\w$]*)\s*(?:\?\?=|\|\|=|&&=|\*\*=|\*=|\|=|>>>=|>>=|<<=|&=|\^=|%=|\/=|\+=|-=|=|\+\+|--)(?!=)/;
 
 // An alias hands the shared object to whatever the variable touches, so the declaration is the site worth
 // naming: a line-level scan cannot see `g.__X__ = ...`, and without this the alias would be free. Only the
@@ -745,13 +747,29 @@ function ruleEnabledInConfig(rule) {
 	const [group, name] = rule.split("/");
 	const groupCfg = cfg?.linter?.rules?.[group];
 	if (groupCfg === "off") return false;
+	const levelOf = (value) => (typeof value === "string" ? value : value?.level);
+	let enabled = true;
 	const severity = groupCfg?.[name];
-	if (severity === undefined) {
-		// Not configured individually: `recommended` decides, at either level biome writes it.
-		return cfg?.linter?.recommended !== false && cfg?.linter?.rules?.recommended !== false;
+	if (severity !== undefined) enabled = levelOf(severity) !== "off";
+	else enabled = cfg?.linter?.recommended !== false && cfg?.linter?.rules?.recommended !== false;
+	// An overrides entry can switch a rule off for exactly the tree this gate measures
+	// (`includes: ["extensions/**/*.ts"]`), which is invisible at the top level. Any override whose include
+	// patterns could match a gated file and turns the rule off wins: the conservative answer is that the rule
+	// is no longer running, which sends the metric down the reasoned path instead of calling it an improvement.
+	// Glob matching is deliberately approximate - the zero-drop rule in run() is what actually guarantees the
+	// record, this only names the cause in the message.
+	for (const o of Array.isArray(cfg?.overrides) ? cfg.overrides : []) {
+		const includes = Array.isArray(o?.includes) ? o.includes : [];
+		const reachesExtensions = includes.some(
+			(pattern) => pattern === "**" || pattern.startsWith("**") || pattern.startsWith("extensions/") || pattern.includes("**."),
+		);
+		if (!reachesExtensions) continue;
+		if (o?.linter?.rules === "off") return false;
+		const oGroup = o?.linter?.rules?.[group];
+		if (oGroup === "off") return false;
+		if (oGroup?.[name] !== undefined && levelOf(oGroup[name]) === "off") return false;
 	}
-	const level = typeof severity === "string" ? severity : severity?.level;
-	return level !== undefined && level !== "off";
+	return enabled;
 }
 
 function readBaseline() {
@@ -870,6 +888,17 @@ function run({ mode, only, reason, full }) {
 	}
 
 	for (const row of rows) {
+		// A biome metric that used to carry debt and now reports nothing is the one change this gate cannot
+		// read: "all 147 `any`s fixed" and "the rule stopped being reported" (switched off in the config or in
+		// an override, renamed by a biome upgrade, or fed a stubbed reporter) look identical. So it is treated
+		// as a widening: it fails --check and needs --write --reason, exactly like a rise. Partial decreases
+		// stay free, because they can only mean work was done.
+		if (row.key.startsWith("biome.") && row.allowed !== undefined && row.allowed > 0 && row.value === 0) {
+			const problem = `${row.key}: ${row.allowed} -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with \`--write --reason "why"\``;
+			problems.push(problem);
+			gatedExtras.push(problem);
+			continue;
+		}
 		if (row.allowed === undefined && row.value === 0) {
 			// Nothing to ratchet yet: a clean invariant does not need a baseline line.
 			continue;

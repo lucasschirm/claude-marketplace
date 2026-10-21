@@ -30,6 +30,9 @@ mkdir -p "$WORK/repo"
 tar -cf - scripts extensions plugins skills test package.json biome.jsonc tsconfig.json .gitignore .git-blame-ignore-revs 2>/dev/null | (cd "$WORK/repo" && tar -xf -)
 cd "$WORK/repo" || exit 1
 export PI_QA_BIOME="$BIOME"
+# check-quality.mjs honours PI_QA_BIOME only when this is set, so a stray variable cannot swap biome out in
+# ordinary use or in CI. The fixture suite is the only caller allowed to redirect it.
+export PI_QA_FIXTURES=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
 PASS=0
@@ -191,6 +194,17 @@ export function f() {
 	Object.assign(globalThis, { __G__: 7 });
 	Reflect.set(globalThis, "__H__", 8);
 	delete (globalThis as any).__I__;
+	globalThis.__J__ *= 6;
+	globalThis.__K__ /= 7;
+	globalThis.__L__ %= 8;
+	globalThis.__M__ &= 9;
+	globalThis.__N__ |= 10;
+	globalThis.__O__ ^= 11;
+	globalThis.__P__ -= 12;
+	globalThis.__Q__ >>= 13;
+	globalThis.__R__ >>>= 14;
+	globalThis.__S__ ||= 15;
+	globalThis.__T__ &&= 16;
 	const read1 = (globalThis as any).__PI_READ__;
 	const read2 = globalThis.__READ2__ === undefined;
 	if ((globalThis as any).__READ3__ !== undefined) return;
@@ -198,10 +212,12 @@ export function f() {
 	void g; void h; void k; void read1; void read2; void d;
 }'
 qa fail "every write form and every alias of globalThis is counted" --only globalThisOwnership --full
-for n in 1 2 3 5 6 7 8 9 10 11 12 13; do expect_line "site zz-g.ts:$n" "zz-g.ts:$n"; done
-expect_absent "a read through a cast is not a write" "zz-g.ts:14"
-expect_absent "a comparison is not a write" "zz-g.ts:15"
-expect_absent "an if-guard is not a write" "zz-g.ts:16"
+# Every compound operator is spelled out instead of leaned on a character class: `*=` fell out of the class
+# the moment `**=` was listed, and a write the gate cannot see is a write nobody reviews.
+for n in 1 2 3 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do expect_line "site zz-g.ts:$n" "zz-g.ts:$n"; done
+expect_absent "a read through a cast is not a write" "zz-g.ts:25"
+expect_absent "a comparison is not a write" "zz-g.ts:26"
+expect_absent "an if-guard is not a write" "zz-g.ts:27"
 dropprobes
 
 echo
@@ -318,8 +334,37 @@ expect_text "and says why" "has the rule off"
 qa fail "--write cannot quietly drop the entry" --write
 cp "$WORK/biome.jsonc.orig" biome.jsonc
 node -e 'const fs=require("fs");const p="scripts/quality-baseline.json";const j=JSON.parse(fs.readFileSync(p,"utf8"));j.metrics["biome.suspicious/noDebugger"]=3;fs.writeFileSync(p,JSON.stringify(j,null,2))'
-qa pass "a rule still enabled that reports nothing is an improvement" --check
-qa pass "and --write records the zero without a reason" --write
+qa fail "a metric that falls to zero is not taken on trust, even with the rule enabled" --check
+expect_text "and says what to do about it" "Record the decision"
+qa fail "--write will not record a fall to zero without a reason" --write
+qa pass "with a reason it is recorded, and noted" --write --reason "fixture: this rule's debt is treated as gone"
+restore_baseline
+
+# A partial decrease (147 -> 100) can only mean work was done, so it stays free. A fall to zero cannot be told
+# apart from a rule that stopped reporting, so it cannot be free.
+node -e 'const fs=require("fs");const p="scripts/quality-baseline.json";const j=JSON.parse(fs.readFileSync(p,"utf8"));j.metrics["biome.suspicious/noConsole"]=400;fs.writeFileSync(p,JSON.stringify(j,null,2))'
+qa pass "a metric measured well below a raised baseline is still an improvement" --check
+restore_baseline
+
+echo
+echo "a rule silenced by an overrides entry"
+cp biome.jsonc "$WORK/biome.jsonc.orig2"
+python3 - <<'PYFIX'
+import io
+s = io.open("biome.jsonc", encoding="utf-8").read()
+needle = '"overrides": ['
+assert needle in s
+block = (
+	'"overrides": [\n\t\t{\n\t\t\t"includes": ["extensions/**/*.ts"],\n'
+	'\t\t\t"linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }\n\t\t},\n'
+)
+io.open("biome.jsonc", "w", encoding="utf-8").write(s.replace(needle, block, 1))
+PYFIX
+qa fail "the top level still says warn while an override silences 147 sites" --check
+expect_text "and the zero is not called an improvement" "147 -> 0"
+qa fail "--write cannot record it without a reason" --write
+qa pass "a reason records it, so the silencing shows up in the file" --write --reason "fixture: silenced by an overrides entry"
+cp "$WORK/biome.jsonc.orig2" biome.jsonc
 restore_baseline
 
 echo
@@ -332,6 +377,14 @@ PI_QA_BIOME=$STUB qa fail "an empty object is fatal, not a pass" --check
 printf '#!/bin/sh\necho %s\n' "'[{\"foo\": 1}]'" >$STUB; chmod +x $STUB
 PI_QA_BIOME=$STUB qa fail "diagnostics with no category are fatal, not zero debt" --check
 PI_QA_BIOME=$WORK/definitely-not-biome qa fail "a missing biome is fatal, not skipped" --check
+printf '#!/bin/sh\necho %s\n' "'{\"diagnostics\": []}'" >$STUB; chmod +x $STUB
+PI_QA_BIOME=$STUB qa fail "a reporter claiming zero debt is not a pass" --check
+PI_QA_BIOME=$STUB qa fail "and --write will not lower every biome metric on it" --write
+# The seam has to be inert outside the fixtures. This copy has no node_modules, so ignoring the seam means
+# biome is genuinely missing and the gate fails saying so - which is the observable proof the stub was never
+# consulted, and that an env var alone cannot swap a lint run for a quiet one.
+PI_QA_FIXTURES= PI_QA_BIOME=$STUB qa fail "without PI_QA_FIXTURES the stub is not consulted" --check
+expect_text "the failure names a missing biome rather than passing" "is not runnable"
 export PI_QA_BIOME="$BIOME"
 
 echo

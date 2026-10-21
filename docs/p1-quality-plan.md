@@ -609,7 +609,7 @@ more than the list:
 | **raw text instead of code** | a `//` inside a string (`"https://x"`) read as a comment start and hid every call after it; a call inside `/* */` or a string counted as real; regex literals (`{P:/[(]/}`) corrupted bracket depth so one call's extent ran into the next; generic callees `execOrca<{…}>([…])` — the codebase's own spelling — matched no callee list | any "detector" that is not literal-aware will be wrong in both directions, silently. One scanner (`skipCompound`) now serves extent, statement-boundary and comment questions. |
 | **counts that cannot answer the question asked** | "the rule reported nothing" and "the rule was switched off" are the same number. My first discriminator (zero diagnostics ⇒ legit) was exactly inverted, so switching `noExplicitAny` off recorded 147 `any`s as an improvement. | ask the config, not the counts: `ruleEnabledInConfig()` reads biome.jsonc. Still enabled ⇒ debt gone (recordable improvement). Off with debt ⇒ fails, and only `--write --reason` may record it. |
 | **a check with a bypass one command away** | `--check` failed on stale keys while `--write` dropped them silently; the new `notes` guard fired on the dependency-free `--only` path (which `run.sh` runs before `npm install`); `gatedExtras` was pushed to before it was declared, so the stale-rule path crashed with a TDZ error. | the write path is the attack surface of a ratchet. Every gate must be refused by *both* modes. |
-| **an invariant nobody proves** | four of the twelve measured nothing at first, and the TDZ crash proves the path had never run. | `test/quality-gate-fixtures.sh`: 83 assertions, in CI, run against a copy of the tree. New invariant ⇒ fixture in the same commit. |
+| **an invariant nobody proves** | four of the twelve measured nothing at first, and the TDZ crash proves the path had never run. | `test/quality-gate-fixtures.sh`: 105 assertions, in CI, run against a copy of the tree. New invariant ⇒ fixture in the same commit. |
 
 Two things worth recording about the process:
 
@@ -622,3 +622,31 @@ Two things worth recording about the process:
   `git rev-parse --show-toplevel` was measured to *fail* — not print `.git` — inside `.git`, a bare repo and a
   worktree gitdir. So the guard is defence in depth for future callers, and that is what its comment says,
   rather than claiming an exploit the current caller cannot reach.
+
+## Round 4 found the hole in the hole-catcher
+
+Round 3 closed the "rule switched off in biome.jsonc" case. Round 4 pointed out that the fix inspected only
+the top level of the config, while `biome.jsonc` in this repo has `overrides` - and `"overrides": [{
+"includes": ["extensions/**/*.ts"], "linter": {"rules": {"suspicious": {"noExplicitAny": "off"}}}}]` silences
+all 147 sites with the top level still reading `"warn"`. Confirmed locally: the metric fell to zero and the
+gate called it an improvement. Two more in the same round: `PI_QA_BIOME` plus a stub printing
+`{"diagnostics": []}` reached the same place (and the seam's docstring claimed it could not), and adding
+`**=` to the compound-assignment alternation had dropped `*=` - the character class `[-+/%&|^]` never held
+`*`, and the fixture only ever tested `+=`.
+
+The lesson is that `ruleEnabledInConfig` was asked to answer "is this rule running?" by reading config, which
+it cannot do reliably: severity strings vs `{level: ...}` objects, group-level `"off"`, per-glob overrides, a
+rule renamed by a biome upgrade, a reporter substituted under a test seam. So the guarantee moved out of the
+config reader and into the ratchet:
+
+- **a biome metric may fall freely, but not to zero.** 147 -> 90 can only mean work was done. 147 -> 0 is
+  indistinguishable from "stopped measuring", so it fails `--check` and needs `--write --reason`, which puts
+  the decision in the file where a reviewer sees it. The config reader still runs, but only to name the cause
+  in the message.
+- **`PI_QA_BIOME` is honoured only when `PI_QA_FIXTURES=1`**, set solely by the fixture suite. An env var in a
+  normal shell or CI cannot redirect the lint run.
+- **compound operators are enumerated, not classed**, and the fixture now walks all seventeen write forms
+  (`*= /= %= &= |= ^= -= >>= >>>= ||= &&= **= ??= += -= <<=`, `++`, plus `Object.assign`/`Reflect.set`/`delete`)
+  and asserts four read shapes stay clean.
+
+105 fixture assertions pass. Three of the new ones exist only because a reviewer thought of them.
