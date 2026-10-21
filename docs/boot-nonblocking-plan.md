@@ -533,3 +533,31 @@ It is the one documented exception on the awaited factory path — async rather 
 parallel, memoized per `(cmd, PATH)`, ~2 ms in the harness with `blocking_sync_calls: []`. Removing it
 would mean registering `requestdb`/`destroydb` unconditionally (offering tools whose binaries are absent)
 or registering them after the factory, which Pi's loading model does not cleanly support.
+
+## 14. Review round 7 (Devin `swe-2-max`) — clean
+
+Round 7 verified the round-6 items at file level and found nothing that needs to change. It traced the
+full notification surface of `syncPROrThrow` (all four buckets, no duplication across overlapping
+syncs, nothing sent into a torn-down session, the notice → turn → refresh loop terminating under the
+settle gate's existing `MAX_IDENTICAL_NUDGES` cap), every `schedule`/`again`/`resume` interleaving,
+every `ghHealth` acquire/release pair, the orca ack/run binding and check-process lifecycle, and the
+observe-pr notice machine. It also closed the two questions left open earlier: the exception of awaiting
+two `commandExists` probes in the observe-pr factory is **acceptable** (removing it would advertise
+absent tools or race tool registration against the first turn, for ~2 ms once per process), and the
+RESOLVED→UNRESOLVED transition question below is the only gap it found.
+
+**Verification of record:** typecheck; `unit` 166/166; all suites (`pr-tasks` incl. Tests 45–47,
+`observe-pr`, `observe-pr-gh-failure`, `pr-tasks-gh-failure`, `observe-pr-stale`, `pr-tasks-stale`,
+`observe-pr-resume`, `startup-notice`, `pr-tasks-reconcile`, `branch-observer`, `compaction-recovery`,
+`tools`, `manifest`, `typecheck`) passing; boot harness with factories ≤2 ms, awaited boundaries 0–1 ms,
+`blocking_sync_calls: []`, `sync_freeze_during_startup_ms: 0`.
+
+### Follow-up (pre-existing on `main`, deliberately out of scope here)
+
+`pr-tasks-manager.ts` flips a task `RESOLVED → UNRESOLVED` when a reviewer un-resolves a thread, and
+`STALE → UNRESOLVED` when its thread comes back, without putting those tasks in any `SyncResult` bucket.
+So while the agent is idle, a reopened conversation does not wake it — the same idle-agent gap this PR
+closed for newly created tasks. Identical on `main`, so it is not a regression of this change; the fix
+would be a `reopenedTasks` bucket in `applyThreadNode` announced next to `newlyOpen` (no seeding gate
+needed, since a seeding sync has no tracked tasks to reopen). Tracked here rather than folded into this
+PR, whose subject is keeping I/O off the paths Pi awaits.
