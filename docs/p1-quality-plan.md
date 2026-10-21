@@ -650,3 +650,24 @@ config reader and into the ratchet:
   and asserts four read shapes stay clean.
 
 105 fixture assertions pass. Three of the new ones exist only because a reviewer thought of them.
+
+## Round 5: what a ratchet has to refuse
+
+Round 5 was run by a fresh reviewer with no memory of rounds 1-4, which is worth doing on purpose: it attacked
+the gate instead of the diff and found five blockers in `4e1dadd`. They are one lesson with five spellings —
+**every input to the ratchet is an attack surface, including the inputs that look like bookkeeping.**
+
+| finding | the hole | the rule it became |
+| --- | --- | --- |
+| R5-1 | an `overrides` entry for **one file** (`extensions/tools.ts`) took `noExplicitAny` 147 → 137. `--check` passed, `--write` recorded it, no note. Partial silencing is indistinguishable from partial cleanup | **`biome.jsonc` is part of the baseline** (`biomeConfigHash`). Change the config and the debt figures are no longer comparable, so re-recording needs `--write --reason` |
+| R5-2 | a seam stub emitting 9 diagnostics for `/tmp/not-extensions-r5.ts` lowered every metric to 1; a stub exiting `2` passed too. Counting files outside the gated tree is the same quiet pass as switching a rule off | **the collector fails closed**: non-zero exit is a failed run (checked before stdout, so a broken config no longer reports "biome is not runnable"), paths outside `extensions/` are not counted, `summary` must agree with the array, `diagnosticsNotPrinted` is fatal |
+| R5-3 | `--reason "."` and the tool's own suggested text `"why this is acceptable"` authorised ungating | **a reason must be a sentence** — four words, twenty-four characters. No placeholder blacklist: every banned-word list rejects the honest short note and admits the long vague one |
+| R5-4 | `metrics["…"] = "147 debt"` compared as `147 > "147 debt"` → false → "ok"; `1e999` is Infinity, larger than any file; both silently removed the gate, and `--write` recorded 148 with no note | **the baseline's numbers are validated**: finite, non-negative integers, for metrics and file budgets alike |
+| R5-5 | `isGitMetadataDir` guessed identity from the name: `git init --bare work` (no `.git` suffix) was **accepted**, a legitimate checkout named `release.git` was **refused** | identity from the **layout** (`HEAD` + `objects/` + `refs/`, or `commondir`/`gitdir` pointers) plus the `.git` convention; refusing to edit a real repo is a bug too — it just fails quietly |
+| R5-6 | a tracked symlink `tracked-link → .git/r5-marker` wrote straight into `.git`: containment is satisfied by construction, because `.git` is inside the root | **re-check the resolved target against the canonical metadata directory**, including the `gitdir:` pointer of a linked worktree |
+
+Two meta-points. First, the reviewer also proved the fixture suite is honest: `git status --porcelain` empty
+before and after, `node_modules/.bin/biome` still the same symlink, and 19,709 file hashes unchanged. Second, it
+listed what the fixtures do *not* yet prove — partial-rule weakening, reporter provenance, baseline numerics,
+reason quality, existing-file budget growth — and every one of those has a fixture in the same commit as its
+fix now, because "unproven" is how rounds 1-4 kept recurring.

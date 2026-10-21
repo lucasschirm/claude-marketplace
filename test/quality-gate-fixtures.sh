@@ -288,8 +288,8 @@ set_baseline "j.metrics.emptyCatch=1"
 qa fail "a rise fails --check" --check
 expect_text "and reports the size of the rise" "emptyCatch: 49 > baseline 1"
 qa fail "--write refuses a rise without a reason" --write
-qa pass "--write --reason records it and appends a note" --write --reason "fixture: a deliberate widening"
-node -e 'const j=require("./scripts/quality-baseline.json");if(!j.notes.some((n)=>/fixture: a deliberate widening/.test(n.reason)))process.exit(1)' \
+qa pass "--write --reason records it and appends a note" --write --reason "fixture: a deliberate widening of the gate"
+node -e 'const j=require("./scripts/quality-baseline.json");if(!j.notes.some((n)=>/fixture: a deliberate widening of the gate/.test(n.reason)))process.exit(1)' \
   && { echo "  ok    the note is in the baseline"; PASS=$((PASS + 1)); } || { echo "  MISS  no notes entry written"; FAIL=$((FAIL + 1)); }
 restore_baseline
 set_baseline "j.metrics.emptyCatch=99"
@@ -298,6 +298,15 @@ restore_baseline
 qa fail "--write refuses to run with --only (a partial write would drop the other metrics)" --write --only wiredTests
 qa fail "--reason refuses to swallow the next flag as its text" --write --reason --only
 qa fail "--reason must not be empty" --write --reason ""
+
+# A reason is the only record a widening gets, and the next reviewer reads it. Text that is merely non-empty is
+# not a record: "." and the tool's own placeholder both authorised ungating in review.
+qa fail "a punctuation-only reason is refused" --write --reason "."
+qa fail "whitespace is refused" --write --reason "   "
+qa fail "the tool's own placeholder text is refused" --write --reason "why this is acceptable"
+qa fail "three words is not a sentence" --write --reason "fixing it now"
+qa fail "a name is not an explanation" --write --reason "n/a"
+qa pass "a sentence is accepted" --write --reason "fixture: a sentence long enough to review later"
 set_baseline "j.metrics={}"
 qa fail "an emptied metrics object is a hand-edit, not an initial capture" --write
 restore_baseline
@@ -316,6 +325,26 @@ qa pass "with a reason it is recorded, and noted" --write --reason "fixture: a d
 node -e 'const j=require("./scripts/quality-baseline.json");if(!j.notes.some((n)=>/fixture: a deliberately larger/.test(n.reason)))process.exit(1)' \
   && { echo "  ok    the note is in the baseline"; PASS=$((PASS + 1)); } || { echo "  MISS  no notes entry written"; FAIL=$((FAIL + 1)); }
 rm -f extensions/lib/zz-big.ts
+# Growth of a file that already has a budget: the entry may not be quietly re-raised.
+cp extensions/lib/tool-result.ts "$WORK/tool-result.ts.orig"
+python3 - <<'PYFIX'
+import io
+import json
+
+p = "extensions/lib/tool-result.ts"
+budget = json.load(open("scripts/quality-baseline.json"))["files"][p]
+text = io.open(p, encoding="utf-8").read()
+lines = text.split("\n")
+while len(lines) <= budget + 2:
+    lines.append("// padding past the recorded budget")
+io.open(p, "w", encoding="utf-8").write("\n".join(lines))
+PYFIX
+qa fail "an existing file that outgrows its recorded budget fails" --only fileLineBudget --full
+expect_text "naming the file and its budget" "extensions/lib/tool-result.ts"
+qa fail "--write will not raise an existing budget without a reason" --write
+qa pass "with a reason it is recorded, and noted" --write --reason "fixture: this file deliberately outgrew its budget"
+cp "$WORK/tool-result.ts.orig" extensions/lib/tool-result.ts
+restore_baseline
 node -e 'const fs=require("fs");const p="scripts/quality-baseline.json";const j=JSON.parse(fs.readFileSync(p,"utf8"));delete j.files["extensions/lib/ci-verdict.ts"];fs.writeFileSync(p,JSON.stringify(j,null,2))'
 qa pass "a file whose entry was lowered keeps passing" --only fileLineBudget --full
 node scripts/check-quality.mjs --write >/dev/null 2>&1
@@ -368,6 +397,53 @@ cp "$WORK/biome.jsonc.orig2" biome.jsonc
 restore_baseline
 
 echo
+echo "the baseline's own numbers are validated"
+set_baseline 'j.metrics["biome.suspicious/noExplicitAny"]="147 debt"'
+qa fail "a string where a threshold belongs is refused" --check
+expect_text "naming the key and the expectation" "metrics['biome.suspicious/noExplicitAny'] must be a finite non-negative integer"
+restore_baseline
+sed -i 's/"emptyCatch": 49/"emptyCatch": 1e999/' scripts/quality-baseline.json
+qa fail "1e999 (Infinity) is not a threshold" --check
+restore_baseline
+sed -i 's/"emptyCatch": 49/"emptyCatch": -3/' scripts/quality-baseline.json
+qa fail "a negative threshold is not a threshold" --check
+restore_baseline
+sed -i 's/"emptyCatch": 49/"emptyCatch": 2.5/' scripts/quality-baseline.json
+qa fail "a fractional count is not a count" --check
+restore_baseline
+set_baseline 'j.files["extensions/tools.ts"]="big"'
+qa fail "a file budget must be a number too" --check
+expect_text "naming the file entry" "files['extensions/tools.ts'] must be a finite non-negative integer"
+restore_baseline
+
+echo
+echo "a config change is not a cleanup"
+# The R5-1 reproducer: silencing a rule for ONE file moves the count exactly the way fixing that file's debt
+# does (147 -> 137 with the source untouched), and no amount of counting tells them apart. So biome.jsonc is
+# part of the baseline and re-recording its numbers takes a reason.
+cp biome.jsonc "$WORK/biome.jsonc.orig4"
+python3 - <<'PYFIX'
+import io
+
+s = io.open("biome.jsonc", encoding="utf-8").read()
+needle = '"overrides": ['
+assert needle in s
+block = (
+	'"overrides": [\n\t\t{\n\t\t\t"includes": ["extensions/tools.ts"],\n'
+	'\t\t\t"linter": { "rules": { "suspicious": { "noExplicitAny": "off" } } }\n\t\t},\n'
+)
+io.open("biome.jsonc", "w", encoding="utf-8").write(s.replace(needle, block, 1))
+PYFIX
+qa fail "fewer diagnostics with no source change does not pass --check" --check
+expect_text "and names the configuration change" "biome.jsonc changed"
+qa fail "--write will not re-record the numbers without a reason" --write
+qa pass "a reasoned re-record is allowed, and noted" --write --reason "fixture: a rule silenced for one file, on purpose"
+node -e 'const j=require("./scripts/quality-baseline.json");if(!j.notes.some((n)=>/silenced for one file/.test(n.reason)))process.exit(1)' \
+  && { echo "  ok    the note is in the baseline"; PASS=$((PASS + 1)); } || { echo "  MISS  no notes entry written"; FAIL=$((FAIL + 1)); }
+cp "$WORK/biome.jsonc.orig4" biome.jsonc
+restore_baseline
+
+echo
 echo "biome integrity (through the PI_QA_BIOME test seam)"
 STUB=$WORK/stub.sh
 printf '#!/bin/sh\necho %s\n' "'{\"results\": []}'" >$STUB; chmod +x $STUB
@@ -380,11 +456,52 @@ PI_QA_BIOME=$WORK/definitely-not-biome qa fail "a missing biome is fatal, not sk
 printf '#!/bin/sh\necho %s\n' "'{\"diagnostics\": []}'" >$STUB; chmod +x $STUB
 PI_QA_BIOME=$STUB qa fail "a reporter claiming zero debt is not a pass" --check
 PI_QA_BIOME=$STUB qa fail "and --write will not lower every biome metric on it" --write
+# Diagnostics from somewhere else are not a measurement of this tree: counting them lowers debt while no
+# extension is touched, which is the same quiet pass as switching a rule off.
+WORK="$WORK" python3 - <<'PYFIX'
+import json
+import os
+
+base = json.load(open("scripts/quality-baseline.json"))
+rules = [k.replace("biome.", "") for k in base["metrics"] if k.startswith("biome.")]
+diag = [
+	{
+		"severity": "warning",
+		"message": "not our tree",
+		"category": "lint/" + rule,
+		"location": {"path": "/tmp/definitely-not-extensions.ts", "start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 2}},
+	}
+	for rule in rules
+]
+script = "#!/bin/sh\ncat <<'OFFTREE'\n"
+script += json.dumps({"summary": {"errors": 0, "warnings": len(diag), "infos": 0, "diagnosticsNotPrinted": 0}, "diagnostics": diag})
+script += "\nOFFTREE\n"
+open(os.path.join(os.environ["WORK"], "offtree.sh"), "w").write(script)
+PYFIX
+chmod +x "$WORK/offtree.sh"
+PI_QA_BIOME=$WORK/offtree.sh qa fail "diagnostics outside the gated tree are not a measurement" --check
+expect_text "and says the wrong tree was measured" "none inside extensions/"
+PI_QA_BIOME=$WORK/offtree.sh qa fail "--write will not lower every metric on them" --write
+printf '#!/bin/sh\necho "biome exploded" >&2\nexit 2\n' >"$WORK/exit2.sh"; chmod +x "$WORK/exit2.sh"
+PI_QA_BIOME=$WORK/exit2.sh qa fail "a biome run that exits non-zero is not a measurement" --check
+expect_text "and quotes what biome said" "biome exploded"
+
 # The seam has to be inert outside the fixtures. This copy has no node_modules, so ignoring the seam means
 # biome is genuinely missing and the gate fails saying so - which is the observable proof the stub was never
 # consulted, and that an env var alone cannot swap a lint run for a quiet one.
-PI_QA_FIXTURES= PI_QA_BIOME=$STUB qa fail "without PI_QA_FIXTURES the stub is not consulted" --check
-expect_text "the failure names a missing biome rather than passing" "is not runnable"
+# The proof is the marker the stub leaves when it runs, not the wording of the failure: what biome says when it
+# is missing depends on whether npx is on PATH, and neither wording is the point.
+printf '#!/bin/sh\ntouch "%s/stub-ran"\necho %s\n' "$WORK" "'{\"diagnostics\": []}'" >"$WORK/inert.sh"
+chmod +x "$WORK/inert.sh"
+rm -f "$WORK/stub-ran"
+PI_QA_FIXTURES= PI_QA_BIOME="$WORK/inert.sh" qa fail "without PI_QA_FIXTURES the stub is not consulted" --check
+if [ -e "$WORK/stub-ran" ]; then
+	echo "  MISS  the stub was executed even though PI_QA_FIXTURES was unset"
+	FAIL=$((FAIL + 1))
+else
+	echo "  ok    and the stub was never executed"
+	PASS=$((PASS + 1))
+fi
 export PI_QA_BIOME="$BIOME"
 
 echo

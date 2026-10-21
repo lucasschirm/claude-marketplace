@@ -36,6 +36,13 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
 
 - `npm run qa` is the fast loop and the definition of done for any change to `extensions/`: `typecheck && lint && format:check && check && validate && test:unit`. It needs `npm install`.
 - `npm run typecheck` (`tsc --noEmit`) covers `extensions/**`. `npm run lint` runs biome (`biome.jsonc`) over `extensions/`; `npm run format` applies it everywhere and `npm run format:check` only verifies.
+- `biome.jsonc` is **part of the baseline** (`biomeConfigHash`). Change it and the biome debt figures no longer
+  mean the same thing — silencing a rule for one file moves a count exactly the way fixing that file's debt does
+  — so `npm run check` fails until you record the new configuration deliberately:
+  `npm run qa:baseline -- --write --reason "what changed and why"`. The same is true of any metric that falls to
+  zero: a fall is free, a fall to zero is a decision, and it lands in the baseline's visible `notes`.
+- `--reason` must be a sentence (four words, twenty-four characters). "." and "why this is acceptable" both
+  authorised ungating once, which is why the bar is not merely "non-empty".
 - `npm run check` (`scripts/check-quality.mjs --check`) enforces the invariants a linter cannot express: exec location and timeouts, mutating calls whose result is never read, `globalThis` ownership, where `JSON.parse` may appear, per-file line budgets, `pi.extensions` matching the files on disk, unused libs, frontmatter, and that every test file is wired into a suite. Legacy debt is **ratcheted** by `scripts/quality-baseline.json`: counts may only shrink, `npm run qa:baseline` lowers them, and an increase requires `--write --reason "..."`, which appends a visible line to the baseline's `notes`.
 - `npm run validate` (`node scripts/validate-marketplace.mjs`) checks the marketplace/plugin manifests parse, every `source` resolves, names match between `marketplace.json` and `plugin.json`, and no `plugins/*` directory is missing from the manifest.
 - `bash test/run.sh quality-fixtures` proves the gate itself bites: every invariant in `check-quality.mjs` is
