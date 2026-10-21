@@ -19,6 +19,7 @@
   },
   "pi": {
     "extensions": [
+      "./extensions/compaction-fail-recovery.ts",
       "./extensions/observe-pr.ts",
       "./extensions/devin-delegate.ts",
       "./extensions/orca-orchestration.ts",

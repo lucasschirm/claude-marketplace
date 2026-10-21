@@ -33,6 +33,40 @@ To update later, refresh the marketplace and Claude picks up new versions the ne
 | `claude-basics` | A collection of agents and skills for every project. Includes the `claude-rule-creator` skill for authoring and maintaining CLAUDE.md / `.claude/rules/` rules. |
 | `frontend-development` | Agents and skills for frontend development, component architecture, and styling. |
 | `multiagent-development` | Orchestration agents and skills for multi-agent workflows. |
+| `pr-observer` | Background PR CI observer and review conversation task manager for Devin CLI and Claude Code. |
+
+---
+
+## Devin CLI Plugins
+
+Plugins in this repository can also be installed directly into the [Devin CLI](https://docs.devin.ai/product-guides/plugins).
+
+### PR Observer (`pr-observer`)
+
+A cross-platform plugin providing Model Context Protocol (MCP) tools, skills, and settlement lifecycle hooks to observe PR CI checks and resolve review conversation tasks.
+
+#### Install in Devin CLI
+
+Install directly from the GitHub repository:
+
+```bash
+devin plugins install lucasschirm/claude-marketplace#plugins/pr-observer
+```
+
+Or using the full git URL:
+
+```bash
+devin plugins install https://github.com/lucasschirm/claude-marketplace.git#plugins/pr-observer
+```
+
+#### Capabilities in Devin CLI
+
+- **MCP Tools**: `observe_pr`, `pr_tasks_list`, `pr_task_detail`, `pr_task_resolve`, `pr_task_blocked`.
+- **Skills (Slash Commands)**:
+  - `/pr-observer:observe-pr` — Start or stop observing a GitHub Pull Request.
+  - `/pr-observer:pr-tasks` — List, inspect, and resolve PR review comments and code suggestions.
+- **Settlement Loop Enforcement**: Intercepts Devin's `Stop` event when open review tasks remain, preventing the agent from ending the turn prematurely.
+- **Always-on Guidelines**: Injects `AGENTS.md` instructions into session context to guide Devin in resolving review comments.
 
 ---
 

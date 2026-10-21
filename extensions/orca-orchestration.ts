@@ -15,6 +15,7 @@ import {
 	type OrcaMessageDelivery,
 } from "./lib/orca-client.ts";
 import { capList, type ToolDetails } from "./lib/tool-result.ts";
+import { logError } from "./lib/extension-log.ts";
 
 const GLOBAL_GUARD_KEY = "__PI_ORCA_ORCHESTRATION_EXTENSION_ACTIVE__";
 
@@ -348,7 +349,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		try {
 			pi.sendUserMessage(content, { deliverAs: "steer" });
 		} catch (err) {
-			console.error("[orca-orchestration] Failed to send message to agent:", err);
+			logError("orca-orchestration", "Failed to send message to agent", err);
 		}
 	}
 
@@ -404,7 +405,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				ackDeliveryId: ackDeliveryId || lastPendingAckDeliveryId,
 			});
 		} catch (err) {
-			console.error("[orca-orchestration] Failed to spawn orchestration check process:", err);
+			logError("orca-orchestration", "Failed to spawn orchestration check process", err);
 			return;
 		}
 
@@ -412,7 +413,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		const proc = checkProcess;
 
 		proc.on("error", (err) => {
-			console.error("[orca-orchestration] Check process error:", err);
+			logError("orca-orchestration", "Check process error", err);
 		});
 
 		const rl = readline.createInterface({
@@ -540,7 +541,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		// Acknowledge the batch immediately so subsequent checks receive fresh events
 		if (deliveryId) {
 			execOrca(["orchestration", "check", "--ack", deliveryId], { cwd: lastCwd }).catch((err) => {
-				console.warn("[orca-orchestration] Failed to ack delivery:", err);
+				logError("orca-orchestration", "Failed to ack delivery", err);
 			});
 		}
 	}
@@ -621,7 +622,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				updateStatusUI();
 			}
 		} catch (err) {
-			console.error("[orca-orchestration] Error during worker reconciliation:", err);
+			logError("orca-orchestration", "Error during worker reconciliation", err);
 		} finally {
 			isReconciling = false;
 		}

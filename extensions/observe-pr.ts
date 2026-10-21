@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
 import { evaluateCiVerdict } from "./lib/ci-verdict.ts";
+import { logError } from "./lib/extension-log.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
@@ -231,21 +232,102 @@ export default function (pi: ExtensionAPI) {
 	let startupCheck: Promise<void> | undefined;
 	const STARTUP_CHECK_WAIT_MS = 5000;
 
-	function getObserverInterval(): number {
-		const flagVal = pi.getFlag("pr-observer-interval");
-		const parsed = parseInt(String(flagVal || "60"), 10);
-		return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
+	// ---- Stale-context safety -------------------------------------------
+	// pi invalidates the extension runtime on session replacement/reload
+	// (newSession/fork/switchSession/reload/session teardown). ExtensionAPI exposes no
+	// staleness query: after invalidation every pi.* action method throws an error
+	// matching STALE_MARKER. Observer background work (poll timers, long-lived `gh`
+	// watchers, in-flight `gh` awaits, backoff retry hooks) outlives the context, and a
+	// teardown that skips the session_shutdown event (e.g. a session dispose without a
+	// shutdown emit) never runs resetObserverState() - so every pi call made from
+	// background code goes through tryPi(): the first stale throw runs
+	// handleStaleContext() (the same teardown session_shutdown performs, so the
+	// surviving timers stop hitting the dead context), later calls are silent no-ops.
+	// Errors go to the file log (extension-log), never to the console/TUI.
+	const STALE_MARKER = /stale after session replacement|API is no longer active/;
+	const EXT_LOG_SCOPE = "observe-pr";
+	let ctxStale = false;
+	let lastInterval: number | undefined;
+
+	function isStaleError(err: unknown): boolean {
+		const msg = err instanceof Error ? err.message : String(err);
+		return STALE_MARKER.test(msg);
 	}
 
-	// TUI-safe log for non-GitHub internal errors. GitHub availability failures are
-	// handled by ghHealth (silent + paced retry) and never logged here.
-	function logInternal(what: string, err: unknown) {
-		const msg = `[observe_pr] ${what}: ${err instanceof Error ? err.message : String(err)}`;
-		if (lastUIContext) {
-			try {
-				lastUIContext.notify(msg, "warning");
-			} catch {}
+	function handleStaleContext(caller: string): void {
+		if (ctxStale) return;
+		ctxStale = true;
+		disposed = true;
+		logError(
+			EXT_LOG_SCOPE,
+			"extension context invalidated; tearing down observer background work",
+			new Error(`first stale call: ${caller}`),
+		);
+		try {
+			// The same teardown session_shutdown performs - this path missed that event.
+			resetObserverState();
+			ghHealth.reset();
+			pendingAnnouncements.clear();
+			pendingAutoStart.clear();
+			deferredAnnouncements.clear();
+			// session_shutdown also released the registration globals; without that the
+			// next session's factory re-run would early-return (global guard) and the
+			// extension would be dead until the process restarts.
+			delete (globalThis as any)[GLOBAL_GUARD_KEY];
+			delete (globalThis as any).__PI_OBSERVED_PRS__;
+		} catch (err) {
+			logError(EXT_LOG_SCOPE, "stale-context teardown failed", err);
 		}
+	}
+
+	// Runs a pi action that background code may call. Stale: tear down once and return
+	// the fallback (never throws, so timers and child-process callbacks cannot wedge or
+	// crash the TUI process). Non-stale: rethrow for the call site's existing handling.
+	function tryPi<T>(caller: string, fn: () => T, fallback: T): T {
+		if (ctxStale) return fallback;
+		try {
+			return fn();
+		} catch (err) {
+			if (isStaleError(err)) {
+				handleStaleContext(caller);
+				return fallback;
+			}
+			throw err;
+		}
+	}
+
+	// Guards a fire-and-forget observer promise so a rejection can never become an
+	// unhandled rejection (Node's default for those is to crash the process).
+	function guardAsync(what: string, p: Promise<unknown>): void {
+		void p.catch((err) => {
+			if (isStaleError(err)) handleStaleContext(what);
+			else logError(EXT_LOG_SCOPE, `${what} failed`, err);
+		});
+	}
+
+	function getObserverInterval(): number {
+		// Runs inside timers and child-process callbacks: a stale context must not throw here.
+		const value = tryPi(
+			"getObserverInterval",
+			() => {
+				const flagVal = pi.getFlag("pr-observer-interval");
+				const parsed = parseInt(String(flagVal || "60"), 10);
+				return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
+			},
+			0,
+		);
+		if (value > 0) {
+			lastInterval = value;
+			return value;
+		}
+		return lastInterval ?? 60;
+	}
+
+	// File-only log for internal errors, so failures stay silent in the TUI but remain
+	// debuggable (extension-log). GitHub availability failures are handled by ghHealth
+	// (silent + paced retry) and never logged here.
+	function logInternal(what: string, err: unknown) {
+		logError(EXT_LOG_SCOPE, what, err);
 	}
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
@@ -258,10 +340,16 @@ export default function (pi: ExtensionAPI) {
 			totalRuns += pr.activeRuns.size;
 		}
 
-		if (totalPrs > 0) {
-			targetUI.setStatus("pr_observer", `${totalPrs}/${totalRuns} observed`);
-		} else {
-			targetUI.setStatus("pr_observer", undefined);
+		try {
+			if (totalPrs > 0) {
+				targetUI.setStatus("pr_observer", `${totalPrs}/${totalRuns} observed`);
+			} else {
+				targetUI.setStatus("pr_observer", undefined);
+			}
+		} catch (err) {
+			// A dead UI must not break the child-process callback that called this.
+			if (isStaleError(err)) handleStaleContext("updateStatusUI");
+			else logInternal("Failed to update status UI", err);
 		}
 	}
 
@@ -269,7 +357,7 @@ export default function (pi: ExtensionAPI) {
 		if (suppressUpdates) return;
 		try {
 			// "steer" lands after the current turn's tool calls; "followUp" would wait until the agent stops calling tools.
-			pi.sendUserMessage(content, { deliverAs: "steer" });
+			tryPi("sendAgentMessage", () => pi.sendUserMessage(content, { deliverAs: "steer" }), undefined);
 		} catch (err) {
 			logInternal("Failed to send message to agent", err);
 		}
@@ -291,6 +379,7 @@ export default function (pi: ExtensionAPI) {
 	// Persist the full observer state as a session custom entry (last entry wins on restore).
 	// Never participates in LLM context; degrades to in-process-only state if the append fails.
 	function persistState() {
+		if (ctxStale) return;
 		try {
 			const state: PersistedObserverState = {
 				v: 1,
@@ -313,9 +402,13 @@ export default function (pi: ExtensionAPI) {
 			};
 			pi.appendEntry(STATE_CUSTOM_TYPE, state);
 		} catch (err) {
-			if (!persistFailureLogged) {
+			if (isStaleError(err)) {
+				// A replacement torn down without session_shutdown: self-tear-down once
+				// (file-logged) so the surviving timers stop hitting the stale context.
+				handleStaleContext("persistState");
+			} else if (!persistFailureLogged) {
 				persistFailureLogged = true;
-				console.error("[observe_pr] Failed to persist observer state (further failures suppressed):", err);
+				logError(EXT_LOG_SCOPE, "Failed to persist observer state (further failures suppressed)", err);
 			}
 		}
 	}
@@ -385,7 +478,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			entries = sessionManager?.getBranch?.() ?? [];
 		} catch (err) {
-			console.error("[observe_pr] Failed to read session branch for state restore:", err);
+			logInternal("Failed to read session branch for state restore", err);
 		}
 
 		let latest: any;
@@ -432,12 +525,12 @@ export default function (pi: ExtensionAPI) {
 			observedPRs.set(pr.prNumber, pr);
 			startChecksProcess(pr);
 			pr.pollTimer = setInterval(() => {
-				pollPR(pr.prNumber);
+				guardAsync("pollPR", pollPR(pr.prNumber));
 			}, getObserverInterval() * 1000);
 			// In-flight runs survive the restart: re-watching is silent for already-reported runs
 			// (the watchRun close handler dedups on failedRuns/completedRuns).
 			for (const runId of pr.activeRuns) {
-				watchRun(pr.prNumber, runId, pr.cwd);
+				guardAsync("watchRun", watchRun(pr.prNumber, runId, pr.cwd));
 			}
 
 			if (!pr.announced) {
@@ -592,7 +685,7 @@ export default function (pi: ExtensionAPI) {
 				() => {
 					pr.rewatchTimers.delete(runId);
 					const current = observedPRs.get(prNumber);
-					if (current && current.activeRuns.has(runId)) watchRun(prNumber, runId, cwd);
+					if (current && current.activeRuns.has(runId)) guardAsync("watchRun", watchRun(prNumber, runId, cwd));
 				},
 				Math.max(ghHealth.nextRetryInMs(), 1000),
 			),
@@ -806,7 +899,7 @@ export default function (pi: ExtensionAPI) {
 							pr.seenRuns.add(runId);
 							pr.activeRuns.add(runId);
 							updateStatusUI();
-							watchRun(prNumber, runId, pr.cwd);
+							guardAsync("watchRun", watchRun(prNumber, runId, pr.cwd));
 						}
 					}
 				}
@@ -931,7 +1024,7 @@ export default function (pi: ExtensionAPI) {
 						pr.seenRuns.add(runId);
 						pr.activeRuns.add(runId);
 						updateStatusUI();
-						watchRun(prNumber, runId, pr.cwd);
+						guardAsync("watchRun", watchRun(prNumber, runId, pr.cwd));
 					}
 				}
 			}
@@ -1022,7 +1115,7 @@ export default function (pi: ExtensionAPI) {
 
 		const interval = getObserverInterval();
 		pr.pollTimer = setInterval(() => {
-			pollPR(prNumber);
+			guardAsync("pollPR", pollPR(prNumber));
 		}, interval * 1000);
 
 		// Restore re-registers observed PRs directly (seeding the dedup sets) without going
@@ -1111,8 +1204,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	async function checkTrackedBranches(cwd: string, deferAnnouncements = false) {
-		const isEnabled = pi.getActiveTools().includes("observe_pr");
-		if (!isEnabled) return;
+		// A stale context must not throw here (runs from timers, the backoff retry hook and
+		// turn_end): abort silently.
+		const activeTools = tryPi("checkTrackedBranches", () => pi.getActiveTools(), undefined);
+		if (!activeTools || !activeTools.includes("observe_pr")) return;
 
 		// A check that outlives a session switch (resetObserverState bumps stateGeneration) must
 		// not complete its detection against the new session's state or persist into its file.
@@ -1231,23 +1326,31 @@ export default function (pi: ExtensionAPI) {
 		if (branchPollTimer) clearInterval(branchPollTimer);
 		const interval = getObserverInterval();
 		branchPollTimer = setInterval(() => {
-			checkTrackedBranches(lastCwd);
+			guardAsync("checkTrackedBranches", checkTrackedBranches(lastCwd));
 		}, interval * 1000);
 	}
 
 	pi.on("session_start", (_evt, ctx) => {
-		lastUIContext = ctx.ui;
-		lastCwd = ctx.cwd || process.cwd();
-		disposed = false;
-		// Rebuild in-memory state from this session's persisted entries before the branch check,
-		// so resumed observation is silent and stopped PRs stay stopped.
-		restoreState(ctx.sessionManager);
-		// Re-expose the observed map: session_shutdown deletes the global, and cross-extension
-		// readers (e.g. pr-tasks) need it to exist after an in-process session switch.
-		(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
-		updateStatusUI(ctx.ui);
-		startupCheck = checkTrackedBranches(lastCwd, true);
-		startBranchPollTimer();
+		try {
+			lastUIContext = ctx.ui;
+			lastCwd = ctx.cwd || process.cwd();
+			disposed = false;
+			// Rebuild in-memory state from this session's persisted entries before the branch check,
+			// so resumed observation is silent and stopped PRs stay stopped.
+			restoreState(ctx.sessionManager);
+			// Re-expose the observed map: session_shutdown deletes the global, and cross-extension
+			// readers (e.g. pr-tasks) need it to exist after an in-process session switch.
+			(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
+			updateStatusUI(ctx.ui);
+			startupCheck = checkTrackedBranches(lastCwd, true).catch((err) => {
+				if (!isStaleError(err)) logInternal("Startup branch check failed", err);
+			});
+			startBranchPollTimer();
+		} catch (err) {
+			// A stale ctx (its ui/cwd/sessionManager getters throw post-replacement) must not
+			// surface as a handler error in the TUI.
+			if (!isStaleError(err)) logInternal("session_start handling failed", err);
+		}
 	});
 
 	pi.on("input", async (event) => {
@@ -1374,16 +1477,22 @@ export default function (pi: ExtensionAPI) {
 	// own slot, so at most one extension's work runs per slot.
 	ghHealth.registerRetryHook(() => {
 		if (disposed) return;
-		void settlePendingAutoStarts();
-		void pollAllObservedPRs();
-		void checkTrackedBranches(lastCwd);
+		guardAsync("settlePendingAutoStarts", settlePendingAutoStarts());
+		guardAsync("pollAllObservedPRs", pollAllObservedPRs());
+		guardAsync("checkTrackedBranches", checkTrackedBranches(lastCwd));
 	});
 
 	pi.on("turn_end", async (_evt, ctx) => {
-		if (ctx?.cwd) lastCwd = ctx.cwd;
-		if (ctx?.ui) lastUIContext = ctx.ui;
-		await pollAllObservedPRs();
-		await checkTrackedBranches(lastCwd);
+		try {
+			if (ctx?.cwd) lastCwd = ctx.cwd;
+			if (ctx?.ui) lastUIContext = ctx.ui;
+			await pollAllObservedPRs();
+			await checkTrackedBranches(lastCwd);
+		} catch (err) {
+			// A handler error would surface as an extension error in the TUI; internal
+			// failures stay in the file log.
+			if (!isStaleError(err)) logInternal("turn_end check failed", err);
+		}
 	});
 
 	const AUTO_TRACKING_PROMPT_MESSAGE =
@@ -1399,7 +1508,10 @@ export default function (pi: ExtensionAPI) {
 		// this run must not consume the arm (same stale-arm class as the input-side interposition).
 		// 'user' runs always follow an input event, so only non-user sources break the arm.
 		if (event.messageType !== "user" && noticeAttached) noticeAttachBroken = true;
-		const isEnabled = pi.getActiveTools().includes("observe_pr");
+		// A stale context must not throw here (a replacement after this session): treat the
+		// tool as unknown and leave the system prompt as it is.
+		const activeTools = tryPi("before_agent_start", () => pi.getActiveTools(), undefined);
+		const isEnabled = activeTools?.includes("observe_pr") ?? false;
 		if (!isEnabled) {
 			if (event.systemPromptOptions?.sections?.pr_auto_tracking) {
 				delete event.systemPromptOptions.sections.pr_auto_tracking;
@@ -1423,20 +1535,28 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", () => {
+		// resetObserverState first: a throw in any later cleanup must not leave the timers and
+		// watchers alive (they would keep hitting a torn-down context).
+		try {
+			resetObserverState();
+		} catch (err) {
+			logInternal("session_shutdown reset failed", err);
+		}
 		disposed = true;
 		deferredAnnouncements.clear();
 		pendingAutoStart.clear();
 		// (the singleton outlives the session: a pending retry timer or a wedged slot
 		// must not carry into the next session in the same process)
-		ghHealth.reset();
+		try {
+			ghHealth.reset();
+		} catch (err) {
+			logInternal("session_shutdown ghHealth reset failed", err);
+		}
 		suppressUpdates = false;
 		noticeAttached = false;
 		userTurnPending = false;
 		sessionHasRun = false;
 		startupCheck = undefined;
-		// State was already persisted at the moment of the last change; reset without appending
-		// another entry to the session that is shutting down.
-		resetObserverState();
 		lastUIContext = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_OBSERVED_PRS__;

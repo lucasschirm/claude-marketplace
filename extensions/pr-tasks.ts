@@ -17,6 +17,7 @@ import {
 } from "./lib/github-review-threads.ts";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList } from "./lib/tool-result.ts";
+import { logError } from "./lib/extension-log.ts";
 import {
 	PRTasksManager,
 	countTasksByStatus,
@@ -130,32 +131,110 @@ export default function (pi: ExtensionAPI) {
 	let sessionId = 0; // bumped on shutdown, so a sync still in flight then is dropped
 	let prTasksShutdown = false; // a retry must not outlive the session's shutdown
 
+	// ---- Stale-context safety (same pattern as observe-pr) ------------------
+	// pi invalidates the extension runtime on session replacement/reload. ExtensionAPI
+	// exposes no staleness query: after invalidation every pi.* action method throws an
+	// error matching STALE_MARKER. pr-tasks' background work (in-flight syncAllPRs
+	// continuations, the ghHealth backoff retry hook) outlives the context, and a
+	// teardown that skips the session_shutdown event never runs its cleanup - so every
+	// pi call made from background code goes through tryPi(): the first stale throw
+	// runs handleStaleContext() (the same teardown session_shutdown performs, so the
+	// surviving work stops hitting the dead context), later calls are silent no-ops.
+	// Errors go to the file log (extension-log), never to the console/TUI.
+	const STALE_MARKER = /stale after session replacement|API is no longer active/;
+	const EXT_LOG_SCOPE = "pr-tasks";
+	let ctxStale = false;
+
+	function isStaleError(err: unknown): boolean {
+		const msg = err instanceof Error ? err.message : String(err);
+		return STALE_MARKER.test(msg);
+	}
+
+	function handleStaleContext(caller: string): void {
+		if (ctxStale) return;
+		ctxStale = true;
+		logError(
+			EXT_LOG_SCOPE,
+			"extension context invalidated; tearing down pr-tasks background work",
+			new Error(`first stale call: ${caller}`),
+		);
+		try {
+			// The same teardown session_shutdown performs - this path missed that event.
+			sessionId++; // drop syncs still in flight (syncPROrThrow's session check)
+			prTasksShutdown = true;
+			syncAllInFlight = undefined;
+			ghHealth.reset();
+			manager.clear();
+			lastNudgeSignature = "";
+			identicalNudgeCount = 0;
+			// session_shutdown also released the registration globals; without that the
+			// next session's factory re-run would early-return and pr-tasks would be
+			// dead until the process restarts.
+			delete (globalThis as any)[GLOBAL_GUARD_KEY];
+			delete (globalThis as any).__PI_ON_PR_POLL__;
+			delete (globalThis as any).__PI_ON_PR_CLOSED__;
+		} catch (err) {
+			logError(EXT_LOG_SCOPE, "stale-context teardown failed", err);
+		}
+	}
+
+	// Runs a pi action that background code may call. Stale: tear down once and return
+	// the fallback (never throws, so event-handler continuations cannot surface as TUI
+	// extension errors). Non-stale: rethrow for the call site's existing handling.
+	function tryPi<T>(caller: string, fn: () => T, fallback: T): T {
+		if (ctxStale) return fallback;
+		try {
+			return fn();
+		} catch (err) {
+			if (isStaleError(err)) {
+				handleStaleContext(caller);
+				return fallback;
+			}
+			throw err;
+		}
+	}
+
+	// Guards a fire-and-forget observer promise so a rejection can never become an
+	// unhandled rejection (Node's default for those is to crash the process).
+	function guardAsync(what: string, p: Promise<unknown>): void {
+		void p.catch((err) => {
+			if (isStaleError(err)) handleStaleContext(what);
+			else logError(EXT_LOG_SCOPE, `${what} failed`, err);
+		});
+	}
+
 	function updateStatusUI(ui?: ExtensionUIContext) {
 		const targetUI = ui || lastUIContext;
 		if (!targetUI) return;
 
 		const counts = manager.getCounts();
-		if (counts.total > 0) {
+		try {
 			const staleNote = counts.stale > 0 ? ` / ${counts.stale} stale` : "";
-			targetUI.setStatus("pr_tasks", `PR Tasks: ${counts.open} open / ${counts.blocked} blocked / ${counts.resolved} resolved${staleNote}`);
-		} else {
-			targetUI.setStatus("pr_tasks", undefined);
+			if (counts.total > 0) {
+				targetUI.setStatus(
+					"pr_tasks",
+					`PR Tasks: ${counts.open} open / ${counts.blocked} blocked / ${counts.resolved} resolved${staleNote}`,
+				);
+			} else {
+				targetUI.setStatus("pr_tasks", undefined);
+			}
+		} catch (err) {
+			// A dead UI must not break the event-handler continuation that called this.
+			if (isStaleError(err)) handleStaleContext("updateStatusUI");
+			else logInternal(`[pr_tasks] Failed to update status UI: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
 
-	// TUI-safe log for non-GitHub internal errors. GitHub availability failures are
-	// handled by ghHealth (silent + paced retry) and never logged here.
+	// File-only log for internal errors, so failures stay silent in the TUI but remain
+	// debuggable (extension-log). GitHub availability failures are handled by ghHealth
+	// (silent + paced retry) and never logged here.
 	function logInternal(msg: string) {
-		if (lastUIContext) {
-			try {
-				lastUIContext.notify(msg, "warning");
-			} catch {}
-		}
+		logError(EXT_LOG_SCOPE, msg);
 	}
 
 	function sendAgentMessage(content: string) {
 		try {
-			pi.sendUserMessage(content, { deliverAs: "steer" });
+			tryPi("sendAgentMessage", () => pi.sendUserMessage(content, { deliverAs: "steer" }), undefined);
 		} catch (err) {
 			logInternal(`[pr_tasks] Failed to send message to agent: ${err instanceof Error ? err.message : String(err)}`);
 		}
@@ -774,37 +853,53 @@ export default function (pi: ExtensionAPI) {
 	// health state). No-op after a session shutdown.
 	ghHealth.registerRetryHook(() => {
 		if (prTasksShutdown) return;
-		void syncAllPRs(lastCwd);
+		guardAsync("syncAllPRs", syncAllPRs(lastCwd));
 	});
 
 	pi.on("session_start", async (_evt, ctx) => {
-		prTasksShutdown = false;
-		lastUIContext = ctx.ui;
-		lastCwd = ctx.cwd || process.cwd();
-		await syncAllPRs(lastCwd);
-		updateStatusUI(ctx.ui);
+		try {
+			prTasksShutdown = false;
+			lastUIContext = ctx.ui;
+			lastCwd = ctx.cwd || process.cwd();
+			await syncAllPRs(lastCwd);
+			updateStatusUI(ctx.ui);
+		} catch (err) {
+			// A stale ctx (its ui/cwd getters throw post-replacement) is the first stale
+			// detection: tear down (a session_shutdown this path missed would have).
+			if (isStaleError(err)) handleStaleContext("session_start");
+			else logInternal(`[pr_tasks] session_start handling failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	});
 
 	pi.on("turn_end", async (_evt, ctx) => {
-		if (ctx?.cwd) lastCwd = ctx.cwd;
-		if (ctx?.ui) lastUIContext = ctx.ui;
-		await syncAllPRs(lastCwd);
-		updateStatusUI(ctx?.ui);
+		try {
+			if (ctx?.cwd) lastCwd = ctx.cwd;
+			if (ctx?.ui) lastUIContext = ctx.ui;
+			await syncAllPRs(lastCwd);
+			updateStatusUI(ctx?.ui);
+		} catch (err) {
+			// A stale ctx (its ui/cwd getters throw post-replacement) is the first stale
+			// detection: tear down (a session_shutdown this path missed would have).
+			if (isStaleError(err)) handleStaleContext("turn_end");
+			else logInternal(`[pr_tasks] turn_end sync failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	});
 
 	// Loop enforcement: prevent agent from settling while unresolved tasks remain
 	pi.on("agent_before_settle", async (_evt, ctx) => {
-		if (ctx?.cwd) lastCwd = ctx.cwd;
-		if (ctx?.ui) lastUIContext = ctx.ui;
+		try {
+			if (ctx?.cwd) lastCwd = ctx.cwd;
+			if (ctx?.ui) lastUIContext = ctx.ui;
 
-		await syncAllPRs(lastCwd);
-		updateStatusUI(ctx?.ui);
+			await syncAllPRs(lastCwd);
+			updateStatusUI(ctx?.ui);
 
-		const unresolvedTasks = manager.getUnresolvedTasks();
-		if (unresolvedTasks.length === 0) {
-			lastNudgeSignature = "";
-			identicalNudgeCount = 0;
-		} else {
+			const unresolvedTasks = manager.getUnresolvedTasks();
+			if (unresolvedTasks.length === 0) {
+				lastNudgeSignature = "";
+				identicalNudgeCount = 0;
+				return;
+			}
 			// Throttle loop messages to prevent runaway loops if identical tick
 			const now = Date.now();
 			if (now - lastSettleNudgeTime < 1000) {
@@ -821,10 +916,14 @@ export default function (pi: ExtensionAPI) {
 			lastNudgeSignature = signature;
 			if (identicalNudgeCount > MAX_IDENTICAL_NUDGES) {
 				if (identicalNudgeCount === MAX_IDENTICAL_NUDGES + 1) {
-					lastUIContext?.notify(
-						`[pr_tasks] ${unresolvedTasks.length} open task(s) unchanged after ${MAX_IDENTICAL_NUDGES} nudges; no longer blocking the agent from stopping. Use /tasks to review them.`,
-						"warning",
-					);
+					try {
+						lastUIContext?.notify(
+							`[pr_tasks] ${unresolvedTasks.length} open task(s) unchanged after ${MAX_IDENTICAL_NUDGES} nudges; no longer blocking the agent from stopping. Use /tasks to review them.`,
+							"warning",
+						);
+					} catch {
+						// a dead UI must not break the settle handler
+					}
 				}
 				return;
 			}
@@ -832,12 +931,17 @@ export default function (pi: ExtensionAPI) {
 			const totalTasks = manager.getAllTasks().length;
 			const loopMessage = formatLoopMessage(unresolvedTasks, totalTasks);
 			try {
-				pi.sendUserMessage(loopMessage, { deliverAs: "followUp" });
+				tryPi("settle_loop", () => pi.sendUserMessage(loopMessage, { deliverAs: "followUp" }), undefined);
 				for (const t of unresolvedTasks) manager.markShown(t);
 			} catch (err) {
 				logInternal(`[pr_tasks] Failed to send settle loop message: ${err instanceof Error ? err.message : String(err)}`);
 			}
 			return { continue: true };
+		} catch (err) {
+			// A stale ctx (its ui/cwd getters throw post-replacement) or a dropped in-flight
+			// sync: stale is the first stale detection (tear down); the rest stay in the file log.
+			if (isStaleError(err)) handleStaleContext("agent_before_settle");
+			else logInternal(`[pr_tasks] agent_before_settle failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	});
 
@@ -877,11 +981,19 @@ export default function (pi: ExtensionAPI) {
 		prTasksShutdown = true;
 		// (the singleton outlives the session: a pending retry timer or a wedged slot
 		// must not carry into the next session in the same process)
-		ghHealth.reset();
+		try {
+			ghHealth.reset();
+		} catch (err) {
+			logInternal(`[pr_tasks] session_shutdown ghHealth reset failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
 		syncAllInFlight = undefined; // its results are dropped, so it must not be reused
 		lastNudgeSignature = "";
 		identicalNudgeCount = 0;
-		manager.clear();
+		try {
+			manager.clear();
+		} catch (err) {
+			logInternal(`[pr_tasks] session_shutdown manager clear failed: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	});
 
 	// Tool 1: pr_tasks_list

@@ -23,6 +23,11 @@
             "name": "lsc-multiagent-development",
             "source": "./plugins/multiagent-development",
             "description": "A collection of agents and skills for multi-agent development."
+        },
+        {
+            "name": "lsc-pr-observer",
+            "source": "./plugins/pr-observer",
+            "description": "Background PR CI observer and review conversation task manager for Devin CLI and Claude Code."
         }
     ]
 }

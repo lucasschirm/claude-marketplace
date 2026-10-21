@@ -284,9 +284,32 @@ echo "the ratchet"
 set_baseline() { node -e "const fs=require('fs');const p='scripts/quality-baseline.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));$1;fs.writeFileSync(p,JSON.stringify(j,null,2))"; }
 restore_baseline() { cp "$ROOT/scripts/quality-baseline.json" scripts/quality-baseline.json; }
 
+# Write a raw token straight into the baseline text. This is how a hand-edit actually arrives: JSON.stringify
+# cannot produce 1e999, -3 or 2.5 from a parsed value, so a fixture that needs those must edit the file.
+set_raw_metric() {
+	python3 - "$1" "$2" <<'PYRAW'
+import io
+import re
+import sys
+
+key, raw = sys.argv[1], sys.argv[2]
+p = "scripts/quality-baseline.json"
+s = io.open(p, encoding="utf-8").read()
+new, n = re.subn(r'("%s"\s*:\s*)[0-9.eE+-]+' % re.escape(key), lambda m: m.group(1) + raw, s, count=1)
+if n == 0:
+	sys.exit("key not found in baseline: " + key)
+io.open(p, "w", encoding="utf-8").write(new)
+PYRAW
+}
+
+# Baseline values move when main lands, so the fixtures quote them instead of hard-coding them.
+metric_value() {
+	node -e 'const j=require("./scripts/quality-baseline.json");process.stdout.write(String(j.metrics[process.argv[1]]))' "$1"
+}
+
 set_baseline "j.metrics.emptyCatch=1"
 qa fail "a rise fails --check" --check
-expect_text "and reports the size of the rise" "emptyCatch: 49 > baseline 1"
+expect_text "and reports the rise against the lowered baseline" "> baseline 1"
 qa fail "--write refuses a rise without a reason" --write
 qa pass "--write --reason records it and appends a note" --write --reason "fixture: a deliberate widening of the gate"
 node -e 'const j=require("./scripts/quality-baseline.json");if(!j.notes.some((n)=>/fixture: a deliberate widening of the gate/.test(n.reason)))process.exit(1)' \
@@ -390,7 +413,7 @@ block = (
 io.open("biome.jsonc", "w", encoding="utf-8").write(s.replace(needle, block, 1))
 PYFIX
 qa fail "the top level still says warn while an override silences 147 sites" --check
-expect_text "and the zero is not called an improvement" "147 -> 0"
+expect_text "and the zero is not called an improvement" "$(metric_value biome.suspicious/noExplicitAny) -> 0"
 qa fail "--write cannot record it without a reason" --write
 qa pass "a reason records it, so the silencing shows up in the file" --write --reason "fixture: silenced by an overrides entry"
 cp "$WORK/biome.jsonc.orig2" biome.jsonc
@@ -402,13 +425,13 @@ set_baseline 'j.metrics["biome.suspicious/noExplicitAny"]="147 debt"'
 qa fail "a string where a threshold belongs is refused" --check
 expect_text "naming the key and the expectation" "metrics['biome.suspicious/noExplicitAny'] must be a finite non-negative integer"
 restore_baseline
-sed -i 's/"emptyCatch": 49/"emptyCatch": 1e999/' scripts/quality-baseline.json
+set_raw_metric emptyCatch 1e999
 qa fail "1e999 (Infinity) is not a threshold" --check
 restore_baseline
-sed -i 's/"emptyCatch": 49/"emptyCatch": -3/' scripts/quality-baseline.json
+set_raw_metric emptyCatch -3
 qa fail "a negative threshold is not a threshold" --check
 restore_baseline
-sed -i 's/"emptyCatch": 49/"emptyCatch": 2.5/' scripts/quality-baseline.json
+set_raw_metric emptyCatch 2.5
 qa fail "a fractional count is not a count" --check
 restore_baseline
 set_baseline 'j.files["extensions/tools.ts"]="big"'
