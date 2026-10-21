@@ -432,3 +432,38 @@ Also observed once, not reproduced in five later runs (including the same batch 
 changes in this batch touch neither `pendingAutoStart` nor slot accounting, so this reads as the
 suite's fixed wait meeting a loaded machine (up to 8 s backoff windows after an outage), not a
 regression — but it is a timing-sensitive test worth widening independently of this PR.
+
+## 11. Review round 4 (Devin `swe-2-max`)
+
+Round 4 verified every round-3 item **at file level** (all nine present — the atomic-edit failure mode
+is closed) and found one real defect plus a silent one:
+
+1. **A stale generation could steal the newer round's `again` → single-flight violated**
+   (`lib/nonblocking.ts`). `begin()` chained the coalesced follow-up from `entry.promise.finally`,
+   clearing only its own generation but consuming `slot.again` regardless. Trigger: a round in flight
+   during `session_shutdown` (a `gh` call up to its timeout) → `abort()` → `session_start` →
+   `resume()` → a new round R2 starts for the new session → another request sets `again` → the aborted
+   predecessor finally settles and starts a **third concurrent run on the same key**, overwriting the
+   live slot bookkeeping. Reproduced (`peak concurrency 2`) and now covered by a regression test that
+   fails on the old code and passes on the new. The continuation is gated on slot identity
+   (`slot.running !== holder → return`), so an aborted round cannot chain past its replacement.
+2. **The observe-pr `input` tripwire could never fire**: `startedAt = Date.now()` measured against
+   `performance.now()` inside `checkBudget` → elapsed ≈ −1.7e12 → always under budget. Now
+   `performance.now()`, matching every other boundary in both extensions (verified: all eight
+   `startedAt` declarations are monotonic).
+
+Nits from the same round, also taken:
+
+3. The follow-up chain now runs **inside** the finishing task's `finally`, before its entry leaves
+   `running`, so `pendingTasks()`/`flush()` cannot report quiescence in the gap between a round and its
+   coalesced follow-up.
+4. The pending orchestration ack is bound to the run it was recorded for (`lastPendingAckRunId`) and
+   the spawn uses the `runId` captured at start, so a watcher for a new run can never carry an ack from
+   the old one.
+5. Dead state removed: the slot holder's `promise` and the scope's monotonic `seq` counter (nothing
+   read them once `join()` was deleted); generations are identified by object identity instead.
+
+Round 4's verdict on the one-off `observe-pr-gh-failure` T4 timeout: the test file is byte-identical to
+`main`, the auto-start path is timing-equivalent to base (`settlePendingAutoStarts` still claims the
+retry slot first), so it is the suite's fixed wait meeting a loaded machine — worth widening
+independently of this PR.

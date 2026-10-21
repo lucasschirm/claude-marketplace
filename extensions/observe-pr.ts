@@ -1417,7 +1417,9 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", async (event) => {
-		const startedAt = Date.now();
+		// performance.now(), matching checkBudget: an epoch start against the monotonic clock makes
+		// the elapsed time hugely negative, so the tripwire could never fire.
+		const startedAt = performance.now();
 		// Skill/template commands are expanded after this event, so appending text would corrupt them.
 		if (event.source === "extension") {
 			if (noticeAttached) noticeAttachBroken = true;

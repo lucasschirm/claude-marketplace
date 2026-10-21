@@ -318,6 +318,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	let reconcileTimer: NodeJS.Timeout | undefined;
 	let restartCheckTimer: NodeJS.Timeout | undefined;
 	let lastPendingAckDeliveryId: string | undefined;
+	/** The run the pending ack belongs to, so a spawn for another run never carries it. */
+	let lastPendingAckRunId: string | undefined;
 	let lastUIContext: ExtensionUIContext | undefined;
 	let lastCwd: string = process.cwd();
 	let disposed = false;
@@ -461,14 +463,17 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		if (disposed) return;
 		stopCheckProcess();
 
-		const pendingAck = lastPendingAckDeliveryId;
+		// Bound to one run for the whole spawn: `activeRunId` can change while the orca command
+		// resolves, and a watcher for the new run must not carry an ack recorded for the old one.
+		const runId = activeRunId;
+		const pendingAck = lastPendingAckRunId === runId ? lastPendingAckDeliveryId : undefined;
 		const ack = ackDeliveryId || pendingAck;
 		const seq = ++checkSpawnSeq;
 
 		void (async () => {
 			let proc: ChildProcess;
 			try {
-				proc = await spawnOrcaCheck(activeRunId, { cwd: lastCwd, timeoutMs: 900000, ackDeliveryId: ack });
+				proc = await spawnOrcaCheck(runId, { cwd: lastCwd, timeoutMs: 900000, ackDeliveryId: ack });
 			} catch (err) {
 				logError("orca-orchestration", "Failed to spawn orchestration check process", err);
 				return;
@@ -486,7 +491,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			// discarded (a newer start, or a shutdown) while it was still in flight — clearing the pending
 			// ack up front would leave the process that replaces this one unable to ack, and Orca
 			// re-delivers that delivery, which `handleCheckDelivery` would surface a second time.
-			if (lastPendingAckDeliveryId === pendingAck) lastPendingAckDeliveryId = undefined;
+			if (lastPendingAckDeliveryId === pendingAck) {
+				lastPendingAckDeliveryId = undefined;
+				lastPendingAckRunId = undefined;
+			}
 			checkProcess = proc;
 			wireCheckProcess(proc);
 		})();
@@ -547,6 +555,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		const deliveryId = delivery?.deliveryId || data.result?.deliveryId || data.deliveryId;
 		if (deliveryId) {
 			lastPendingAckDeliveryId = deliveryId;
+			lastPendingAckRunId = activeRunId;
 		}
 
 		const messages =

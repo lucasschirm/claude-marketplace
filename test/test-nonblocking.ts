@@ -243,6 +243,48 @@ test("the budget of a replaced round is the newest caller's, and bounds the work
 	assert.equal(completed, true, "the replacing budget applies, so the work is not aborted");
 });
 
+test("a round aborted by a session switch cannot chain a follow-up past its replacement", async () => {
+	const scope = createTaskScope("t-generation");
+	// Counted separately from R1: R1 keeps running across the abort by design (its subprocess is
+	// killed, not paused), so what must never exceed 1 is the new session's own rounds.
+	let liveNew = 0;
+	let peakNew = 0;
+	const finished: string[] = [];
+	const enter = (id: string, ms: number) => async () => {
+		liveNew++;
+		peakNew = Math.max(peakNew, liveNew);
+		await sleep(ms);
+		liveNew--;
+		finished.push(id);
+		return Promise.resolve();
+	};
+	let releaseFirst: () => void = () => {};
+	const firstGate = new Promise<void>((resolve) => (releaseFirst = resolve));
+
+	// R1: a gh call that keeps running after being told to stop (the subprocess decides when it ends).
+	scope.schedule("sync", async () => {
+		await firstGate;
+		finished.push("R1");
+	});
+	await sleep(10);
+
+	// session_shutdown followed by session_start on the same scope.
+	scope.abort();
+	scope.resume();
+
+	// R2 runs for the new session, and a further request lands while it is in flight.
+	scope.schedule("sync", enter("R2", 60));
+	await sleep(10);
+	scope.schedule("sync", enter("R3", 10));
+
+	// The stale round settles last: it must not consume the newer round's queued follow-up and start
+	// a third run on the same single-flight key.
+	releaseFirst();
+	assert.equal(await scope.flush(5_000), true);
+	assert.equal(peakNew, 1, `single-flight violated, peak concurrency ${peakNew}`);
+	assert.deepEqual(finished.filter((id) => id !== "R1"), ["R2", "R3"], "one coalesced follow-up");
+});
+
 test("pending/flushAllTasks observe every scope", async () => {
 	const a = createTaskScope("a");
 	const b = createTaskScope("b");

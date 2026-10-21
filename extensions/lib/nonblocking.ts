@@ -59,7 +59,8 @@ interface Running {
 }
 
 interface Slot {
-	running?: { promise: Promise<void>; seq: number; started: boolean };
+	/** The current generation of this key's run; identified by object identity. */
+	running?: { started: boolean };
 	/** A request arrived while a run was in flight: run exactly one more time afterwards. */
 	again: boolean;
 	/** Latest request wins: the coalesced follow-up runs the newest caller's work. */
@@ -129,8 +130,6 @@ export async function flushAllTasks(timeoutMs = 10_000): Promise<boolean> {
 export function createTaskScope(label: string, opts: { onError?: TaskLogger; budgetMs?: number } = {}): TaskScope {
 	const running = new Set<Running>();
 	const slots = new Map<string, Slot>();
-	// Monotonic start counter: lets `join` tell "already running" from "started after me".
-	let seq = 0;
 
 	// A throwing logger must never break the extension, and must never reject a task from inside
 	// its own catch handler (that would be an unhandled rejection, which crashes Node).
@@ -151,7 +150,12 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 	 * slot replaces the work of a round that has not started yet, and keeping the first caller's opts
 	 * would run the new work under the old budget and report it against the old error handler.
 	 */
-	const start = (name: string, getWork: () => TaskWork, getOpts: () => RunOptions | undefined): Running => {
+	const start = (
+		name: string,
+		getWork: () => TaskWork,
+		getOpts: () => RunOptions | undefined,
+		onSettled?: () => void,
+	): Running => {
 		const controller = new AbortController();
 		let timer: NodeJS.Timeout | undefined;
 
@@ -187,6 +191,15 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 				safeLog(getOpts()?.onError ?? report, `[${label}] ${name} failed: ${text}`);
 			} finally {
 				if (timer) clearTimeout(timer);
+				// The single-flight continuation runs before this entry leaves `running`, so
+				// pendingTasks()/flush() can never report quiescence in the gap between a round and its
+				// coalesced follow-up (a test waiting for background work would otherwise be able to
+				// return while the next round is about to start).
+				try {
+					onSettled?.();
+				} catch {
+					/* bookkeeping must never fail a task */
+				}
 				running.delete(entry);
 			}
 		})();
@@ -197,11 +210,11 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 	const begin = (slot: Slot, key: string): Running | undefined => {
 		const work = slot.work;
 		if (!work || aborted) return undefined;
-		const startedSeq = ++seq;
-		// Registered before the work starts (an `immediate` task is already running by the time
-		// `start` returns) and marked when the body is actually entered: `schedule` needs to tell a
-		// run whose I/O is still ahead of it from one that is genuinely in flight.
-		const holder = { promise: Promise.resolve(), seq: startedSeq, started: false };
+		// The holder identifies this generation by identity: an aborted round that settles after a
+		// `resume()` must recognise the slot as no longer its own. Registered before the work starts
+		// (an `immediate` task is already running by the time `start` returns) and marked when the body
+		// is entered, so `schedule` can tell a run whose I/O is still ahead of it from one in flight.
+		const holder = { started: false };
 		slot.running = holder;
 		const entry = start(
 			key,
@@ -210,16 +223,18 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 				return (slot.work as TaskWork)(signal);
 			},
 			() => slot.opts,
+			// Runs in this generation's own finally. Anything that already replaced us in the slot
+			// (abort + resume + a newer round) owns `again` and the right to continue the chain:
+			// consuming it here would start a second concurrent run on a single-flight key.
+			() => {
+				if (slot.running !== holder) return;
+				slot.running = undefined;
+				if (slot.again) {
+					slot.again = false;
+					begin(slot, key);
+				}
+			},
 		);
-		holder.promise = entry.promise;
-		void entry.promise.finally(() => {
-			// Only clear our own generation: abort() may already have reset this slot.
-			if (slot.running?.seq === startedSeq) slot.running = undefined;
-			if (slot.again) {
-				slot.again = false;
-				begin(slot, key);
-			}
-		});
 		return entry;
 	};
 
