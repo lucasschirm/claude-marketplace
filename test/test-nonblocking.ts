@@ -26,6 +26,81 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+test("work starts on a later event-loop turn, never inside the caller's turn", async () => {
+	// Pi awaits lifecycle handlers, and everything a task does before its first real await would run
+	// inside that awaited handler. A microtask yield is not enough (Pi's own continuation is a
+	// microtask), so the scope defers to a macrotask.
+	const scope = createTaskScope("t-macro");
+	let syncWorkRan = false;
+	const startedInMyTurn = { value: false };
+	scope.run("spawner", async () => {
+		syncWorkRan = true;
+		startedInMyTurn.value = true;
+	});
+	// Still in the caller's synchronous stretch: nothing may have run yet.
+	assert.equal(syncWorkRan, false, "work must not start synchronously inside the handler");
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(startedInMyTurn.value, false, "a microtask yield would still run in the same turn");
+	assert.equal(await scope.flush(2_000), true);
+	assert.equal(syncWorkRan, true);
+});
+
+test("immediate: true starts on the current tick (slot races depend on it)", async () => {
+	// ghHealth's degraded-mode retry slot goes to whoever claims it first, so its retry hook must
+	// not be queued behind the tick's other callbacks.
+	const scope = createTaskScope("t-immediate");
+	let ranNow = false;
+	let ranLater = false;
+	scope.run("now", async () => {
+		ranNow = true;
+	}, { immediate: true });
+	scope.run("next-tick", async () => {
+		ranLater = true;
+	});
+	assert.equal(ranNow, true, "immediate work runs synchronously up to its first await");
+	assert.equal(ranLater, false, "default work waits for the next event loop turn");
+	assert.equal(await scope.flush(2_000), true);
+	assert.equal(ranLater, true);
+});
+
+test("abort() is sticky and resume() reopens the scope", async () => {
+	const scope = createTaskScope("t-sticky");
+	let runs = 0;
+	const work = async () => {
+		runs++;
+	};
+	scope.abort();
+	scope.run("after-abort", work);
+	scope.schedule("after-abort-key", work);
+	await scope.join("after-abort-join", work);
+	await sleep(50);
+	assert.equal(runs, 0, "nothing may start on an aborted scope");
+	assert.equal(pendingTasks(), 0);
+
+	// The next session revives it.
+	scope.resume();
+	scope.run("after-resume", work);
+	assert.equal(await scope.flush(2_000), true);
+	assert.equal(runs, 1);
+});
+
+test("run() resolves when the task finishes and never rejects", async () => {
+	const scope = createTaskScope("t-gate", {
+		onError: () => {
+			throw new Error("the logger itself is broken");
+		},
+	});
+	const gate = scope.run("fails", async () => {
+		await sleep(20);
+		throw new Error("work failed");
+	});
+	// A tool path keeps this promise as a gate: it must settle, never reject, even though the work
+	// failed and the scope's logger throws while reporting it.
+	const settled = await Promise.race([gate.then(() => "settled"), sleep(3_000).then(() => "TIMEOUT")]);
+	assert.equal(settled, "settled");
+});
+
 test("run() is detached: the caller does not wait for the work", async () => {
 	const scope = createTaskScope("t");
 	let done = false;
@@ -81,7 +156,9 @@ test("schedule() coalesces: at most one in flight, at most one queued (latest wo
 	for (let i = 1; i <= 6; i++) scope.schedule("refresh", mk(i));
 	assert.equal(await scope.flush(5_000), true);
 	assert.equal(maxInFlight, 1, "a single-flight key must never overlap itself");
-	assert.deepEqual(finished, [1, 6], "one coalesced follow-up carrying the newest work");
+	// Latest request wins: work is read when a run starts, so requests 2-5 superseded the first run
+	// before it began (it runs 6) and only one coalesced follow-up is queued behind it.
+	assert.deepEqual(finished, [6, 6], "no run for superseded requests, exactly one follow-up");
 });
 
 test("pending/flushAllTasks observe every scope", async () => {

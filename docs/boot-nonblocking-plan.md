@@ -298,3 +298,47 @@ Guarantees kept from the work that landed on `main` while this was in progress: 
 logging (`lib/extension-log.ts`, never `console.*`), stale-context teardown with caller attribution
 (`test-pr-tasks-stale`, `test-observe-pr-stale`), and `ghHealth` pacing — `ghHealth` still decides
 *when* GitHub is contacted, `nonblocking.ts` decides *where* the wait happens.
+
+## 8. Review round 1 (Devin `swe-2-max`) and what it changed
+
+The first review found real defects; all of them are fixed here.
+
+1. **`lib/orca-client.ts` had not been converted** — the async `resolveOrcaCmd`/`spawnOrcaCheck`
+   work was lost while rebasing, so `execFileSync("which", "orca-ide")` still froze the event loop
+   on *every* Orca call (boot discovery, every `turn_end`, every 30 s reconcile tick) and the
+   `await` in `startCheckProcess` was a no-op. Restored: `resolveOrcaCmd()` is async and memoized on
+   `commandExists`, and `execOrca`/`spawnOrcaCheck` await it.
+2. **Task bodies ran inside the awaited handler.** `start()` invoked `work()` synchronously, so a
+   task's preamble (spawning `gh`, `existsSync` scans) executed on the path Pi awaits. Tasks now
+   start on a **macrotask** (`setImmediate`) — a microtask yield is not enough, because Pi's own
+   continuation after the handler is a microtask. Re-measured `session_start`: 15 ms → **1 ms**,
+   and the awaited `turn_end` cost is now 0 ms.
+   `RunOptions.immediate` opts out for work that is *not* scheduled from a path Pi awaits: the
+   `ghHealth` retry hooks. With the deferral on, those hooks lost the degraded-mode retry slot to
+   the CI watchers' respawn in the same tick and `pr view` retries were starved for a whole outage
+   (`observe-pr-gh-failure` T3: 2 attempts instead of 7). With `immediate: true` the cadence is
+   back to main's (7 attempts, min gap ~1.6 s).
+3. **`recoverState` could clobber live tool state.** Recovery is detached, so a `devin_delegate`
+   call landing during its disk reads was wiped by `queue.length = 0` after the tool had already
+   reported "queued". `run()` now returns a never-rejecting promise, `session_start` keeps it as
+   `recoveryDone`, and every mutating tool path plus the `/devin` command awaits that gate first.
+4. **A late startup notice was delivered twice** (and a third time after a resume):
+   `releaseLateStartupNotices` sent the steer but left the entry in `deferredAnnouncements` and
+   `announced` false, so the next plain message attached the same text and `persistState` carried it
+   into the resumed session. It now consumes the entry and marks `announced`, like the
+   `pendingAnnouncements` timer does.
+5. **Check-process stop paths could let a late spawn re-attach.** Every stop now goes through
+   `stopCheckProcess()`, which also retires the spawn generation, and a discarded spawn gets an
+   `error` listener before it is killed (an unhandled `'error'` event on a `ChildProcess` crashes Node).
+6. **Aborted work still applied results.** `reconcileWorkers`/`discoverActiveRun` take the scope's
+   `AbortSignal` and stop after each awaited Orca round; devin's DB-backfill IIFE is a tracked task
+   that checks its signal before notifying and before draining the queue.
+7. **`abort()` is now sticky** (nothing may start on a shut-down scope) with an explicit `resume()`
+   called from each extension's `session_start`, closing the `join`/`schedule`-resurrects-work gap.
+8. **A throwing logger can no longer break a task**: the task's failure report and the `WriteQueue`'s
+   logger call are guarded, so neither can produce an unhandled rejection.
+9. **The `input` tripwire is wired** (both extensions declared the budget but never measured it),
+   and the duplicated `agent_before_settle` measurement was removed.
+
+`schedule()` semantics were also pinned down: work is read when a run actually starts, so requests
+that arrive before it began do not add a run — they replace what it does (latest request wins).

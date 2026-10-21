@@ -1584,9 +1584,13 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						} else {
 							// Process is dead: the turn may have completed on devin's side
 							// while pi was down — check the devin session DB.
-							void (async () => {
+							tasks.run(`backfill-${sId}`, async (backfillSignal) => {
 								try {
 									const text = await backfillFinalMessage(meta);
+									// The session may have shut down (or the budget expired) while the session DB
+									// was read. Its results belong to the session that is gone, and the drain
+									// below could otherwise start Devin runs for a session that no longer exists.
+									if (backfillSignal.aborted) return;
 									if (text) {
 										meta.status = "idle";
 										meta.finishedAt = Date.now();
@@ -1604,9 +1608,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 								} catch (err) {
 									logError(`Error reconciling session ${meta.sessionId}: ${extractCliError(err)}`);
 								}
+								if (backfillSignal.aborted) return;
 								updateStatusUI();
 								drainQueue();
-							})();
+							});
 						}
 					}
 					sessions.set(sId, meta);
@@ -1615,7 +1620,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				}
 			}
 
-			// Restore queue
+			// Restore queue. Nothing can have been queued yet: every tool path awaits `recoveryDone`
+			// before it mutates state, so this overwrite cannot discard a live delegation.
 			if (Array.isArray(state.queue)) {
 				queue.length = 0;
 				for (const q of state.queue) {
@@ -1634,12 +1640,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
 		const startedAt = performance.now();
+		tasks.resume();
 		lastUIContext = ctx.ui;
 		baseDir = ctx.cwd;
 		const piId = ctx.sessionManager?.getSessionId() || "default";
 		// Detached: Pi awaits session_start before it paints the restored transcript, so the disk reads
 		// and orphan reconciliation land afterwards (the status line and queue drain update when done).
-		tasks.run(
+		// `recoveryDone` is the gate tool paths wait on; run() never rejects, so it is safe to keep.
+		recoveryDone = tasks.run(
 			"recover-state",
 			async (signal) => {
 				await recoverState(piId, signal);
@@ -1654,6 +1662,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		};
 		checkBudget("session_start", startedAt);
 	});
+
+	// Recovery is detached, so it owns a gate: a tool call that lands while its disk reads are still
+	// running would otherwise see partial state *and* have its mutations overwritten when recovery
+	// finishes (`queue.length = 0`, the restored counters). Tool paths await this first — waiting is
+	// correct there, because the agent asked for the data and Pi is not on a lifecycle boundary.
+	let recoveryDone: Promise<void> = Promise.resolve();
 
 	function cleanupAllClients(): void {
 		for (const client of activeClients.values()) {
@@ -1743,6 +1757,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			baseDir = ctx.cwd;
 			// Do not re-anchor on tool calls: storage stays with the session_start anchor.
 			const toolPiId = ctx.sessionManager?.getSessionId();
@@ -1862,6 +1879,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
@@ -2004,6 +2024,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			const meta = sessions.get(params.session_id);
 			if (!meta) {
 				return {
@@ -2130,6 +2153,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
@@ -2178,6 +2204,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
@@ -2342,6 +2371,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			const targetId = params.session_id;
 
 			if (params.all_settled) {
@@ -2537,6 +2569,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		description: "Devin delegation controls and dashboard (subcommands: list, sessions, limit [n], cancel <id>, allow_bash [on|off|status])",
 		handler: async (args, ctx) => {
 			lastUIContext = ctx.ui;
+			// Same gate as the tools: `/devin cancel` must not run against state recovery is replacing.
+			await recoveryDone;
 			const trimmed = (args || "").trim();
 			const parts = trimmed.split(/\s+/);
 			const sub = parts[0]?.toLowerCase();

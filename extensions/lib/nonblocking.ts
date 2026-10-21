@@ -43,6 +43,13 @@ export interface RunOptions {
 	onError?: TaskLogger;
 	/** Called when the budget expires (before the abort), so a caller can log or retry. */
 	onBudget?: (name: string, budgetMs: number) => void;
+	/**
+	 * Start on the current tick instead of the next one. Only for work scheduled *outside* a
+	 * path Pi awaits, where being queued would change the order against something reacting in
+	 * the same tick (e.g. ghHealth's retry hook racing its single degraded-mode slot with the
+	 * CI watchers' respawn). Default false: lifecycle handlers get the deferred start.
+	 */
+	immediate?: boolean;
 }
 
 interface Running {
@@ -62,12 +69,20 @@ interface Slot {
 
 /** One scope per extension: session-scoped background work that can be aborted as a unit. */
 export interface TaskScope {
-	/** Fire-and-forget. Never rejects, never blocks the caller. */
-	run(name: string, work: TaskWork, opts?: RunOptions): void;
+	/**
+	 * Fire-and-forget: starts the work and returns immediately. Never rejects, so the
+	 * returned promise may be kept as a gate (`await` it where a later step must not run
+	 * before the task finished) without a caller ever having to handle a failure.
+	 */
+	run(name: string, work: TaskWork, opts?: RunOptions): Promise<void>;
 	/**
 	 * Detached single-flight: joins the run already in flight for `key` instead of
 	 * stacking, and when a request arrives while one is running it schedules exactly one
 	 * follow-up, so coalescing never loses the newest refresh.
+	 *
+	 * Latest request wins: the work is read when a run actually starts (one event loop turn
+	 * after `schedule`), so requests that arrive before it began do not add a run at all —
+	 * they replace what it does.
 	 *
 	 * `key` is the contract: runs sharing a key must do equivalent work (include any
 	 * argument that changes the result in the key).
@@ -80,8 +95,14 @@ export interface TaskScope {
 	 * for the coalesced follow-up that carries this call's work.
 	 */
 	join(key: string, work: TaskWork, opts?: RunOptions): Promise<void>;
-	/** Abort everything in flight and drop the single-flight bookkeeping (session_shutdown). */
+	/**
+	 * Abort everything in flight and drop the single-flight bookkeeping (session_shutdown).
+	 * Sticky: nothing may start on an aborted scope, so a callback that outlived the session
+	 * cannot resurrect work on it. `resume()` reopens it for the next session.
+	 */
 	abort(): void;
+	/** Reopen an aborted scope (called from `session_start`). Also drops stale slot state. */
+	resume(): void;
 	/** Tests/host hooks: wait for quiescence. Resolves false if `timeoutMs` elapsed first. */
 	flush(timeoutMs?: number): Promise<boolean>;
 	/** Number of tracked tasks in this scope. */
@@ -118,13 +139,19 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 	// Monotonic start counter: lets `join` tell "already running" from "started after me".
 	let seq = 0;
 
-	const report = (msg: string) => {
+	// A throwing logger must never break the extension, and must never reject a task from inside
+	// its own catch handler (that would be an unhandled rejection, which crashes Node).
+	const safeLog = (log: TaskLogger | undefined, msg: string) => {
 		try {
-			opts.onError?.(msg);
-		} catch {
-			// A logger must never be able to break the extension.
-		}
+			log?.(msg);
+		} catch {}
 	};
+
+	const report = (msg: string) => safeLog(opts.onError, msg);
+
+	// Sticky after `abort()`: a stray timer or continuation from the session that shut down must
+	// not start work here. `session_start` calls `resume()` on the scope that serves the new session.
+	let aborted = false;
 
 	const start = (name: string, work: TaskWork, o?: RunOptions): Running => {
 		const controller = new AbortController();
@@ -146,12 +173,18 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		running.add(entry);
 		entry.promise = (async () => {
 			try {
+				// A *macrotask* boundary, deliberately: everything a task does before its first real
+				// await would otherwise run inside the lifecycle handler that scheduled it — spawning
+				// subprocesses and reading files on the path Pi awaits. Yielding a microtask is not
+				// enough, because Pi's own continuation after the handler is a microtask too.
+				if (!o?.immediate) await new Promise<void>((resolve) => setImmediate(resolve));
+				if (controller.signal.aborted) return;
 				await work(controller.signal);
 			} catch (err) {
 				// A task told to stop is not a failure worth surfacing.
 				if (controller.signal.aborted) return;
 				const text = err instanceof Error ? err.message : String(err);
-				(o?.onError ?? report)?.(`[${label}] ${name} failed: ${text}`);
+				safeLog(o?.onError ?? report, `[${label}] ${name} failed: ${text}`);
 			} finally {
 				if (timer) clearTimeout(timer);
 				running.delete(entry);
@@ -163,7 +196,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 	/** Start a run for a single-flight slot; a coalesced follow-up uses the newest work. */
 	const begin = (slot: Slot, key: string): Running | undefined => {
 		const work = slot.work;
-		if (!work) return undefined;
+		if (!work || aborted) return undefined;
 		const startedSeq = ++seq;
 		const entry = start(
 			key,
@@ -195,14 +228,26 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 
 	const scope: TaskScope = {
 		run(name, work, o) {
+			if (aborted) return Promise.resolve();
 			try {
-				start(name, work, o);
+				return start(name, work, o).promise;
 			} catch (err) {
 				report(`[${label}] ${name} could not start: ${err instanceof Error ? err.message : String(err)}`);
+				return Promise.resolve();
+			}
+		},
+
+		resume() {
+			aborted = false;
+			// Anything queued by the session that shut down is stale by now.
+			for (const slot of slots.values()) {
+				slot.again = false;
+				slot.running = undefined;
 			}
 		},
 
 		schedule(key, work, o) {
+			if (aborted) return;
 			const slot = slotFor(key, work, o);
 			if (slot.running) {
 				slot.again = true;
@@ -212,6 +257,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		},
 
 		async join(key, work, o) {
+			if (aborted) return;
 			const slot = slotFor(key, work, o);
 			// A run that started at or after this call still has its I/O ahead of us, so joining it
 			// is enough; an older run gets a coalesced follow-up carrying this request's work.
@@ -234,6 +280,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		},
 
 		abort() {
+			aborted = true;
 			for (const slot of slots.values()) {
 				slot.running = undefined;
 				slot.again = false;
@@ -401,7 +448,11 @@ export class WriteQueue {
 				try {
 					await fsp.rm(tmp, { force: true });
 				} catch {}
-				this.log?.(`failed to write ${file}: ${err instanceof Error ? err.message : String(err)}`);
+				try {
+					// A throwing logger must not reject a queued write nobody is awaiting: that would
+					// be an unhandled rejection, which crashes the process.
+					this.log?.(`failed to write ${file}: ${err instanceof Error ? err.message : String(err)}`);
+				} catch {}
 			} finally {
 				this.queued--;
 				if (this.queued === 0) {

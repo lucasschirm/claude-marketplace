@@ -1518,12 +1518,20 @@ export default async function (pi: ExtensionAPI) {
 		tasks.run(
 			"backoff-retry",
 			async (signal) => {
-				await settlePendingAutoStarts();
 				if (signal.aborted) return;
-				await pollAllObservedPRs(signal);
-				await checkTrackedBranches(lastCwd, false, signal);
+				// Concurrent, and started on the hook's own tick. In degraded mode `ghHealth` grants a
+				// single retry slot per window to whoever asks first, and each helper pairs
+				// acquire/release itself: serialising these lets the first one burn the slot every round,
+				// and deferring the round to a later tick loses that race to the CI watchers' respawn —
+				// either way the poll stops getting retry attempts for the whole outage. This hook runs
+				// from a ghHealth timer, not from a path Pi awaits, so it does not need the deferral.
+				await Promise.allSettled([
+					settlePendingAutoStarts(),
+					pollAllObservedPRs(signal),
+					checkTrackedBranches(lastCwd, false, signal),
+				]);
 			},
-			{ onError: (msg) => logInternal(msg) },
+			{ onError: (msg) => logInternal(msg), immediate: true },
 		);
 	});
 

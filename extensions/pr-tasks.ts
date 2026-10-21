@@ -918,8 +918,12 @@ export default function (pi: ExtensionAPI) {
 	// health state). No-op after a session shutdown.
 	ghHealth.registerRetryHook(() => {
 		if (prTasksShutdown) return;
+		// immediate: this hook fires from a ghHealth timer (never a path Pi awaits), and in degraded
+		// mode the single retry slot goes to whoever claims it first — a deferred start would hand it
+		// to whatever else wakes in that tick and cost the sync its retry attempt.
 		tasks.schedule(SYNC_ALL_KEY, (signal) => inBackground("gh-backoff", () => refreshAllPRs(signal)), {
 			onError: taskErrorHandler("gh-backoff"),
+			immediate: true,
 		});
 	});
 
@@ -929,6 +933,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_evt, ctx) => {
 		const startedAt = performance.now();
 		try {
+			tasks.resume();
 			prTasksShutdown = false;
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || process.cwd();
@@ -1025,7 +1030,6 @@ export default function (pi: ExtensionAPI) {
 			} catch (err) {
 				logInternal(`[pr_tasks] Failed to send settle loop message: ${err instanceof Error ? err.message : String(err)}`);
 			}
-			checkBudget("agent_before_settle", startedAt);
 			return { continue: true };
 		} catch (err) {
 			// A stale ctx (its ui/cwd getters throw post-replacement) or a dropped in-flight
@@ -1046,10 +1050,14 @@ export default function (pi: ExtensionAPI) {
 
 	// A new prompt from the user re-arms the nudge cap (the nudges themselves arrive as extension input)
 	pi.on("input", (event) => {
+		const startedAt = performance.now();
 		if (event.source !== "extension") {
 			lastNudgeSignature = "";
 			identicalNudgeCount = 0;
 		}
+		// `input` is awaited before the user's prompt runs: this is the path where a stall is felt as
+		// Enter doing nothing, so it is measured too.
+		checkBudget("input", startedAt);
 	});
 
 	pi.on("before_agent_start", (event) => {
