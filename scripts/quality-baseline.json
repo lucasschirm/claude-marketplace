@@ -15,9 +15,9 @@
     "biome.suspicious/noExplicitAny": 147,
     "biome.style/noNonNullAssertion": 6,
     "biome.complexity/noExcessiveCognitiveComplexity": 51,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.complexity/useOptionalChain": 6,
     "biome.suspicious/noConsole": 17,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
@@ -27,7 +27,7 @@
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
     "extensions/lib/gh-health.ts": 280,
-    "extensions/lib/github-review-threads.ts": 524,
+    "extensions/lib/github-review-threads.ts": 590,
     "extensions/lib/orca-client.ts": 576,
     "extensions/lib/pr-tasks-manager.ts": 837,
     "extensions/lib/tool-result.ts": 60,
@@ -58,7 +58,16 @@
         "extensions/lib/gh-health.ts: 280 lines > baseline 274 (files may only shrink)",
         "extensions/lib/github-review-threads.ts: 524 lines > baseline 500 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-21",
+      "reason": "two deliberate widenings in one commit: record biomeConfigHash (debt figures are only comparable to the biome.jsonc that produced them), and let github-review-threads.ts 524->590 after the metadata-identity and resolved-target guards",
+      "changes": [
+        "extensions/lib/github-review-threads.ts: 590 lines > baseline 524 (files may only shrink)",
+        "biome.jsonc changed since these numbers were recorded (unrecorded -> 184447d011b421d7): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
     }
   ],
-  "generatedFrom": "26a1d92"
+  "generatedFrom": "4e1dadd",
+  "biomeConfigHash": "184447d011b421d7"
 }

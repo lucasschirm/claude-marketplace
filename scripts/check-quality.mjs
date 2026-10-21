@@ -24,6 +24,7 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,9 +265,29 @@ function afterInStatement(src, callEnd) {
 // ---------------------------------------------------------------- biome metrics
 
 /** Counts of biome diagnostics per rule over extensions/, or null when biome is unavailable. */
-/** Turns a biome run into per-rule counts, or null when it did not run and a flag when its shape moved. */
+/**
+ * Turns a biome run into per-rule counts over `extensions/`.
+ *
+ * Returns null when biome did not run at all, `{ runFailed, detail }` when it ran but its output must not be
+ * trusted as a measurement, and `{ counts, shapeOk }` otherwise. Everything here fails closed, because every
+ * way this function can read "less debt" than there is turns into a lowered baseline: an exit status that says
+ * the run broke (an unknown rule name in biome.jsonc), diagnostics belonging to some other tree (a stub, a
+ * changed cwd, a path filter), or records whose file or rule we cannot read.
+ */
 function readBiomeDiagnosticJson(res) {
-	if (!res || res.error || typeof res.stdout !== "string" || res.stdout.trim() === "") return null;
+	if (!res || res.error) return null;
+	// Checked before the stdout test: a run that died printing nothing is still a failed run, and reporting it
+	// as "biome is not runnable" sends the reader to install dependencies when the config is what broke.
+	// biome exits 0 when all it found are warnings. A non-zero status means the run itself failed (an unknown
+	// rule name in biome.jsonc, an unreadable path), and its output is not a measurement of anything.
+	if (typeof res.status === "number" && res.status !== 0) {
+		const first =
+			String(res.stderr ?? "")
+				.split("\n")
+				.map((l) => l.trim())
+				.find((l) => l !== "") ?? "(no stderr)";
+		return { runFailed: true, detail: `biome exited ${res.status} - ${first}` };
+	}
 	let parsed;
 	try {
 		parsed = JSON.parse(res.stdout);
@@ -278,14 +299,66 @@ function readBiomeDiagnosticJson(res) {
 	const shapeOk = Array.isArray(parsed) || Array.isArray(parsed?.diagnostics);
 	const diagnostics = Array.isArray(parsed) ? parsed : shapeOk ? parsed.diagnostics : [];
 	const counts = new Map();
+	let ruleless = 0;
+	let pathless = 0;
+	let offTree = 0;
 	for (const d of diagnostics) {
 		const rule = String(d?.category ?? "").replace(/^lint\//, "");
-		if (!rule) continue;
+		if (!rule) {
+			ruleless++;
+			continue;
+		}
+		// biome 2.x puts the path at location.path (a string); older reporters nested it as location.path.file.
+		const loc = d?.location?.path;
+		const file = typeof loc === "string" ? loc : typeof loc?.file === "string" ? loc.file : undefined;
+		if (file === undefined || file === "") {
+			pathless++;
+			continue;
+		}
+		const abs = path.isAbsolute(file) ? path.normalize(file) : path.resolve(ROOT, file);
+		// Only the gated tree counts. Counting files elsewhere reports debt going down while no extension was
+		// touched, which is the same quiet pass as a rule being switched off - just with extra steps.
+		if (!isUnderExtensions(abs)) {
+			offTree++;
+			continue;
+		}
 		counts.set(rule, (counts.get(rule) ?? 0) + 1);
 	}
-	// Diagnostics that cannot be attributed to a rule mean the reporter changed shape. Read as no debt, every
-	// biome metric would become "no longer measured" and the gate would report success.
-	return { counts, shapeOk, unattributed: diagnostics.length > 0 && counts.size === 0 };
+	// The summary is biome's own count of what it found. If it disagrees with the array, the run was capped or
+	// truncated, and a count of a partial run is a count that can only go down.
+	const summary = typeof parsed?.summary === "object" && parsed.summary !== null ? parsed.summary : undefined;
+	if (summary) {
+		const notPrinted = Number(summary.diagnosticsNotPrinted ?? 0);
+		if (notPrinted > 0) {
+			return {
+				runFailed: true,
+				detail: `biome printed ${diagnostics.length} diagnostics and held back ${notPrinted} - the per-rule counts would be wrong`,
+			};
+		}
+		const reported = Number(summary.errors ?? 0) + Number(summary.warnings ?? 0) + Number(summary.infos ?? 0);
+		if (Number.isFinite(reported) && diagnostics.length > 0 && reported !== diagnostics.length) {
+			return {
+				runFailed: true,
+				detail: `biome's summary counts ${reported} diagnostics, the reporter emitted ${diagnostics.length} - the counts are not trustworthy`,
+			};
+		}
+	}
+	if (diagnostics.length > 0 && counts.size === 0) {
+		const why =
+			ruleless === diagnostics.length
+				? `${diagnostics.length} diagnostic(s) carried no lint category - the reporter shape is not the one we read`
+				: pathless > 0
+					? `${pathless} diagnostic(s) carried a rule but no readable file - the reporter shape is not the one we read`
+					: `${diagnostics.length} diagnostic(s) reported and none inside extensions/ (${offTree} outside it) - the run measured something other than the gated tree`;
+		return { runFailed: true, detail: why };
+	}
+	return { counts, shapeOk };
+}
+
+/** True when `abs` is a file inside the tree the biome metrics are supposed to describe. */
+function isUnderExtensions(abs) {
+	const rel = path.relative(path.join(ROOT, "extensions"), abs);
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 /** Per-rule diagnostic counts over extensions/, plus whether the reporter shape was recognised; null when biome cannot run. */
@@ -298,7 +371,7 @@ function biomeRuleCounts() {
 	const override = process.env.PI_QA_FIXTURES === "1" ? process.env.PI_QA_BIOME?.trim() || process.env.PI_QA_BIOME : undefined;
 	if (override) {
 		return readBiomeDiagnosticJson(
-			spawnSync(override, ["lint", "--reporter=json", "extensions"], {
+			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", "extensions"], {
 				cwd: ROOT,
 				encoding: "utf-8",
 				maxBuffer: 32 * 1024 * 1024,
@@ -307,9 +380,11 @@ function biomeRuleCounts() {
 	}
 	const localBin = path.join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "biome.cmd" : "biome");
 	const cmd = fs.existsSync(localBin) ? localBin : "npx";
+	// --max-diagnostics=none: a capped report would understate debt, and undercounting is the failure direction
+	// this whole file is built to refuse.
 	const args = fs.existsSync(localBin)
-		? ["lint", "--reporter=json", "extensions"]
-		: ["--no-install", "biome", "lint", "--reporter=json", "extensions"];
+		? ["lint", "--reporter=json", "--max-diagnostics=none", "extensions"]
+		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", "extensions"];
 
 	const res = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf-8", maxBuffer: 32 * 1024 * 1024 });
 	return readBiomeDiagnosticJson(res);
@@ -726,6 +801,18 @@ const INVARIANTS = [
 
 // ---------------------------------------------------------------- baseline I/O
 
+/** A short fingerprint of biome.jsonc as it stands on disk (raw bytes, so comments and formatting count too). */
+function biomeConfigHash() {
+	try {
+		return createHash("sha256")
+			.update(fs.readFileSync(path.join(ROOT, "biome.jsonc")))
+			.digest("hex")
+			.slice(0, 16);
+	} catch {
+		return "absent";
+	}
+}
+
 /**
  * Whether biome.jsonc still runs a rule ("suspicious/noExplicitAny"). Consulted for the stale-metric check,
  * where the counts are ambiguous. An unreadable config answers "enabled": the conservative direction is to
@@ -774,11 +861,41 @@ function ruleEnabledInConfig(rule) {
 
 function readBaseline() {
 	if (!fs.existsSync(BASELINE_PATH)) return { metrics: {}, files: {}, notes: [] };
+	let parsed;
 	try {
-		return JSON.parse(fs.readFileSync(BASELINE_PATH, "utf-8"));
+		parsed = JSON.parse(fs.readFileSync(BASELINE_PATH, "utf-8"));
 	} catch (err) {
 		fail([`scripts/quality-baseline.json is not valid JSON: ${err.message}`]);
 	}
+	// A metric that is not a finite non-negative integer is not a threshold, it is a bug or an edit: "147 debt"
+	// compared as `value > "147 debt"` -> false -> "ok", and 1e999 parses to Infinity, which is larger than
+	// anything a file can grow to. Both silently delete the gate.
+	const problems = [];
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		problems.push("scripts/quality-baseline.json must contain an object");
+	} else {
+		for (const section of ["metrics", "files"]) {
+			const entries = parsed[section];
+			if (entries === undefined) continue;
+			if (typeof entries !== "object" || entries === null || Array.isArray(entries)) {
+				problems.push(`\`${section}\` must be an object of counts`);
+				continue;
+			}
+			for (const [key, value] of Object.entries(entries)) {
+				if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+					problems.push(
+						`${section}['${key}'] must be a finite non-negative integer, got ${typeof value} ${JSON.stringify(value) ?? String(value)}`,
+					);
+				}
+			}
+		}
+		if (parsed.notes !== undefined && !Array.isArray(parsed.notes)) problems.push("`notes` must be an array");
+		if (parsed.biomeConfigHash !== undefined && typeof parsed.biomeConfigHash !== "string") {
+			problems.push("`biomeConfigHash` must be a string");
+		}
+	}
+	if (problems.length > 0) fail(problems);
+	return parsed;
 }
 
 /** The commit the baseline was captured from, so a stale baseline is at least datable. */
@@ -813,6 +930,11 @@ function collect({ includeBiome }) {
 		if (result === null) {
 			console.error("biome is not runnable (node_modules/.bin/biome missing) - run `npm install` first.");
 			console.error("Source-scanned invariants still ran; biome-derived metrics were skipped.");
+			process.exit(1);
+		}
+		if (result.runFailed) {
+			console.error(`the biome run is not a measurement: ${result.detail}`);
+			console.error("Refusing to read debt numbers out of it - a metric counted from a broken run is a metric that can only go down.");
 			process.exit(1);
 		}
 		if (!result.shapeOk) {
@@ -950,6 +1072,21 @@ function run({ mode, only, reason, full }) {
 		fail(["scripts/quality-baseline.json has no `notes` array - restore it; the ratchet history is not optional"]);
 	}
 
+	// The debt figures are only comparable to the configuration that produced them. Silencing a rule for one
+	// file - `{"includes": ["extensions/tools.ts"], "linter": {"rules": {"suspicious": {"noExplicitAny":
+	// "off"}}}}` - moves the count the same way fixing that file's debt does, and no amount of counting tells
+	// them apart (147 -> 137 was recorded as an improvement with the source untouched). So biome.jsonc is part
+	// of the baseline: change it and re-recording the biome metrics takes a reason, which lands in `notes`.
+	const configHash = biomeConfigHash();
+	const recordedConfigHash = baseline.biomeConfigHash;
+	const baselineHoldsBiome = Object.keys(baseline.metrics ?? {}).some((k) => k.startsWith("biome."));
+	const configDrift = !only && fs.existsSync(BASELINE_PATH) && baselineHoldsBiome && recordedConfigHash !== configHash;
+	if (configDrift) {
+		const msg = `biome.jsonc changed since these numbers were recorded (${recordedConfigHash ?? "unrecorded"} -> ${configHash}): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with \`node scripts/check-quality.mjs --write --reason "what changed and why"\``;
+		if (mode === "write") gatedExtras.push(msg);
+		else problems.push(msg);
+	}
+
 	if (mode === "write") {
 		// --only evaluates one invariant; writing from a partial measurement would drop every other
 		// entry, including all biome.* metrics.
@@ -973,12 +1110,13 @@ function run({ mode, only, reason, full }) {
 				`${gated.length} metric(s) would rise. Lower them, or record the increase with a reason:`,
 				...increasing.map((r) => `  ${r.key}: ${r.allowed} -> ${r.value}`),
 				...gatedExtras.map((m) => `  ${m}`),
-				`  node scripts/check-quality.mjs --write --reason "why this is acceptable"`,
+				`  node scripts/check-quality.mjs --write --reason "what changed, and why it is acceptable"`,
 			]);
 		}
 		const next = {
 			...baseline,
 			generatedFrom: headSha(),
+			biomeConfigHash: biomeConfigHash(),
 			metrics: { ...current.metrics },
 			files: { ...current.files },
 			notes: baseline.notes ?? [],
@@ -1024,10 +1162,29 @@ const mode = argv.includes("--write") ? "write" : "check";
 const full = argv.includes("--full");
 
 if (mode === "write" && reason !== undefined) {
-	if (reason.trim() === "") fail(["--reason must not be empty"]);
-	// `--write --reason --only wiredTests` would otherwise take "--only" for the reason text.
-	if (reason.startsWith("--")) fail([`--reason must be a sentence, not a flag (got '${reason}')`]);
+	const why = reasonProblem(reason);
+	if (why) fail([why]);
 }
 if (only !== undefined && only.startsWith("--")) fail([`--only must name an invariant (see --list), got '${only}'`]);
 
-run({ mode, only, reason, full });
+run({ mode, only, reason: reason?.trim(), full });
+
+/**
+ * A reason is the only record of a widening, and it is read by whoever reviews the next baseline diff. Text
+ * that is merely non-empty is not a record: "." and "why this is acceptable" both authorised ungating in
+ * review, so the bar is a sentence, not a keystroke.
+ */
+function reasonProblem(text) {
+	const t = String(text ?? "").trim();
+	if (t === "") return "--reason must not be empty";
+	// `--write --reason --only wiredTests` would otherwise take "--only" for the reason text.
+	if (t.startsWith("--")) return `--reason must be a sentence, not a flag (got '${t}')`;
+	if (!/[A-Za-z0-9]{3}/.test(t)) return `--reason must say something; '${t}' is punctuation`;
+	const words = t.split(/[^A-Za-z0-9'%.-]+/).filter((w) => w.replace(/\W/g, "").length > 1);
+	if (words.length < 4) return `--reason must be a sentence of at least four words (got '${t}')`;
+	if (t.length < 24) return `--reason must be at least 24 characters of explanation (got ${t.length}: '${t}')`;
+	// No placeholder blacklist: every list of "banned vague words" rejects the honest short note and admits the
+	// vague sentence long enough to slip past. Length plus word count is the blunt instrument, and the actual
+	// reviewer of a widened baseline is a human reading `notes`.
+	return undefined;
+}
