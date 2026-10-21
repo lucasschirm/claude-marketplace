@@ -443,10 +443,15 @@ process.exit(0);
 	console.log("\n=== Test 7: Testing unblocking on user reply ===");
 	fs.writeFileSync(path.join(stateDir, "user_replied_to_blocked"), "1");
 
-	// Trigger turn_end to sync
+	// Trigger turn_end to sync. turn_end schedules the refresh instead of awaiting it (an awaited
+	// sync here stalls Pi between every turn), so the test waits for the background work to settle.
 	const turnEndHandlers = eventHandlers["turn_end"] || [];
 	for (const handler of turnEndHandlers) {
 		await handler({ type: "turn_end" }, toolCtx);
+	}
+	if (!(await (globalThis as any).__PI_PR_TASKS_FLUSH__(15_000))) {
+		console.error("Test 7 Failed: background sync scheduled by turn_end did not finish");
+		process.exit(1);
 	}
 
 	console.log("Sent agent messages after sync:", sentMessages);

@@ -1,27 +1,26 @@
 import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
 import { evaluateCiVerdict } from "./lib/ci-verdict.ts";
 import { logError } from "./lib/extension-log.ts";
+import { commandExists, createTaskScope, mapLimited, reportBudgetViolation } from "./lib/nonblocking.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
 // A hung gh call (network) must not wedge a poll loop or the serialized branch check
 const GH_TIMEOUT_MS = 60_000;
-
-function isCommandAvailable(cmd: string): boolean {
-	try {
-		const checkTool = process.platform === "win32" ? "where" : "which";
-		execFileSync(checkTool, [cmd], { stdio: "ignore" });
-		return true;
-	} catch {
-		return false;
-	}
-}
+// How long a background round may keep starting new gh calls. Boot is held to a tighter budget:
+// it must never be what makes `pi` feel frozen (see extensions/lib/nonblocking.ts).
+const POLL_BUDGET_MS = Number.parseInt(process.env.PI_OBSERVE_PR_POLL_BUDGET_MS ?? "", 10) || 90_000;
+const BOOT_BUDGET_MS = Number.parseInt(process.env.PI_EXT_BOOT_BUDGET_MS ?? "", 10) || 5_000;
+// Observed PRs polled per round (a serial round multiplies one slow call by the PR count).
+const POLL_CONCURRENCY = 2;
+// Budgets for the lifecycle paths Pi awaits.
+const CRITICAL_BUDGET_MS: Record<string, number> = { session_start: 20, input: 10, turn_end: 20 };
 
 interface CommentInfo {
 	id: string;
@@ -173,7 +172,7 @@ class PRObserverDashboardComponent {
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
 	// Register configurable CLI flag for watch/poll intervals
 	try {
 		pi.registerFlag("pr-observer-interval", {
@@ -229,9 +228,35 @@ export default function (pi: ExtensionAPI) {
 	// Any agent run has started. A startup check finishing later than that falls back to the normal delayed announcement.
 	let sessionHasRun = false;
 	let disposed = false;
-	// The session_start branch check; the first plain user message waits briefly for it so the notice isn't missed.
-	let startupCheck: Promise<void> | undefined;
-	const STARTUP_CHECK_WAIT_MS = 5000;
+
+	// Every gh round this extension starts lives here, never on a path Pi awaits: the outcome lands
+	// afterwards as a status line, a tracking notice or a steer message.
+	const tasks = createTaskScope("observe_pr", {
+		onError: (msg) => logInternal(msg),
+		budgetMs: POLL_BUDGET_MS,
+	});
+
+	// Tripwire for future changes: a critical-path handler that starts awaiting I/O again is reported
+	// once (file log) instead of silently stalling every boot, message or turn.
+	function checkBudget(event: string, startedAt: number): void {
+		reportBudgetViolation(
+			"observe_pr",
+			event,
+			performance.now() - startedAt,
+			CRITICAL_BUDGET_MS[event] ?? 20,
+			logInternal,
+		);
+	}
+
+	// A startup branch check that finishes after the user already started a turn has no message left
+	// to ride on: deliver its notices the normal way rather than holding them (and the PR updates they
+	// gate) back indefinitely. Before any turn started they stay deferred for the next plain message.
+	function releaseLateStartupNotices(): void {
+		if (disposed || !sessionHasRun || deferredAnnouncements.size === 0) return;
+		const prNumbers = Array.from(deferredAnnouncements.keys());
+		suppressUpdates = false;
+		for (const prNumber of prNumbers) announceTracking(prNumber);
+	}
 
 	// ---- Stale-context safety -------------------------------------------
 	// pi invalidates the extension runtime on session replacement/reload
@@ -319,7 +344,9 @@ export default function (pi: ExtensionAPI) {
 	// File-only log for internal errors, so failures stay silent in the TUI but remain
 	// debuggable (extension-log). GitHub availability failures are handled by ghHealth
 	// (silent + paced retry) and never logged here.
-	function logInternal(what: string, err: unknown) {
+	// `err` is optional so this also serves as the task scope's logger, which reports a bare
+	// message instead of an error object.
+	function logInternal(what: string, err?: unknown) {
 		logError(EXT_LOG_SCOPE, what, err);
 	}
 
@@ -453,7 +480,6 @@ export default function (pi: ExtensionAPI) {
 		userTurnPending = false;
 		noticeAttachBroken = false;
 		sessionHasRun = false;
-		startupCheck = undefined;
 		// Invalidate in-flight branch checks and clear the re-entry guard so the incoming
 		// session's own startup check is not skipped by a stale one.
 		stateGeneration++;
@@ -517,8 +543,12 @@ export default function (pi: ExtensionAPI) {
 
 			observedPRs.set(pr.prNumber, pr);
 			startChecksProcess(pr);
+			// Tracked by the scope: single-flight per PR, aborted with the session, never on a path Pi awaits.
 			pr.pollTimer = setInterval(() => {
-				guardAsync("pollPR", pollPR(pr.prNumber));
+				tasks.schedule(`poll-${pr.prNumber}`, async (signal) => {
+					if (signal.aborted || disposed) return;
+					await pollPR(pr.prNumber);
+				});
 			}, getObserverInterval() * 1000);
 			// In-flight runs survive the restart: re-watching is silent for already-reported runs
 			// (the watchRun close handler dedups on failedRuns/completedRuns).
@@ -1102,7 +1132,10 @@ export default function (pi: ExtensionAPI) {
 
 		const interval = getObserverInterval();
 		pr.pollTimer = setInterval(() => {
-			guardAsync("pollPR", pollPR(prNumber));
+			tasks.schedule(`poll-${prNumber}`, async (signal) => {
+				if (signal.aborted || disposed) return;
+				await pollPR(prNumber);
+			});
 		}, interval * 1000);
 
 		// Restore re-registers observed PRs directly (seeding the dedup sets) without going
@@ -1190,7 +1223,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	async function checkTrackedBranches(cwd: string, deferAnnouncements = false) {
+	async function checkTrackedBranches(cwd: string, deferAnnouncements = false, signal?: AbortSignal) {
 		// A stale context must not throw here (runs from timers, the backoff retry hook and
 		// turn_end): abort silently.
 		const activeTools = tryPi("checkTrackedBranches", () => pi.getActiveTools(), undefined);
@@ -1221,6 +1254,8 @@ export default function (pi: ExtensionAPI) {
 			if (!branches) return;
 
 			for (const branch of Array.from(branches)) {
+				// A superseded round stops starting work; a gh call already running ends on its own timeout.
+				if (signal?.aborted || disposed) return;
 				const cacheKey = `${repoRoot}:${branch}`;
 				const knownPr = branchToPR.get(cacheKey);
 				if (knownPr && (observedPRs.has(knownPr) || stoppedPRs.has(knownPr))) {
@@ -1321,11 +1356,12 @@ export default function (pi: ExtensionAPI) {
 		if (branchPollTimer) clearInterval(branchPollTimer);
 		const interval = getObserverInterval();
 		branchPollTimer = setInterval(() => {
-			guardAsync("checkTrackedBranches", checkTrackedBranches(lastCwd));
+			tasks.schedule("branch-check", (signal) => checkTrackedBranches(lastCwd, false, signal));
 		}, interval * 1000);
 	}
 
 	pi.on("session_start", (_evt, ctx) => {
+		const startedAt = performance.now();
 		try {
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || process.cwd();
@@ -1337,10 +1373,21 @@ export default function (pi: ExtensionAPI) {
 			// readers (e.g. pr-tasks) need it to exist after an in-process session switch.
 			(globalThis as any).__PI_OBSERVED_PRS__ = observedPRs;
 			updateStatusUI(ctx.ui);
-			startupCheck = checkTrackedBranches(lastCwd, true).catch((err) => {
-				if (!isStaleError(err)) logInternal("Startup branch check failed", err);
-			});
+			// Detached on purpose: Pi awaits session_start before it paints the restored transcript, so
+			// branch/PR discovery may only affect the TUI after it completes (a tracking notice rides the
+			// user's next plain message, or arrives as a steer message if a turn started meanwhile).
+			tasks.run(
+				"startup-branch-check",
+				async (signal) => {
+					await checkTrackedBranches(lastCwd, true, signal);
+					if (!signal.aborted) releaseLateStartupNotices();
+				},
+				{ budgetMs: BOOT_BUDGET_MS, onError: (msg) => logInternal(msg) },
+			);
 			startBranchPollTimer();
+			// (test hook: startup/poll work is deliberately not awaited, so tests wait for quiescence instead)
+			(globalThis as any).__PI_OBSERVE_PR_FLUSH__ = (timeoutMs?: number) => tasks.flush(timeoutMs);
+			checkBudget("session_start", startedAt);
 		} catch (err) {
 			// A stale ctx (its ui/cwd/sessionManager getters throw post-replacement) must not
 			// surface as a handler error in the TUI.
@@ -1360,18 +1407,9 @@ export default function (pi: ExtensionAPI) {
 			if (noticeAttached) noticeAttachBroken = true;
 			return { action: "continue" };
 		}
-		if (startupCheck) {
-			const check = startupCheck;
-			startupCheck = undefined;
-			let timer: NodeJS.Timeout | undefined;
-			await Promise.race([
-				check,
-				new Promise<void>((resolve) => {
-					timer = setTimeout(resolve, STARTUP_CHECK_WAIT_MS);
-				}),
-			]);
-			if (timer) clearTimeout(timer);
-		}
+		// Never wait for the startup branch check here: `input` is awaited before the prompt runs, so a
+		// wait is the user's Enter key hanging. A notice that is not known yet simply rides the next
+		// plain message, and if a turn started first it arrives as a steer message.
 		// A message queued while the agent is streaming starts no new turn, so keep the notice for an idle one.
 		if (!idle || deferredAnnouncements.size === 0) {
 			if (noticeAttached) noticeAttachBroken = true;
@@ -1421,12 +1459,14 @@ export default function (pi: ExtensionAPI) {
 		noticeAttachBroken = false;
 	});
 
-	async function pollAllObservedPRs() {
+	async function pollAllObservedPRs(signal?: AbortSignal): Promise<void> {
 		// (degraded: at most one PR gets the slot per backoff slot — a long outage
 		// starves later PRs deterministically; harmless, since all calls fail alike)
-		for (const prNumber of Array.from(observedPRs.keys())) {
+		// Bounded fan-out: with several observed PRs a serial round multiplies one slow gh call.
+		await mapLimited(Array.from(observedPRs.keys()), POLL_CONCURRENCY, async (prNumber) => {
+			if (signal?.aborted || disposed) return;
 			await pollPR(prNumber);
-		}
+		});
 	}
 
 	async function settlePendingAutoStarts() {
@@ -1473,17 +1513,36 @@ export default function (pi: ExtensionAPI) {
 	// own slot, so at most one extension's work runs per slot.
 	ghHealth.registerRetryHook(() => {
 		if (disposed) return;
-		guardAsync("settlePendingAutoStarts", settlePendingAutoStarts());
-		guardAsync("pollAllObservedPRs", pollAllObservedPRs());
-		guardAsync("checkTrackedBranches", checkTrackedBranches(lastCwd));
+		// The retry runs detached too: when it succeeds it releases exactly the notifications
+		// this round would have delivered.
+		tasks.run(
+			"backoff-retry",
+			async (signal) => {
+				await settlePendingAutoStarts();
+				if (signal.aborted) return;
+				await pollAllObservedPRs(signal);
+				await checkTrackedBranches(lastCwd, false, signal);
+			},
+			{ onError: (msg) => logInternal(msg) },
+		);
 	});
 
 	pi.on("turn_end", async (_evt, ctx) => {
+		const startedAt = performance.now();
 		try {
 			if (ctx?.cwd) lastCwd = ctx.cwd;
 			if (ctx?.ui) lastUIContext = ctx.ui;
-			await pollAllObservedPRs();
-			await checkTrackedBranches(lastCwd);
+			// Polling is scheduled, not awaited: an awaited round keeps Pi busy after every turn,
+			// while its only effects (a status line, a notification) land later anyway.
+			tasks.schedule(
+				"poll-round",
+				async (signal) => {
+					await pollAllObservedPRs(signal);
+					await checkTrackedBranches(lastCwd, false, signal);
+				},
+				{ onError: (msg) => logInternal(msg) },
+			);
+			checkBudget("turn_end", startedAt);
 		} catch (err) {
 			// A handler error would surface as an extension error in the TUI; internal
 			// failures stay in the file log.
@@ -1554,10 +1613,15 @@ export default function (pi: ExtensionAPI) {
 		noticeAttached = false;
 		userTurnPending = false;
 		sessionHasRun = false;
-		startupCheck = undefined;
+		// Stop every gh round in flight: its results belong to the session that is going away.
+		tasks.abort();
+		// State was already persisted at the moment of the last change; reset without appending
+		// another entry to the session that is shutting down.
+		resetObserverState();
 		lastUIContext = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_OBSERVED_PRS__;
+		delete (globalThis as any).__PI_OBSERVE_PR_FLUSH__;
 	});
 
 	pi.registerTool({
@@ -1803,7 +1867,9 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	if (isCommandAvailable("requestdb")) {
+	// PATH probes are async on purpose: a `which` subprocess here runs before the TUI exists, on every
+	// `pi` invocation that loads this package (Pi awaits the factory before startup continues).
+	if (await commandExists("requestdb")) {
 		pi.registerTool({
 			name: "requestdb",
 			label: "Request DB",
@@ -1843,7 +1909,7 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	if (isCommandAvailable("destroydb")) {
+	if (await commandExists("destroydb")) {
 		pi.registerTool({
 			name: "destroydb",
 			label: "Destroy DB",
