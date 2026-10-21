@@ -442,6 +442,13 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	 */
 	function stopCheckProcess() {
 		checkSpawnSeq++;
+		// A `check --wait` exit schedules a respawn a second later whenever a run still looks live.
+		// Stopping has to cancel that too, or the timer spawns a fresh 900 s watcher for a run the
+		// user just stopped — and its deliveries would steer into the stopped session.
+		if (restartCheckTimer) {
+			clearTimeout(restartCheckTimer);
+			restartCheckTimer = undefined;
+		}
 		if (checkProcess) {
 			try {
 				checkProcess.kill("SIGTERM");
@@ -630,6 +637,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				["orchestration", "worker-list"],
 				{ cwd: lastCwd },
 			);
+			// The round-trip is the abortable part: `session_shutdown` can land inside it, and the
+			// context is still live during the shutdown emit, so without this a torn-down session gets
+			// its registry mutated and steer messages queued after it was supposed to stop.
+			if (signal?.aborted || disposed) return;
 
 			const rows: OrcaWorkerRow[] =
 				res.ok && res.result
@@ -640,6 +651,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				for (const row of rows) {
 					const dId = row.dispatchId;
 					if (!dId) continue;
+					// One row at a time, because the notify below is the part the user feels.
+					if (signal?.aborted || disposed) return;
 
 					let w = observedWorkers.get(dId);
 					const verdict = row.projection?.liveness?.verdict;

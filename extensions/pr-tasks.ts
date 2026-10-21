@@ -986,7 +986,6 @@ export default function (pi: ExtensionAPI) {
 				onError: taskErrorHandler("agent_before_settle"),
 			});
 			updateStatusUI(ctx?.ui);
-			checkBudget("agent_before_settle", startedAt);
 
 			const unresolvedTasks = manager.getUnresolvedTasks();
 			if (unresolvedTasks.length === 0) {
@@ -1036,8 +1035,10 @@ export default function (pi: ExtensionAPI) {
 			// sync: stale is the first stale detection (tear down); the rest stay in the file log.
 			if (isStaleError(err)) handleStaleContext("agent_before_settle");
 			else logInternal(`[pr_tasks] agent_before_settle failed: ${err instanceof Error ? err.message : String(err)}`);
+		} finally {
+			// finally, so every exit of the handler is measured — the early returns are the common path.
+			checkBudget("agent_before_settle", startedAt);
 		}
-		checkBudget("agent_before_settle", startedAt);
 	});
 
 	const PROMPT_GUIDELINES =

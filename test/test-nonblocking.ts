@@ -26,6 +26,17 @@ import {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+interface Deferred<T> {
+	promise: Promise<T>;
+	resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+	let resolve: (value: T) => void = () => {};
+	const promise = new Promise<T>((r) => (resolve = r));
+	return { promise, resolve };
+}
+
 test("work starts on a later event-loop turn, never inside the caller's turn", async () => {
 	// Pi awaits lifecycle handlers, and everything a task does before its first real await would run
 	// inside that awaited handler. A microtask yield is not enough (Pi's own continuation is a
@@ -73,7 +84,6 @@ test("abort() is sticky and resume() reopens the scope", async () => {
 	scope.abort();
 	scope.run("after-abort", work);
 	scope.schedule("after-abort-key", work);
-	await scope.join("after-abort-join", work);
 	await sleep(50);
 	assert.equal(runs, 0, "nothing may start on an aborted scope");
 	assert.equal(pendingTasks(), 0);
@@ -153,13 +163,43 @@ test("schedule() coalesces: at most one in flight, at most one queued (latest wo
 		if (!signal.aborted) finished.push(id);
 		inFlight--;
 	};
+	// All six land in the same tick, before the deferred body of the first one starts: they replace
+	// what that run does rather than queueing behind it, so the work happens once.
 	for (let i = 1; i <= 6; i++) scope.schedule("refresh", mk(i));
 	assert.equal(await scope.flush(5_000), true);
 	assert.equal(maxInFlight, 1, "a single-flight key must never overlap itself");
-	// Latest request wins: work is read when a run starts, so requests 2-5 superseded the first run
-	// before it began (it runs 6) and only one coalesced follow-up is queued behind it.
-	assert.deepEqual(finished, [6, 6], "no run for superseded requests, exactly one follow-up");
+	assert.deepEqual(finished, [6], "superseded requests must not add runs");
 });
+
+test("schedule() during a running round queues exactly one follow-up with the newest work", async () => {
+	const scope = createTaskScope("t-schedule-queued");
+	const finished: number[] = [];
+	let releaseFirst: () => void = () => {};
+	const first = new Promise<void>((resolve) => (releaseFirst = resolve));
+	scope.schedule("refresh", async (signal) => {
+		finished.push(1);
+		await first;
+		if (!signal.aborted) return;
+	});
+	await sleep(10); // let the run enter its body, so it counts as in flight
+	const gate = deferred<number>();
+	scope.schedule("refresh", mkPush(finished, 2, gate));
+	scope.schedule("refresh", mkPush(finished, 3, gate));
+	assert.equal(pendingTasks(), 1, "the queued follow-up counts as pending, not two");
+	releaseFirst();
+	await sleep(20);
+	gate.resolve(0);
+	assert.equal(await scope.flush(5_000), true);
+	// One follow-up only, carrying the latest request's work (3).
+	assert.deepEqual(finished, [1, 3]);
+});
+
+function mkPush(sink: number[], id: number, wait: Deferred<number>) {
+	return async (signal: AbortSignal) => {
+		await wait.promise;
+		if (!signal.aborted) sink.push(id);
+	};
+}
 
 test("pending/flushAllTasks observe every scope", async () => {
 	const a = createTaskScope("a");
@@ -211,18 +251,6 @@ test("budget expiry aborts the run and reports the overrun once", async () => {
 	assert.equal(sawAbort, true, "the budget must abort the run, not just stop waiting for it");
 	assert.deepEqual(budgets, ["hangs:120"], "the overrun is reported once");
 	assert.deepEqual(errors, [], "an aborted task is not reported as a failure");
-});
-
-test("join() waits for a fresh run and coalesces concurrent callers", async () => {
-	const scope = createTaskScope("t-join");
-	let calls = 0;
-	const work = async () => {
-		calls++;
-		await sleep(40);
-	};
-	const results = await Promise.all([scope.join("k", work), scope.join("k", work), scope.join("k", work)]);
-	assert.equal(calls, 1, "concurrent joins must share one run");
-	assert.deepEqual(results, [undefined, undefined, undefined]);
 });
 
 test("mapLimited bounds fan-out concurrency and collects per-item errors", async () => {

@@ -2526,6 +2526,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// Global PR closed hook to clean up worktrees whose PRs are merged or closed
 	(globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ = async (prNumber: number, state: string) => {
+		// Called from observe-pr's detached poll tasks. Recovery may still be rebuilding `sessions`,
+		// and a session it has not re-added yet would simply be skipped here — a permanent miss, since
+		// this hook does not fire twice for one PR close. Same gate as every other mutating path.
+		await recoveryDone;
 		for (const [sId, meta] of sessions.entries()) {
 			if (!meta.worktreePath || meta.worktreeStatus !== "active") continue;
 			if (meta.status === "running" || meta.status === "stalled") {

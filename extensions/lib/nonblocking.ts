@@ -59,7 +59,7 @@ interface Running {
 }
 
 interface Slot {
-	running?: { promise: Promise<void>; seq: number };
+	running?: { promise: Promise<void>; seq: number; started: boolean };
 	/** A request arrived while a run was in flight: run exactly one more time afterwards. */
 	again: boolean;
 	/** Latest request wins: the coalesced follow-up runs the newest caller's work. */
@@ -88,13 +88,6 @@ export interface TaskScope {
 	 * argument that changes the result in the key).
 	 */
 	schedule(key: string, work: TaskWork, opts?: RunOptions): void;
-	/**
-	 * Awaitable single-flight for agent-initiated paths (tools) — the one place where
-	 * waiting is correct. It joins a run that started at or after this call (its I/O is
-	 * still ahead of us, so the state cannot be older than the request) and otherwise waits
-	 * for the coalesced follow-up that carries this call's work.
-	 */
-	join(key: string, work: TaskWork, opts?: RunOptions): Promise<void>;
 	/**
 	 * Abort everything in flight and drop the single-flight bookkeeping (session_shutdown).
 	 * Sticky: nothing may start on an aborted scope, so a callback that outlived the session
@@ -198,12 +191,20 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		const work = slot.work;
 		if (!work || aborted) return undefined;
 		const startedSeq = ++seq;
+		// Registered before the work starts (an `immediate` task is already running by the time
+		// `start` returns) and marked when the body is actually entered: `schedule` needs to tell a
+		// run whose I/O is still ahead of it from one that is genuinely in flight.
+		const holder = { promise: Promise.resolve(), seq: startedSeq, started: false };
+		slot.running = holder;
 		const entry = start(
 			key,
-			(signal) => (slot.work as TaskWork)(signal),
+			(signal) => {
+				holder.started = true;
+				return (slot.work as TaskWork)(signal);
+			},
 			slot.opts,
 		);
-		slot.running = { promise: entry.promise, seq: startedSeq };
+		holder.promise = entry.promise;
 		void entry.promise.finally(() => {
 			// Only clear our own generation: abort() may already have reset this slot.
 			if (slot.running?.seq === startedSeq) slot.running = undefined;
@@ -250,33 +251,14 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 			if (aborted) return;
 			const slot = slotFor(key, work, o);
 			if (slot.running) {
+				// The run has not entered its body yet, so `slotFor` has already replaced what it will
+				// do. Queuing a follow-up as well would run the same work twice back to back — which is
+				// what `turn_end` + `agent_before_settle` (adjacent emits, same key) would do every turn.
+				if (!slot.running.started) return;
 				slot.again = true;
 				return;
 			}
 			begin(slot, key);
-		},
-
-		async join(key, work, o) {
-			if (aborted) return;
-			const slot = slotFor(key, work, o);
-			// A run that started at or after this call still has its I/O ahead of us, so joining it
-			// is enough; an older run gets a coalesced follow-up carrying this request's work.
-			const seen = seq;
-			for (let round = 0; round < 3; round++) {
-				if (!slot.running) {
-					const started = begin(slot, key);
-					if (started) await started.promise;
-					return;
-				}
-				if (slot.running.seq >= seen) {
-					await slot.running.promise;
-					return;
-				}
-				// In flight but stale for us: its finish starts the follow-up carrying *our*
-				// work (latest wins), which this loop joins on the next round.
-				slot.again = true;
-				await slot.running.promise;
-			}
 		},
 
 		abort() {
@@ -329,9 +311,12 @@ export function reportBudgetViolation(
 	const key = `${label}:${event}`;
 	if (reportedViolations.has(key)) return;
 	reportedViolations.add(key);
-	log(
-		`[${label}] "${event}" took ${Math.round(elapsedMs)} ms (budget ${budgetMs} ms): this stalls Pi's ${event} boundary — move the work to a background task`,
-	);
+	// Called from lifecycle handlers: a tripwire that throws would take the user's turn down with it.
+	try {
+		log(
+			`[${label}] "${event}" took ${Math.round(elapsedMs)} ms (budget ${budgetMs} ms): this stalls Pi's ${event} boundary — move the work to a background task`,
+		);
+	} catch {}
 }
 
 /** Tests: allow violations to be reported again (one process runs many cases). */

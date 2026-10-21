@@ -1366,6 +1366,9 @@ export default async function (pi: ExtensionAPI) {
 			lastUIContext = ctx.ui;
 			lastCwd = ctx.cwd || process.cwd();
 			disposed = false;
+			// session_shutdown aborts the scope and `abort` is sticky; without this a session that
+			// reuses the instance would silently never branch-check, poll or re-watch again.
+			tasks.resume();
 			// Rebuild in-memory state from this session's persisted entries before the branch check,
 			// so resumed observation is silent and stopped PRs stay stopped.
 			restoreState(ctx.sessionManager);
@@ -1622,10 +1625,9 @@ export default async function (pi: ExtensionAPI) {
 		userTurnPending = false;
 		sessionHasRun = false;
 		// Stop every gh round in flight: its results belong to the session that is going away.
+		// (resetObserverState() already ran above — it is the first thing done, so a throw later in
+		// this handler cannot leave timers and watchers pointing at the torn-down context.)
 		tasks.abort();
-		// State was already persisted at the moment of the last change; reset without appending
-		// another entry to the session that is shutting down.
-		resetObserverState();
 		lastUIContext = undefined;
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_OBSERVED_PRS__;

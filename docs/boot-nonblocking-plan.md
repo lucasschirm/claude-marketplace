@@ -342,3 +342,48 @@ The first review found real defects; all of them are fixed here.
 
 `schedule()` semantics were also pinned down: work is read when a run actually starts, so requests
 that arrive before it began do not add a run — they replace what it does (latest request wins).
+
+## 9. Review round 2 (Devin `swe-2-max`)
+
+Round 2 confirmed the non-blocking goal ("no lifecycle handler or factory awaits network/subprocess
+I/O") but caught two round-1 claims that were **not actually in the code** — both lost while the
+branch was rebuilt on `origin/main` — plus four more defects. Fixed here:
+
+1. **`releaseLateStartupNotices()` still did not consume the notice.** It sent the steer but left the
+   `deferredAnnouncements` entry and `pr.announced === false`, so the next plain message attached the
+   identical text and a persisted `announced: false` made a resume deliver it again. It now mirrors
+   what `agent_start` does for a notice that rode the user's message: mark announced, delete the
+   entries it delivered (snapshot first, so a PR deferred in *during* the loop still owes an
+   announcement), and persist.
+2. **`tasks.resume()` was missing from observe-pr's `session_start`** while its `session_shutdown`
+   calls the now-sticky `tasks.abort()` — an instance reused across sessions would silently never
+   branch-check, poll or re-watch again. (Stock Pi re-runs the factory per session, so this is
+   defensive; the asymmetry with the other three extensions was the real signal.)
+3. **`reconcileWorkers` checked the abort signal only on entry.** After the awaited `worker-list`
+   round-trip it mutated the registry and sent coordinator steers unconditionally — and the context is
+   still live during the `session_shutdown` emit, so a stopped session could be steered. It now
+   returns after the round-trip and before each row's notify.
+4. **`stopCheckProcess()` left a pending respawn timer.** A `check --wait` exit schedules a respawn
+   one second later while a run looks live; stopping inside that window still spawned a fresh 900 s
+   watcher whose deliveries steered into the stopped session. `stopCheckProcess` now clears
+   `restartCheckTimer` too.
+5. **`__PI_ON_PR_CLOSED_DEVIN__` mutated state without the recovery gate.** A poll that detects a
+   merged PR during detached recovery iterated a partially restored `sessions` map, so sessions not
+   yet re-added had their worktrees never released for that close (the hook does not fire twice). It
+   now awaits `recoveryDone` — correct because it is only invoked from detached poll tasks.
+6. **`settlePendingAutoStarts()` released its `ghHealth` slot outside a `finally`.** A throw from
+   `startObserving`/`announceTracking` would leave `inFlight` set on the process-wide singleton,
+   starving every later degraded-mode retry for *both* extensions permanently. Now `try/finally`.
+
+Nits also taken: the two `commandExists` PATH probes in observe-pr's factory run concurrently instead
+of serially on the awaited factory path; the `input` tripwire is wired in observe-pr too; the
+`agent_before_settle` measurement moved to a `finally` (its early returns were skipping it);
+`reportBudgetViolation` cannot throw through a lifecycle handler; the duplicated `resetObserverState()`
+in `session_shutdown` is gone; and **`TaskScope.join()` was deleted** — pr-tasks' `syncAllInFlight`
+already provides awaited single-flight for tool paths, so it was unused API.
+
+`schedule()` coalescing was tightened to match its documented contract: a request that arrives before
+the deferred body of the current round has *entered* replaces that round's work instead of queueing a
+follow-up. Previously `turn_end` and `agent_before_settle` — adjacent emits sharing `SYNC_ALL_KEY` —
+caused two full `gh pr view` fan-outs back to back on every turn end. Scheduling during a round that
+has actually entered still queues exactly one follow-up carrying the newest work.
