@@ -23,26 +23,30 @@ const args = process.argv.slice(2);
 if (args[0] === 'orchestration' && args[1] === 'check' && args.includes('--wait')) {
   // Emit keepalive
   console.log(JSON.stringify({ _keepalive: true }));
-  // Emit worker_done message delivery
-  const delivery = {
-    ok: true,
-    result: {
-      deliveryId: 'del-mock-1',
-      messages: [
-        {
-          id: 'msg-done-1',
-          type: 'worker_done',
-          dispatchId: 'ctx-mock-1',
-          taskId: 'task-mock-1',
-          outcome: 'succeeded',
-          summary: 'Unit tests passed successfully.',
-          filesModified: ['src/index.ts']
-        }
-      ]
-    }
-  };
-  console.log(JSON.stringify(delivery));
-  process.exit(0);
+  // Delay the completion so a reconcile between dispatch and completion (test 4b)
+  // lands while the worker is still "running" and can assert the attention steer.
+  setTimeout(() => {
+    // Emit worker_done message delivery
+    const delivery = {
+      ok: true,
+      result: {
+        deliveryId: 'del-mock-1',
+        messages: [
+          {
+            id: 'msg-done-1',
+            type: 'worker_done',
+            dispatchId: 'ctx-mock-1',
+            taskId: 'task-mock-1',
+            outcome: 'succeeded',
+            summary: 'Unit tests passed successfully.',
+            filesModified: ['src/index.ts']
+          }
+        ]
+      }
+    };
+    console.log(JSON.stringify(delivery));
+    process.exit(0);
+  }, 1000);
 }
 
 // orchestration run-current
@@ -71,10 +75,14 @@ if (args[0] === 'orchestration' && args[1] === 'worker-start') {
 }
 
 // orchestration worker-list
+// Returns a worker from this session's run plus a worker from ANOTHER session's run
+// with a pending attention category. An unbound session must stay silent about the
+// foreign worker; a bound session must alert only for its own.
 if (args[0] === 'orchestration' && args[1] === 'worker-list') {
   console.log(JSON.stringify({
     ok: true,
     result: {
+      scope: { source: args.includes('--run') ? 'flag' : 'all' },
       workers: [
         {
           dispatchId: 'ctx-mock-1',
@@ -84,7 +92,20 @@ if (args[0] === 'orchestration' && args[1] === 'worker-list') {
           projection: {
             stage: { worker: 'running' },
             outcome: null,
-            liveness: { verdict: 'live' }
+            liveness: { verdict: 'live' },
+            attention: { categories: ['blocked'], requiresAction: true }
+          }
+        },
+        {
+          dispatchId: 'ctx-mock-foreign',
+          taskId: 'task-mock-foreign',
+          runId: 'run-other-session',
+          terminalState: 'active',
+          projection: {
+            stage: { worker: 'running' },
+            outcome: null,
+            liveness: { verdict: 'unverifiable' },
+            attention: { categories: ['unverifiable'], requiresAction: true }
           }
         }
       ]
@@ -205,7 +226,10 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 `;
 
 	fs.writeFileSync(mockOrcaBin, mockScript, { mode: 0o755 });
+	// `ORCA_CLI_COMMAND` wins over `ORCA_BIN` in resolveOrcaCmd: pin both so a host with a
+	// live Orca CLI configured still exercises the mock (the test is fully mocked by design).
 	process.env.ORCA_BIN = mockOrcaBin;
+	process.env.ORCA_CLI_COMMAND = mockOrcaBin;
 
 	let eventListeners: Record<string, Function[]> = {};
 
@@ -302,6 +326,21 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			);
 			console.log("✓ Prompt guideline correctly injected");
 
+			// 2b. Unbound session isolation: with no bound run, `worker-list` is scoped to every
+			// Run on the host, and the extension must neither register nor steer about
+			// another session's workers.
+			console.log("Test 2b: Testing unbound session isolation...");
+			await registeredCommand.handler("status", mockCtx);
+			assert.ok(
+				notifiedMessages.some((m) => m.includes("Run: None") && m.includes("0 running")),
+				"Unbound session should report no run and no observed workers",
+			);
+			assert.ok(
+				!sentMessages.some((m) => m.content.includes("Attention required")),
+				"Unbound session must not receive attention steers for foreign workers",
+			);
+			console.log("✓ Unbound session stayed isolated from other sessions' workers");
+
 			// 4. Test orca_orchestration_dispatch Tool Execution
 			console.log("Test 4: Testing orca_orchestration_dispatch execution...");
 			const dispatchTool = registeredTools.get("orca_orchestration_dispatch")!;
@@ -320,6 +359,28 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			assert.match(dispatchRes.content[0].text, /Worker successfully dispatched/);
 			assert.match(dispatchRes.content[0].text, /Dispatch ID: ctx-mock-1/);
 			console.log("✓ orchestration_dispatch dispatched worker and returned receipt");
+
+			// 4b. Bound session scoping: reconcile must alert for the own run's worker and
+			// ignore the foreign session's worker even though the CLI lists both.
+			console.log("Test 4b: Testing bound session scoping...");
+			// Settle the boot-discovery background task first: `reconcileWorkers` is single-flight, so a
+			// round still in flight (which saw the unbound state) would make this call return early.
+			// 5 s matches the boot task's budget, so a slow machine cannot make this race flake.
+			await (globalThis as any).__PI_ORCA_ORCHESTRATION_FLUSH__(5000);
+			await registeredCommand.handler("status", mockCtx);
+			assert.ok(
+				sentMessages.some((m) => m.content.includes("Attention required for worker ctx-mock-1")),
+				"Bound session should receive an attention steer for its own worker",
+			);
+			assert.ok(
+				!sentMessages.some((m) => m.content.includes("ctx-mock-foreign")),
+				"Foreign session's worker must not be registered or alerted",
+			);
+			assert.ok(
+				notifiedMessages.some((m) => m.includes("Run: run-mock-100") && m.includes("1 running")),
+				"Bound session should report its run with exactly one observed worker",
+			);
+			console.log("✓ Bound session scoped to its own run; foreign workers ignored");
 
 			// 5. Test Background Check & Steer Message Delivery
 			console.log("Test 5: Testing background check message receipt and steer delivery...");

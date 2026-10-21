@@ -314,10 +314,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		reportBudgetViolation("orca_orchestration", event, performance.now() - startedAt, 20, logTask);
 	}
 
-	// Keep the in-memory worker registry bounded: once it exceeds the cap, evict the
-	// oldest settled workers (running workers are never evicted). Without this, a
-	// long supervisory session accumulates every dispatched worker (with its spec
-	// text) forever — the map is otherwise only released on session_shutdown.
+	// Keep the in-memory worker registry bounded: once it exceeds the cap, evict the oldest
+	// settled workers (running workers are never evicted). Without this, a long supervisory
+	// session accumulates every dispatched worker (with its spec text) forever.
 	const MAX_OBSERVED_WORKERS = 50;
 	function evictSettledWorkers(): void {
 		if (observedWorkers.size <= MAX_OBSERVED_WORKERS) return;
@@ -412,10 +411,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	let checkSpawnSeq = 0;
 
 	/**
-	 * Kill the running check process and retire its generation, so a spawn whose command resolution
-	 * is still in flight can no longer claim `checkProcess`. Every path that stops the check loop
-	 * goes through here: a stop that only kills the process lets a late spawn start observing again
-	 * for a session that asked to stop.
+	 * Kill the running check process and retire its generation, so a spawn whose command resolution is
+	 * still in flight can no longer claim `checkProcess`. Every stop goes through here: a stop that
+	 * only kills the process would let a late spawn start observing again for a stopped session.
 	 */
 	function stopCheckProcess() {
 		checkSpawnSeq++;
@@ -436,6 +434,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 	function startCheckProcess() {
 		if (disposed) return;
+		// A run-less `check` resolves to the terminal's bound Run or nothing; never spawn one: it would steer foreign messages here.
+		if (!activeRunId) return;
 		stopCheckProcess();
 
 		// Bound to one run for the whole spawn: `activeRunId` can change while the orca command
@@ -504,16 +504,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			if (disposed) return;
 			if (checkProcess === proc) checkProcess = null;
 
-			// If active dispatches remain, restart the check process after brief pause
-			let hasRunningWorkers = false;
-			for (const w of observedWorkers.values()) {
-				if (w.status === "running") {
-					hasRunningWorkers = true;
-					break;
-				}
-			}
-
-			if (hasRunningWorkers || activeRunId) {
+			// Only a bound run restarts the watcher: a run-less `check` is scoped to the terminal's bound Run or nothing.
+			if (activeRunId) {
 				restartCheckTimer = setTimeout(() => {
 					if (!disposed && !checkProcess) {
 						startCheckProcess();
@@ -622,7 +614,14 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		isReconciling = true;
 
 		try {
-			const res = await execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(["orchestration", "worker-list"], { cwd: lastCwd });
+			// Run ownership is per terminal: unbound, the CLI scopes `worker-list` to every Run
+			// on the host (scope.source "all"). Retry `run-current` so a transient boot-discovery
+			// failure recovers; a run-less session must not register or alert on foreign workers.
+			if (!activeRunId) {
+				await discoverActiveRun(lastCwd, signal);
+				if (signal?.aborted || disposed || !activeRunId) return;
+			}
+			const res = await execOrca(["orchestration", "worker-list", "--run", activeRunId], { cwd: lastCwd });
 			// The round-trip is the abortable part: `session_shutdown` can land inside it, and the
 			// context is still live during the shutdown emit, so without this a torn-down session gets
 			// its registry mutated and steer messages queued after it was supposed to stop.
@@ -645,9 +644,9 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					const requiresAction = row.projection?.attention?.requiresAction;
 
 					if (!w) {
-						// Only track if belongs to current run, or if active and no run bound
-						const matchesRun = activeRunId ? row.runId === activeRunId : terminalState === "active";
-						if (matchesRun) {
+						// Only track workers of this session's bound run: a row from any other run
+						// must not be registered (or alerted) here.
+						if (row.runId === activeRunId) {
 							const isLive =
 								terminalState === "active" || row.workerState === "running" || row.workerState === "ready" || verdict === "live";
 
