@@ -146,21 +146,14 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 	// not start work here. `session_start` calls `resume()` on the scope that serves the new session.
 	let aborted = false;
 
-	const start = (name: string, work: TaskWork, o?: RunOptions): Running => {
+	/**
+	 * Work and options are read *when the body runs*, not when the task was created: a single-flight
+	 * slot replaces the work of a round that has not started yet, and keeping the first caller's opts
+	 * would run the new work under the old budget and report it against the old error handler.
+	 */
+	const start = (name: string, getWork: () => TaskWork, getOpts: () => RunOptions | undefined): Running => {
 		const controller = new AbortController();
-		const budgetMs = o?.budgetMs ?? opts.budgetMs;
 		let timer: NodeJS.Timeout | undefined;
-		if (budgetMs && budgetMs > 0) {
-			timer = setTimeout(() => {
-				try {
-					o?.onBudget?.(name, budgetMs);
-				} catch {}
-				try {
-					controller.abort(new Error(`${name} exceeded its ${budgetMs} ms budget`));
-				} catch {}
-			}, budgetMs);
-			timer.unref?.();
-		}
 
 		const entry: Running = { name, controller, promise: Promise.resolve() };
 		running.add(entry);
@@ -170,14 +163,28 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 				// await would otherwise run inside the lifecycle handler that scheduled it — spawning
 				// subprocesses and reading files on the path Pi awaits. Yielding a microtask is not
 				// enough, because Pi's own continuation after the handler is a microtask too.
-				if (!o?.immediate) await new Promise<void>((resolve) => setImmediate(resolve));
+				if (!getOpts()?.immediate) await new Promise<void>((resolve) => setImmediate(resolve));
 				if (controller.signal.aborted) return;
-				await work(controller.signal);
+				const o = getOpts();
+				const budgetMs = o?.budgetMs ?? opts.budgetMs;
+				// Armed here, so the budget bounds the work itself and not the time it spent queued.
+				if (budgetMs && budgetMs > 0) {
+					timer = setTimeout(() => {
+						try {
+							o?.onBudget?.(name, budgetMs);
+						} catch {}
+						try {
+							controller.abort(new Error(`${name} exceeded its ${budgetMs} ms budget`));
+						} catch {}
+					}, budgetMs);
+					timer.unref?.();
+				}
+				await getWork()(controller.signal);
 			} catch (err) {
 				// A task told to stop is not a failure worth surfacing.
 				if (controller.signal.aborted) return;
 				const text = err instanceof Error ? err.message : String(err);
-				safeLog(o?.onError ?? report, `[${label}] ${name} failed: ${text}`);
+				safeLog(getOpts()?.onError ?? report, `[${label}] ${name} failed: ${text}`);
 			} finally {
 				if (timer) clearTimeout(timer);
 				running.delete(entry);
@@ -198,11 +205,11 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		slot.running = holder;
 		const entry = start(
 			key,
-			(signal) => {
+			() => (signal: AbortSignal) => {
 				holder.started = true;
 				return (slot.work as TaskWork)(signal);
 			},
-			slot.opts,
+			() => slot.opts,
 		);
 		holder.promise = entry.promise;
 		void entry.promise.finally(() => {
@@ -231,7 +238,7 @@ export function createTaskScope(label: string, opts: { onError?: TaskLogger; bud
 		run(name, work, o) {
 			if (aborted) return Promise.resolve();
 			try {
-				return start(name, work, o).promise;
+				return start(name, () => work, () => o).promise;
 			} catch (err) {
 				report(`[${label}] ${name} could not start: ${err instanceof Error ? err.message : String(err)}`);
 				return Promise.resolve();

@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@ea
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { execFile } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import {
@@ -174,6 +175,9 @@ export default function (pi: ExtensionAPI) {
 			// The same teardown session_shutdown performs - this path missed that event.
 			sessionId++; // drop syncs still in flight (syncPROrThrow's session check)
 			prTasksShutdown = true;
+			// Same as session_shutdown: without this, a refresh already running keeps making real gh
+			// calls until it happens to reach a guard, and its single-flight slot stays booked.
+			tasks.abort();
 			syncAllInFlight = undefined;
 			ghHealth.reset();
 			manager.clear();
@@ -199,7 +203,8 @@ export default function (pi: ExtensionAPI) {
 			return fn();
 		} catch (err) {
 			if (isStaleError(err)) {
-				handleStaleContext(backgroundCaller ? `${backgroundCaller}:${caller}` : caller);
+				const detached = detachedCallerStore.getStore();
+				handleStaleContext(detached ? `${detached}:${caller}` : caller);
 				return fallback;
 			}
 			throw err;
@@ -236,17 +241,13 @@ export default function (pi: ExtensionAPI) {
 
 	// Stale attribution for detached work: a refresh that hits an invalidated context is reported
 	// against the boundary that scheduled it (and the inner call site), since that boundary is the
-	// one whose latency the work used to hide.
-	let backgroundCaller = "";
+	// one whose latency the work used to hide. Per execution, not one shared variable: several
+	// detached tasks interleave on the awaits inside a refresh, and a plain `let` would report
+	// whichever task set it last.
+	const detachedCallerStore = new AsyncLocalStorage<string>();
 
-	async function inBackground<T>(caller: string, fn: () => Promise<T>): Promise<T> {
-		const prev = backgroundCaller;
-		backgroundCaller = caller;
-		try {
-			return await fn();
-		} finally {
-			backgroundCaller = prev;
-		}
+	function inBackground<T>(caller: string, fn: () => Promise<T>): Promise<T> {
+		return detachedCallerStore.run(caller, fn);
 	}
 
 	function updateStatusUI(ui?: ExtensionUIContext) {

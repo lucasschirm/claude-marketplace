@@ -253,8 +253,23 @@ export default async function (pi: ExtensionAPI) {
 	// gate) back indefinitely. Before any turn started they stay deferred for the next plain message.
 	function releaseLateStartupNotices(): void {
 		if (disposed || !sessionHasRun || deferredAnnouncements.size === 0) return;
+		// Snapshot first: a PR deferred in *during* this loop still owes the user an announcement.
 		const prNumbers = Array.from(deferredAnnouncements.keys());
-		suppressUpdates = false;
+		// Delivering the steer settles these entries exactly the way agent_start settles a notice that
+		// rode the user's message. Left in place, the next plain idle input would append the identical
+		// text a second time, and since `announced` would still be false in the session file a resume
+		// would defer it again for a third delivery.
+		let changed = false;
+		for (const prNumber of prNumbers) {
+			deferredAnnouncements.delete(prNumber);
+			const pr = observedPRs.get(prNumber);
+			if (pr && !pr.announced) {
+				pr.announced = true;
+				changed = true;
+			}
+		}
+		suppressUpdates = deferredAnnouncements.size > 0;
+		if (changed) persistState();
 		for (const prNumber of prNumbers) announceTracking(prNumber);
 	}
 
@@ -288,6 +303,9 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			// The same teardown session_shutdown performs - this path missed that event.
 			resetObserverState();
+			// Same as session_shutdown: without this an in-flight gh round keeps making real calls until
+			// it happens to reach a guard, and its poll key stays booked in the single-flight slot.
+			tasks.abort();
 			ghHealth.reset();
 			pendingAnnouncements.clear();
 			pendingAutoStart.clear();
@@ -1399,6 +1417,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.on("input", async (event) => {
+		const startedAt = Date.now();
 		// Skill/template commands are expanded after this event, so appending text would corrupt them.
 		if (event.source === "extension") {
 			if (noticeAttached) noticeAttachBroken = true;
@@ -1426,6 +1445,8 @@ export default async function (pi: ExtensionAPI) {
 		// Snapshot what this message actually carries; agent_start marks only these (a PR
 		// deferred in after the transform never rode the message and must not be marked).
 		noticeAttachedFor = new Set(deferredAnnouncements.keys());
+		// Everything above is in-memory; the tripwire is the alarm if that ever stops being true.
+		checkBudget("input", startedAt);
 		return { action: "transform", text: `${event.text}\n\n${notices}`, images: event.images };
 	});
 
@@ -1481,33 +1502,39 @@ export default async function (pi: ExtensionAPI) {
 				continue;
 			}
 			if (!ghHealth.acquireSlot()) return; // The slot is busy; the next one settles it
-			let ghErr: unknown;
-			let data: any;
+			// Everything below runs while holding the one slot ghHealth grants in degraded mode, so the
+			// release must survive a throw: `startObserving`/`announceTracking` sit here, and a wedged
+			// `inFlight` on the process-wide singleton starves every later retry for *both* extensions.
 			try {
-				const { stdout } = await execFileAsync(
-					"gh",
-					["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"],
-					{ cwd: entry.cwd, timeout: GH_TIMEOUT_MS },
-				);
-				data = JSON.parse(stdout);
-			} catch (err) {
-				ghErr = err;
-			}
-			if (ghErr === undefined) {
-				ghHealth.recordSuccess();
-				const state = String(data.state || "").toUpperCase();
-				pendingAutoStart.delete(prNumber);
-				if (state === "OPEN" && !data.isDraft) {
-					startObserving(prNumber, data.comments || [], entry.cwd, lastUIContext);
-					announceTracking(prNumber);
+				let ghErr: unknown;
+				let data: any;
+				try {
+					const { stdout } = await execFileAsync(
+						"gh",
+						["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"],
+						{ cwd: entry.cwd, timeout: GH_TIMEOUT_MS },
+					);
+					data = JSON.parse(stdout);
+				} catch (err) {
+					ghErr = err;
 				}
-				// (closed/draft: nothing to observe; dropped silently)
-			} else if (isGhAvailabilityError(ghErr)) {
-				ghHealth.recordFailure(); // silent; the next slot retries
-			} else {
-				pendingAutoStart.delete(prNumber); // 404 and friends: nothing to observe
+				if (ghErr === undefined) {
+					ghHealth.recordSuccess();
+					const state = String(data.state || "").toUpperCase();
+					pendingAutoStart.delete(prNumber);
+					if (state === "OPEN" && !data.isDraft) {
+						startObserving(prNumber, data.comments || [], entry.cwd, lastUIContext);
+						announceTracking(prNumber);
+					}
+					// (closed/draft: nothing to observe; dropped silently)
+				} else if (isGhAvailabilityError(ghErr)) {
+					ghHealth.recordFailure(); // silent; the next slot retries
+				} else {
+					pendingAutoStart.delete(prNumber); // 404 and friends: nothing to observe
+				}
+			} finally {
+				ghHealth.release();
 			}
-			ghHealth.release();
 		}
 	}
 
@@ -1879,7 +1906,13 @@ export default async function (pi: ExtensionAPI) {
 
 	// PATH probes are async on purpose: a `which` subprocess here runs before the TUI exists, on every
 	// `pi` invocation that loads this package (Pi awaits the factory before startup continues).
-	if (await commandExists("requestdb")) {
+	// Probed together rather than one awaited after the other: two serial scans of PATH is the only
+	// I/O left on the one boot path Pi still waits for.
+	const [hasRequestDb, hasDestroyDb] = await Promise.all([
+		commandExists("requestdb"),
+		commandExists("destroydb"),
+	]);
+	if (hasRequestDb) {
 		pi.registerTool({
 			name: "requestdb",
 			label: "Request DB",
@@ -1919,7 +1952,7 @@ export default async function (pi: ExtensionAPI) {
 		});
 	}
 
-	if (await commandExists("destroydb")) {
+	if (hasDestroyDb) {
 		pi.registerTool({
 			name: "destroydb",
 			label: "Destroy DB",

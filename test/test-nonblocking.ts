@@ -201,6 +201,48 @@ function mkPush(sink: number[], id: number, wait: Deferred<number>) {
 	};
 }
 
+test("a replaced round uses the newest work and the newest opts", async () => {
+	const scope = createTaskScope("t-replaced-opts");
+	const ran: string[] = [];
+	const reported: string[] = [];
+	scope.schedule(
+		"k",
+		async () => {
+			ran.push("first");
+			throw new Error("first");
+		},
+		{ onError: () => reported.push("first") },
+	);
+	scope.schedule(
+		"k",
+		async () => {
+			ran.push("second");
+			throw new Error("second");
+		},
+		{ onError: () => reported.push("second") },
+	);
+	assert.equal(await scope.flush(5_000), true);
+	assert.deepEqual(ran, ["second"], "the superseded request must not run");
+	assert.deepEqual(reported, ["second"], "failures report through the newest caller's onError");
+});
+
+test("the budget of a replaced round is the newest caller's, and bounds the work only", async () => {
+	const scope = createTaskScope("t-replaced-budget");
+	let completed = false;
+	// The first request's 10 ms budget must not be inherited by the work that replaced it.
+	scope.schedule("k", async () => {}, { budgetMs: 10 });
+	scope.schedule(
+		"k",
+		async () => {
+			await sleep(120);
+			completed = true;
+		},
+		{ budgetMs: 5_000 },
+	);
+	assert.equal(await scope.flush(5_000), true);
+	assert.equal(completed, true, "the replacing budget applies, so the work is not aborted");
+});
+
 test("pending/flushAllTasks observe every scope", async () => {
 	const a = createTaskScope("a");
 	const b = createTaskScope("b");

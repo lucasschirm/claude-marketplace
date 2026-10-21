@@ -387,3 +387,48 @@ the deferred body of the current round has *entered* replaces that round's work 
 follow-up. Previously `turn_end` and `agent_before_settle` — adjacent emits sharing `SYNC_ALL_KEY` —
 caused two full `gh pr view` fan-outs back to back on every turn end. Scheduling during a round that
 has actually entered still queues exactly one follow-up carrying the newest work.
+
+## 10. Review round 3 (Devin `swe-2-max`)
+
+Round 3 confirmed the goal again ("nothing awaits on any path Pi awaits", boot harness: factories
+0–1 ms, `session_start` 1 ms, `input` 0 ms, `turn_end` 0 ms, `blocking_sync_calls: []`) and caught the
+reason rounds 1–2 kept claiming unlanded fixes: **an `edit` call with several replacements is atomic**
+— one non-matching entry rejected the whole call, so four `observe-pr.ts` changes from round 2 (and
+one from round 1) never reached the file while the commit message said they had. Those four are now
+applied and verified in the file:
+
+1. `releaseLateStartupNotices()` consumes what it delivers (delete + `pr.announced` + `persistState`).
+   Reachable when a check defers one PR and then awaits another round-trip — e.g. a repo root that
+   still tracks a previous branch — so a turn can start in between and the release fires with
+   `sessionHasRun` already true.
+2. `settlePendingAutoStarts()` releases its `ghHealth` slot in a `finally`.
+3. The two factory `commandExists` PATH probes run via `Promise.all`.
+4. `checkBudget("input", …)` wired in observe-pr.
+
+New findings from this round, also fixed:
+
+5. **`startCheckProcess` consumed `lastPendingAckDeliveryId` before the spawn was adopted.** Resolving
+   the orca command is async, so a spawn that gets discarded (`disposed`, or a newer
+   `checkSpawnSeq`) used to take the pending ack with it; the process that replaced it could not ack,
+   Orca re-delivered the message, and `handleCheckDelivery` has no delivery-id dedup → duplicate
+   `worker_done`/`question` steers. The pending ack is now cleared only when the process is adopted.
+6. **`handleStaleContext` did not abort the task scope** in either observe-pr or pr-tasks, so after a
+   teardown that skipped `session_shutdown` a detached refresh kept making real `gh` calls until it
+   happened to reach a guard, and its single-flight slot stayed booked. Both teardowns now abort.
+7. **Detached stale attribution used one shared variable.** `backgroundCaller` was set/restored around
+   `await`s, so with two interleaved refreshes the stale log named whichever task set it last. It is
+   now an `AsyncLocalStorage`, which follows each execution through its awaits.
+8. **A replaced single-flight round kept the first caller's opts.** `begin()` captured `slot.opts`
+   while reading `slot.work` at body entry, so a request that replaced a not-yet-started round ran the
+   new work under the old budget and reported failures through the old handler (e.g. pr-tasks' 5 s
+   boot budget applied to a 45 s sync). Work and options are now both read when the body runs, and the
+   budget clock is armed there, so the budget bounds the work and not the time it spent queued.
+
+Not covered by a suite (stated plainly): the exact late-release interleaving in finding 1 — no Pi test
+drives a check that defers one PR and then awaits another round-trip while a turn starts.
+
+Also observed once, not reproduced in five later runs (including the same batch configuration):
+`observe-pr-gh-failure` T4 timing out at its 25 s wait for the `observe_pr(202)` auto-start. The
+changes in this batch touch neither `pendingAutoStart` nor slot accounting, so this reads as the
+suite's fixed wait meeting a loaded machine (up to 8 s backoff windows after an outage), not a
+regression — but it is a timing-sensitive test worth widening independently of this PR.

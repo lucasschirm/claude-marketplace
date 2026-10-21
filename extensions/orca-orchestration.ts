@@ -461,8 +461,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		if (disposed) return;
 		stopCheckProcess();
 
-		const ack = ackDeliveryId || lastPendingAckDeliveryId;
-		lastPendingAckDeliveryId = undefined;
+		const pendingAck = lastPendingAckDeliveryId;
+		const ack = ackDeliveryId || pendingAck;
 		const seq = ++checkSpawnSeq;
 
 		void (async () => {
@@ -482,6 +482,11 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				} catch {}
 				return;
 			}
+			// The ack is consumed only now. Resolving the orca command is async, so this spawn can be
+			// discarded (a newer start, or a shutdown) while it was still in flight — clearing the pending
+			// ack up front would leave the process that replaces this one unable to ack, and Orca
+			// re-delivers that delivery, which `handleCheckDelivery` would surface a second time.
+			if (lastPendingAckDeliveryId === pendingAck) lastPendingAckDeliveryId = undefined;
 			checkProcess = proc;
 			wireCheckProcess(proc);
 		})();
