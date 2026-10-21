@@ -9,6 +9,8 @@ import { cleanupTmpDirs, tmpDir, tmpGitRepo } from "./helpers/git-repo.ts";
 
 const tmpRepo = () => tmpGitRepo("pr-task-path-");
 
+const git = (args: string[], opts?: { cwd: string }) => execFileSync("git", args, { cwd: opts?.cwd, stdio: "ignore" });
+
 // Nothing may be left behind in tmpdir: the unit suites run in parallel in CI.
 after(cleanupTmpDirs);
 
@@ -89,24 +91,133 @@ test("a symlinked target cannot carry the write outside the repository", skipSym
 // was measured to fail with "must be run in a work tree" inside `.git`, a bare repo and a worktree gitdir -
 // so these pin the guarantee at the layer that is exported, and pin the safety property end to end: nothing
 // is written into git metadata whatever error the caller meets on the way.
-const gitMetadataRoots = [
-	["a bare clone", "repo.git", "config"],
-	["a bare clone's hooks dir", "repo.git", "hooks/pre-push"],
-	["the .git directory itself", ".git", "config"],
-	["a linked worktree gitdir", ".git/worktrees/feature", "HEAD"],
-];
+// Real git-created roots, because identity is read from the layout: a hand-made directory called `repo.git` is
+// not a repository and must not be what proves the guard.
+function gitMetadataRoots(): Array<[string, () => { root: string; target: string }]> {
+	return [
+		[
+			"a bare clone",
+			() => {
+				const dir = path.join(tmpDir("pr-task-bare-"), "repo.git");
+				git(["init", "--bare", dir]);
+				return { root: dir, target: "config" };
+			},
+		],
+		[
+			"a bare clone's hooks dir",
+			() => {
+				const dir = path.join(tmpDir("pr-task-bare-"), "repo.git");
+				git(["init", "--bare", dir]);
+				fs.mkdirSync(path.join(dir, "hooks"), { recursive: true });
+				return { root: dir, target: path.join("hooks", "pre-push") };
+			},
+		],
+		[
+			// The case the suffix heuristic missed entirely: `git init --bare work` has no `.git` in the name.
+			"a bare clone with no .git suffix",
+			() => {
+				const dir = path.join(tmpDir("pr-task-bare-"), "mirror-work");
+				git(["init", "--bare", dir]);
+				return { root: dir, target: "config" };
+			},
+		],
+		[
+			"the .git directory itself",
+			() => {
+				const repo = tmpRepo();
+				return { root: path.join(repo, ".git"), target: "config" };
+			},
+		],
+		[
+			"a linked worktree's gitdir",
+			() => {
+				// Both the repo and the worktree live under one tmp root: `git worktree add` refuses an existing
+				// path, so putting the sibling in /tmp itself would make the second run of this suite fail.
+				const base = tmpDir("pr-task-wt-");
+				const repo = path.join(base, "repo");
+				fs.mkdirSync(repo, { recursive: true });
+				git(["init", "-q", repo]);
+				fs.writeFileSync(path.join(repo, "a.ts"), "one\n", "utf-8");
+				git(["-C", repo, "add", "a.ts"]);
+				git(["-C", repo, "-c", "user.email=t@example.com", "-c", "user.name=test", "commit", "-qm", "seed"]);
+				const feature = path.join(base, "feature-worktree");
+				git(["-C", repo, "worktree", "add", "-b", "feature", feature]);
+				const meta = fs
+					.readFileSync(path.join(feature, ".git"), "utf-8")
+					.trim()
+					.replace(/^gitdir:\s*/, "");
+				return { root: meta, target: "HEAD" };
+			},
+		],
+		[
+			"a --separate-git-dir directory",
+			() => {
+				const base = tmpDir("pr-task-sepgit-");
+				const work = path.join(base, "work");
+				const gitDir = path.join(base, "elsewhere-metadata");
+				fs.mkdirSync(work, { recursive: true });
+				git(["init", "--separate-git-dir", gitDir, work]);
+				return { root: gitDir, target: "config" };
+			},
+		],
+	];
+}
 
-for (const [label, rootSuffix, target] of gitMetadataRoots) {
+for (const [label, make] of gitMetadataRoots()) {
 	test(`resolveRepoFilePath refuses ${label}`, async () => {
-		const base = tmpDir("pr-task-gitmeta-");
-		const root = path.join(base, rootSuffix);
-		fs.mkdirSync(path.dirname(path.join(root, target)), { recursive: true });
-		fs.writeFileSync(path.join(root, target), "keep me\n", "utf-8");
+		const { root, target } = make();
+		const victim = path.join(root, target);
+		fs.mkdirSync(path.dirname(victim), { recursive: true });
+		fs.writeFileSync(victim, "keep me\n", "utf-8");
 		await assert.rejects(() => resolveRepoFilePath(root, target), /git metadata directory/);
-		assert.strictEqual(fs.readFileSync(path.join(root, target), "utf-8"), "keep me\n");
+		assert.strictEqual(fs.readFileSync(victim, "utf-8"), "keep me\n");
 	});
 }
 
+test("a symlinked root that points at git metadata is refused by layout, not by name", async () => {
+	const base = tmpDir("pr-task-linkroot-");
+	const repo = path.join(base, "repo");
+	fs.mkdirSync(repo, { recursive: true });
+	git(["init", repo]);
+	const linkRoot = path.join(base, "looks-like-a-worktree");
+	fs.symlinkSync(path.join(repo, ".git"), linkRoot, "dir");
+	await assert.rejects(() => resolveRepoFilePath(linkRoot, "config"), /git metadata directory/);
+});
+
+test("a working tree that merely has a .git-looking name is not metadata", async () => {
+	// The suffix heuristic this replaced refused `<somewhere>/release.git` even when it was an ordinary
+	// checkout. Refusing to edit a legitimate repository is a bug too - it just fails quietly, by disabling
+	// the tool for that user.
+	const base = tmpDir("pr-task-named-");
+	const repo = path.join(base, "release.git");
+	fs.mkdirSync(repo, { recursive: true });
+	git(["init", repo]);
+	fs.writeFileSync(path.join(repo, "a.ts"), "one\n", "utf-8");
+	assert.strictEqual(await resolveRepoFilePath(repo, "a.ts"), path.join(repo, "a.ts"));
+});
+
+test("a tracked symlink may not be used to write into .git", async () => {
+	// The R5-6 reproducer. `.git` is inside the root, so containment is satisfied by construction; only a
+	// re-check of the resolved target against the canonical metadata directory stops this.
+	const repo = tmpRepo();
+	const marker = path.join(repo, ".git", "r5-marker");
+	fs.writeFileSync(marker, "before\n", "utf-8");
+	const link = path.join(repo, "tracked-link");
+	if (process.platform === "win32") return; // symlinks need elevation on Windows
+	fs.symlinkSync(".git/r5-marker", link, "file");
+	git(["add", "tracked-link"], { cwd: repo });
+	await assert.rejects(() => applyCodeSuggestion("tracked-link", 1, 1, "after\n", repo), /git directory/);
+	assert.strictEqual(fs.readFileSync(marker, "utf-8"), "before\n", "the metadata file must be untouched");
+});
+
+test("a symlink to an ordinary file in the tree still works", async () => {
+	const repo = tmpRepo();
+	if (process.platform === "win32") return;
+	fs.writeFileSync(path.join(repo, "real.txt"), "one\ntwo\n", "utf-8");
+	fs.symlinkSync("real.txt", path.join(repo, "alias.txt"));
+	await applyCodeSuggestion("alias.txt", 2, 2, "TWO\n", repo);
+	assert.strictEqual(fs.readFileSync(path.join(repo, "real.txt"), "utf-8"), "one\nTWO\n");
+});
 test("applyCodeSuggestion never writes into a bare repository, whatever it fails on", async () => {
 	const base = tmpDir("pr-task-bare-");
 	const bare = path.join(base, "repo.git");

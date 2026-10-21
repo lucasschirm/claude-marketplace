@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 
 const execFileAsync = promisify(execFile);
@@ -410,10 +411,67 @@ export function extractCodeSuggestion(body: string): { hasSuggestion: boolean; s
  * differently - `--absolute-git-dir`, a stored path, `--git-dir`/`--work-tree` in the environment - would
  * otherwise be one string away from rewriting hooks or config.
  */
+/**
+ * Is `dir` a git directory rather than a working tree?
+ *
+ * Identity comes from two places: the `.git` convention, and the layout on disk. What it no longer uses is the
+ * `*.git` *suffix*, which was wrong in both directions - `git init --bare work` carries no suffix and was
+ * accepted, while a legitimate checkout called `release.git` was refused. A git directory is the one holding
+ * `HEAD` plus `objects/` and `refs/` (a bare repo, `<repo>/.git`, or a `--separate-git-dir` directory), or the
+ * linked-worktree form, which keeps `commondir`/`gitdir` pointer files instead of its own objects.
+ */
 export function isGitMetadataDir(dir: string): boolean {
 	const abs = path.resolve(dir);
-	const base = path.basename(abs).toLowerCase();
-	return base === ".git" || base.endsWith(".git") || /\/\.git([/\\]|$)/i.test(abs);
+	// `.git` itself, or anything beneath it, is metadata by convention - git will use that directory the moment
+	// it appears. Kept because a not-yet-populated `.git` has no layout to recognise yet.
+	if (/(^|[/\\])\.git([/\\]|$)/i.test(abs)) return true;
+	const isFile = (p: string) => {
+		try {
+			return fsSync.statSync(p).isFile();
+		} catch {
+			return false;
+		}
+	};
+	const isDir = (p: string) => {
+		try {
+			return fsSync.statSync(p).isDirectory();
+		} catch {
+			return false;
+		}
+	};
+	if (!isFile(path.join(abs, "HEAD"))) return false;
+	if (isDir(path.join(abs, "objects")) && isDir(path.join(abs, "refs"))) return true;
+	return isFile(path.join(abs, "commondir")) || isFile(path.join(abs, "gitdir"));
+}
+
+/**
+ * The git directory belonging to a working root, canonicalised. A linked worktree keeps a `.git` *file* whose
+ * `gitdir:` line points at the real metadata directory, so the path alone is not enough.
+ */
+async function gitMetadataDirs(root: string): Promise<string[]> {
+	const found: string[] = [];
+	const dotGit = path.join(root, ".git");
+	try {
+		const st = await fs.stat(dotGit);
+		if (st.isDirectory()) {
+			found.push(await fs.realpath(dotGit));
+		} else if (st.isFile()) {
+			const text = await fs.readFile(dotGit, "utf-8");
+			const target = /^gitdir:[ \t]*(.+?)[ \t]*$/m.exec(text)?.[1];
+			if (target) {
+				const abs = path.resolve(root, target);
+				found.push(await fs.realpath(abs).catch(() => abs));
+			}
+		}
+	} catch {
+		// No .git at all: a bare root is rejected by isGitMetadataDir above, so there is nothing to derive.
+	}
+	return found;
+}
+
+/** True when `target` is `dir` or lives beneath it. */
+function isWithinDir(dir: string, target: string): boolean {
+	return target === dir || target.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
 }
 
 export function isInsideDir(root: string, target: string): boolean {
@@ -518,6 +576,14 @@ export async function applyCodeSuggestion(
 	const [realRoot, realTarget] = await Promise.all([fs.realpath(root), fs.realpath(absolutePath)]);
 	if (!isInsideDir(realRoot, realTarget)) {
 		throw new Error(`suggestion path '${filePath}' resolves outside the repository through a link (${realTarget})`);
+	}
+	// Containment is satisfied by anything inside the root - and `.git` is inside the root. A tracked symlink
+	// pointing at `.git/config` therefore passed every check above and wrote straight into the metadata, which
+	// is where hooks/ lives. Re-check the *resolved* target against the canonical metadata directory.
+	for (const metaDir of await gitMetadataDirs(realRoot)) {
+		if (isWithinDir(metaDir, realTarget)) {
+			throw new Error(`suggestion path '${filePath}' resolves into the git directory through a link (${realTarget})`);
+		}
 	}
 	await fs.writeFile(realTarget, lines.join(""), "utf-8");
 }
