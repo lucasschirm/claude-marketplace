@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "pr-observer": {
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/src/mcp-server.ts"]
+      "command": "sh",
+      "args": [
+        "-c",
+        "for root in \"${PLUGIN_ROOT}\" \"${DEVIN_PLUGIN_ROOT}\" \"${CLAUDE_PLUGIN_ROOT}\"; do if [ -f \"$root/src/mcp-server.mjs\" ]; then exec node \"$root/src/mcp-server.mjs\"; fi; done; root=$(find \"$HOME\" \"${XDG_DATA_HOME:-/nonexistent}\" -maxdepth 9 -path '*plugins/cache/*pr-observer*/*/src/mcp-server.mjs' -print 2>/dev/null | sort | tail -n 1); if [ -n \"$root\" ]; then exec node \"${root%/src/mcp-server.mjs}/src/mcp-server.mjs\"; fi; echo \"pr-observer: could not locate the plugin directory: no PLUGIN_ROOT/DEVIN_PLUGIN_ROOT/CLAUDE_PLUGIN_ROOT placeholder was expanded (seen: '${PLUGIN_ROOT}|${DEVIN_PLUGIN_ROOT}|${CLAUDE_PLUGIN_ROOT}') and no src/mcp-server.mjs was found in the host's plugin cache\" >&2; exit 1"
+      ]
     }
   }
 }
