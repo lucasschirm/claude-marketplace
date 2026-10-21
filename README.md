@@ -33,7 +33,7 @@ To update later, refresh the marketplace and Claude picks up new versions the ne
 | `claude-basics` | A collection of agents and skills for every project. Includes the `claude-rule-creator` skill for authoring and maintaining CLAUDE.md / `.claude/rules/` rules. |
 | `frontend-development` | Agents and skills for frontend development, component architecture, and styling. |
 | `multiagent-development` | Orchestration agents and skills for multi-agent workflows. |
-| `pr-observer` | Background PR CI observer and review conversation task manager for Devin CLI and Claude Code. |
+| `pr-observer` | On-demand pull request CI verdict and review conversation tools for Devin CLI and Claude Code. |
 
 ---
 
@@ -43,7 +43,11 @@ Plugins in this repository can also be installed directly into the [Devin CLI](h
 
 ### PR Observer (`pr-observer`)
 
-A cross-platform plugin providing Model Context Protocol (MCP) tools, skills, and settlement lifecycle hooks to observe PR CI checks and resolve review conversation tasks.
+A cross-platform plugin: MCP tools and skills that read a pull request's CI verdict and review
+conversations, and close the conversations the agent has addressed. Every tool reads GitHub on the
+call, and the plugin is self-contained (it carries its own copies of the engine under
+`plugins/pr-observer/lib/`), which is what an installed plugin must be - see its
+[README](plugins/pr-observer/README.md).
 
 #### Install in Devin CLI
 
@@ -61,12 +65,20 @@ devin plugins install https://github.com/lucasschirm/claude-marketplace.git#plug
 
 #### Capabilities in Devin CLI
 
-- **MCP Tools**: `observe_pr`, `pr_tasks_list`, `pr_task_detail`, `pr_task_resolve`, `pr_task_blocked`.
+- **MCP Tools**: `observe_pr` (CI verdict + conversation counts for a PR), `pr_tasks_list`,
+  `pr_task_detail`, `pr_task_resolve` (reply, resolve, optionally apply the code suggestion),
+  `pr_task_blocked`.
 - **Skills (Slash Commands)**:
-  - `/pr-observer:observe-pr` — Start or stop observing a GitHub Pull Request.
-  - `/pr-observer:pr-tasks` — List, inspect, and resolve PR review comments and code suggestions.
-- **Settlement Loop Enforcement**: Intercepts Devin's `Stop` event when open review tasks remain, preventing the agent from ending the turn prematurely.
+  - `/pr-observer:observe-pr` — Read a GitHub pull request's CI verdict and review conversations.
+  - `/pr-observer:pr-tasks` — List, inspect, and resolve PR review conversations and suggestions.
 - **Always-on Guidelines**: Injects `AGENTS.md` instructions into session context to guide Devin in resolving review comments.
+- **Requirement**: `gh` authenticated, and Node 22.18+ on PATH (the engine is TypeScript, run directly).
+- **Not in this plugin**: background monitoring (every tool is a snapshot; call it again to refresh)
+  and Stop-hook enforcement - `hooks.json` is a fail-open placeholder that never blocks a session
+  from ending. Continuous observation with pushed updates is what the Pi extensions below do.
+
+If Devin reports `Failed to list tools for server 'pr-observer'`, the cached copy is stale or Node is
+too old: [`plugins/pr-observer/README.md`](plugins/pr-observer/README.md#troubleshooting) walks it through.
 
 ---
 
