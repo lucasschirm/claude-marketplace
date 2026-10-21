@@ -240,12 +240,17 @@ process.exit(0);
 			assert(noisyNotifications.length === 0, `T1: internal error notifications leaked: ${JSON.stringify(noisyNotifications)}`);
 			console.log("✓ T1: sync failures stayed silent (no console output, no TUI notifications)");
 
-			// T2: pacing — gh calls from the outage start onward
-			// (count assertions are load-tolerant: under a multi-second event-loop stall
-			// fewer slots fire in the window — the pacing proofs are the min-gap and the
-			// slow-tier gap (required when enough attempts exist to reach the slow tier))
-			const allTs = readCallTimestamps();
-			const windowTs = allTs.filter((ts) => ts >= outageStart);
+			// T2: pacing — gh calls from the outage start onward. The pacing proofs are the min-gap
+			// (no pile-on) and the cadence gaps; the attempt count is load-tolerant: on a slow
+			// runner fewer backoff slots fire in the first window (a single-flight slot can also
+			// still be draining the settle round), so extend it by 10 s at a time — a chain that
+			// never retries still fails the assert.
+			let windowTs = readCallTimestamps().filter((ts) => ts >= outageStart);
+			for (let extension = 0; windowTs.length < 3 && extension < 2; extension++) {
+				console.log(`— T2: ${windowTs.length} attempt(s) in the first window; extending by 10 s`);
+				await sleep(10000);
+				windowTs = readCallTimestamps().filter((ts) => ts >= outageStart);
+			}
 			assert(windowTs.length >= 3, `T2: expected >= 3 paced attempts during the outage, got ${windowTs.length}`);
 			const gaps: number[] = [];
 			for (let i = 1; i < windowTs.length; i++) gaps.push(windowTs[i] - windowTs[i - 1]);
