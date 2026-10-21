@@ -586,7 +586,8 @@ and the `notes` entry `--reason` writes. All 15 behaved; the harness was tempora
   44 total, overlapping.
 
 **Wiring:** `npm run lint|format|format:check|check|qa:baseline|qa`; `run.sh` gained `lint`, `format` and
-`check` suites (**15 suites** now, CI picks them up through `run.sh` as well as the `quality` job); the
+`check` suites (15 at the time, **19** after merging main's `compaction-recovery`, `observe-pr-stale` and
+`pr-tasks-stale`; CI picks them up through `run.sh` as well as the `quality` job); the
 orphaned-test guard that #36 put in `run.sh` moved into `check-quality.mjs` so there is one
 implementation, reachable as `--only wiredTests` without any installed dependencies.
 
