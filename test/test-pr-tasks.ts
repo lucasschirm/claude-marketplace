@@ -84,7 +84,9 @@ const stateDir = ${JSON.stringify(stateDir)};
 const args = process.argv.slice(2);
 
 if (args[0] === "repo" && args[1] === "view") {
-  console.log(JSON.stringify({ name: "claude-marketplace", owner: { login: "testowner" } }));
+  // repo_overrides.json maps a folder to the repository gh reports there (two repos, same PR number)
+  const ov = readJson("repo_overrides.json", {})[process.cwd()];
+  console.log(JSON.stringify({ name: ov ? ov.name : "claude-marketplace", owner: { login: ov ? ov.owner : "testowner" } }));
   process.exit(0);
 }
 
@@ -1216,6 +1218,50 @@ process.exit(0);
 		process.exit(1);
 	}
 	console.log("✓ Test 45 Passed: newly discovered conversation notified once");
+
+	// Test 46: a conversation resolved upstream between two syncs arrives as a new task but blocks
+	// nothing, so announcing it (and starting a turn for it) would be wrong.
+	console.log("\n=== Test 46: a conversation already resolved upstream is not announced ===");
+	const t46 = mkThread("PRRT_46", 1046, "src/answered.ts", "Nit here", { isResolved: true });
+	writeState("extra_threads.json", [...base44, t44, t45, t46]);
+	sentMessages.length = 0;
+	await (globalThis as any).__PI_ON_PR_POLL__(101, tmpDir);
+	await (globalThis as any).__PI_PR_TASKS_FLUSH__(10_000);
+	if (sentMessages.some((m) => m.includes("New PR review conversation"))) {
+		console.error("Test 46 Failed: a resolved-on-arrival conversation must not be announced", sentMessages);
+		process.exit(1);
+	}
+	console.log("✓ Test 46 Passed: resolved-on-arrival conversation not announced");
+
+	// Test 47: seeding is per repository. PR #101 was already seeded for this folder's repository, but
+	// the same number in another repository must still seed silently on its first sync.
+	console.log("\n=== Test 47: first sync of the same PR number in another repository seeds silently ===");
+	const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pr-tasks-other-"));
+	execSync("git init -b main", { cwd: otherDir });
+	writeState("repo_overrides.json", { [otherDir]: { name: "other-repo", owner: "otherowner" } });
+	const t47 = mkThread("PRRT_47", 1047, "src/other-a.ts", "Please scope this");
+	writeState("extra_threads.json", [...base44, t44, t45, t46, t47]);
+	sentMessages.length = 0;
+	await (globalThis as any).__PI_ON_PR_POLL__(101, otherDir);
+	await (globalThis as any).__PI_PR_TASKS_FLUSH__(10_000);
+	if (sentMessages.some((m) => m.includes("New PR review conversation"))) {
+		console.error("Test 47 Failed: the first sync of another repository must seed silently", sentMessages);
+		process.exit(1);
+	}
+	// Once that repository is seeded, a conversation opening there is announced like anywhere else.
+	const t48 = mkThread("PRRT_48", 1048, "src/other-b.ts", "Rename this helper");
+	writeState("extra_threads.json", [...base44, t44, t45, t46, t47, t48]);
+	sentMessages.length = 0;
+	await (globalThis as any).__PI_ON_PR_POLL__(101, otherDir);
+	await (globalThis as any).__PI_PR_TASKS_FLUSH__(10_000);
+	const otherNotice = sentMessages.find((m) => m.includes("New PR review conversation"));
+	if (!otherNotice || !otherNotice.includes("1048") || otherNotice.includes("1047")) {
+		console.error("Test 47 Failed: only the conversation new to that repository should be announced", sentMessages);
+		process.exit(1);
+	}
+	fs.rmSync(otherDir, { recursive: true, force: true });
+	writeState("repo_overrides.json", {});
+	console.log("✓ Test 47 Passed: seeding is scoped per repository");
 
 	console.log("\n=== All PR Tasks Tests Passed Successfully! ===");
 	process.exit(0);

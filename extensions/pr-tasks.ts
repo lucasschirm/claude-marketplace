@@ -404,8 +404,11 @@ export default function (pi: ExtensionAPI) {
 		// conversation GitHub reports as new has to reach the agent — `agent_before_settle` decides on
 		// cached state, so a refresh landing after the agent settled would otherwise record the task and
 		// stay silent until the next user turn (delivered as a steer it starts a turn when idle).
-		const seeded = seededPRs.has(prNumber);
-		seededPRs.add(prNumber);
+		// Keyed by repository, not just the number: two folders can carry the same PR number, and the
+		// second one's first sync must still seed silently rather than announce every conversation.
+		const repoKey = `${coords.owner}/${coords.repo}#${prNumber}`;
+		const seeded = seededPRs.has(repoKey);
+		seededPRs.add(repoKey);
 
 		// Check for unblocked tasks that received user replies
 		for (const { task, latestReply } of unblockedTasks) {
@@ -423,7 +426,10 @@ export default function (pi: ExtensionAPI) {
 		const newlyStale = staleTasks.filter((t) => !taskLocks.has(t));
 		if (newlyStale.length > 0) sendAgentMessage(formatStaleNotice(newlyStale));
 		if (seeded) {
-			const newlyOpen = newTasks.filter((t) => !taskLocks.has(t));
+			// Only conversations that are actually open: a thread resolved upstream between two syncs
+			// arrives here too, and announcing it as "blocking you from stopping" would start a turn
+			// for a task that blocks nothing. (A task with an action in flight reports itself.)
+			const newlyOpen = newTasks.filter((t) => t.status === "UNRESOLVED" && !taskLocks.has(t));
 			if (newlyOpen.length > 0) sendAgentMessage(formatNewTaskNotice(newlyOpen));
 		}
 
@@ -432,9 +438,9 @@ export default function (pi: ExtensionAPI) {
 
 	const taskLocks = new WeakMap<PRTask, Promise<unknown>>();
 	const heldNotices = new WeakMap<PRTask, Array<{ message: string; shown?: () => boolean }>>();
-	// PRs whose first sync in this session already landed: that sync seeds the task list, so the
-	// conversations it finds are not "opened since the last check" and are not announced.
-	const seededPRs = new Set<number>();
+	// `owner/repo#prNumber` whose first sync in this session already landed: that sync seeds the task
+	// list, so the conversations it finds are not "opened since the last check" and are not announced.
+	const seededPRs = new Set<string>();
 
 	/**
 	 * Sends a notice about a task, holding it while an action on the task is in flight (e.g. the

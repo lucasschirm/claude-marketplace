@@ -505,3 +505,31 @@ Nits taken from the same round:
    instead of only dropping the bookkeeping: an orphaned round whose signal never fired used to overlap
    the new session's work on the same single-flight key (transient peak 2) and could never chain.
    Covered by a unit test.
+
+## 13. Review round 6 (Devin `swe-2-max`)
+
+Round 6 verified the round-5 items at file level (including a line-by-line comparison of the re-indented
+`input` handler against `main` — early returns and the transform return are unchanged) and found two
+defects in the new notification logic I had introduced:
+
+1. **Seeding was keyed by PR number, not repository.** `seededPRs` was a `Set<number>` while the manager
+   scopes syncs by `owner/repo#prNumber`. Two folders carrying the same PR number (worktrees of two
+   repos, or an observed PR in another folder) meant the *second* repository's first sync saw
+   `seeded === true` and announced every conversation it discovered — exactly the first-sync storm the
+   seeding exists to suppress. Key is now `` `${coords.owner}/${coords.repo}#${prNumber}` ``.
+2. **Tasks arriving already resolved upstream were announced as new open conversations.** `createTask`
+   sets `status: "RESOLVED"` when GitHub reports the thread resolved, `fetchReviewThreads` lists resolved
+   threads, and unmatched nodes land in `newTasks` — so a reviewer resolving a conversation between two
+   syncs produced a steer claiming it blocks stopping, and started a turn for a task that blocks
+   nothing. The filter is now `t.status === "UNRESOLVED" && !taskLocks.has(t)`.
+
+Both are covered by new tests, each verified to fail without its fix: `pr-tasks` Test 46 (resolved on
+arrival is not announced) and Test 47 (first sync of the same PR number in another repository seeds
+silently, and once seeded a new conversation there is announced like anywhere else) — Test 47 needed the
+mock `gh` to report a per-folder repository (`repo_overrides.json`).
+
+Nit not changed, deliberately: the observe-pr factory still awaits the two `commandExists` PATH probes.
+It is the one documented exception on the awaited factory path — async rather than `execFileSync`, run in
+parallel, memoized per `(cmd, PATH)`, ~2 ms in the harness with `blocking_sync_calls: []`. Removing it
+would mean registering `requestdb`/`destroydb` unconditionally (offering tools whose binaries are absent)
+or registering them after the factory, which Pi's loading model does not cleanly support.
