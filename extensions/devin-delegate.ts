@@ -1,9 +1,10 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { spawn, execFile, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as readline from "node:readline";
@@ -12,6 +13,7 @@ import { stripAnsi, extractCliError } from "./lib/devin-diagnostics.ts";
 import { removeOrcaWorktree, checkWorktreeSafety } from "./lib/orca-client.ts";
 import { capList, type ToolDetails } from "./lib/tool-result.ts";
 import { logError as fileLogError, logWarn as fileLogWarn } from "./lib/extension-log.ts";
+import { WriteQueue, commandExists, createTaskScope, reportBudgetViolation } from "./lib/nonblocking.ts";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
@@ -576,6 +578,17 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// Binary availability cache
 	const binaryAvailableCache = new Map<string, boolean>();
 
+	// Boot is the tight budget here: recovering state must never be what makes `pi` feel frozen.
+	const BOOT_BUDGET_MS = Number.parseInt(process.env.PI_EXT_BOOT_BUDGET_MS ?? "", 10) || 5_000;
+	// Every state file write goes through one serialized queue (atomic tmp+rename preserved).
+	const stateWrites = new WriteQueue((msg) => logError(msg));
+	// Startup recovery and any other background work: never on a path Pi awaits.
+	const tasks = createTaskScope("devin_delegate", { onError: (msg) => logError(msg) });
+
+	function checkBudget(event: string, startedAt: number): void {
+		reportBudgetViolation("devin_delegate", event, performance.now() - startedAt, 20, (msg) => logError(msg));
+	}
+
 	// Turn liveness: per-session stall watchdog timers and streamed assistant chunk buffers
 	const stallTimers = new Map<string, NodeJS.Timeout>();
 	const assistantBuffers = new Map<string, string>();
@@ -585,19 +598,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// so recovered sessions' event files can be found in their original directory.
 	const sessionDirs = new Map<string, string>();
 
-	function isCommandAvailable(cmd: string): boolean {
-		if (binaryAvailableCache.has(cmd)) {
-			return binaryAvailableCache.get(cmd)!;
-		}
-		try {
-			const checkTool = process.platform === "win32" ? "where" : "which";
-			execFileSync(checkTool, [cmd], { stdio: "ignore" });
-			binaryAvailableCache.set(cmd, true);
-			return true;
-		} catch {
-			binaryAvailableCache.set(cmd, false);
-			return false;
-		}
+	// Async PATH probe (see lib/nonblocking.ts): the synchronous `which` probe it replaces froze the
+	// TUI for its whole duration.
+	async function isCommandAvailable(cmd: string): Promise<boolean> {
+		const available = await commandExists(cmd);
+		binaryAvailableCache.set(cmd, available);
+		return available;
 	}
 
 	// CLI Flag: --devin-max-runs <value>
@@ -673,21 +679,17 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		} catch {}
 	}
 
-	function sleepSync(ms: number): void {
-		try {
-			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-		} catch {}
-	}
-
 	// Tolerate transient ENOENT (observed on shared volumes: directories flapping between
-	// visible and ENOENT within seconds) by retrying once after a short delay.
-	function readFileSyncWithRetry(p: string): string {
+	// visible and ENOENT within seconds) by retrying once after a short delay. The delay is an
+	// ordinary timer: the Atomics.wait version this replaces froze the event loop — and with it the
+	// TUI — for 150 ms per retried file, right in the middle of session_start.
+	async function readTextFileWithRetry(p: string): Promise<string> {
 		try {
-			return fs.readFileSync(p, "utf-8");
+			return await fsp.readFile(p, "utf-8");
 		} catch (err: any) {
 			if (err?.code !== "ENOENT") throw err;
-			sleepSync(150);
-			return fs.readFileSync(p, "utf-8");
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			return fsp.readFile(p, "utf-8");
 		}
 	}
 
@@ -912,8 +914,6 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	function persistState(): void {
 		try {
-			const dir = getStorageDir(currentPiSessionId);
-			fs.mkdirSync(dir, { recursive: true });
 			const state: PersistedState = {
 				maxRuns,
 				totalInvoked,
@@ -923,9 +923,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				sessionDirs: Object.fromEntries(Array.from(sessions.keys()).map((id) => [id, currentPiSessionId])),
 			};
 			for (const id of sessions.keys()) sessionDirs.set(id, currentPiSessionId);
-			const tempFile = path.join(dir, `state.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
-			fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), "utf-8");
-			fs.renameSync(tempFile, getStatePath(currentPiSessionId));
+			// Queued: the atomic tmp+rename is preserved, but the write no longer blocks the event loop
+			// (this runs on every status change, including while turns stream).
+			void stateWrites.write(getStatePath(currentPiSessionId), JSON.stringify(state, null, 2));
 		} catch (err) {
 			logError(`Failed to persist state: ${extractCliError(err)}`);
 		}
@@ -934,13 +934,12 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// Debounced metadata updater to eliminate disk thrashing during streaming
 	const pendingMetaSaves = new Map<string, { meta: SessionMeta; timer: NodeJS.Timeout }>();
 
-	function persistSessionMeta(meta: SessionMeta, immediate = false): void {
-		const save = () => {
+	function persistSessionMeta(meta: SessionMeta, immediate = false): Promise<void> | void {
+		const save = (): Promise<void> | void => {
 			try {
-				const sDir = getSessionDir(currentPiSessionId, meta.sessionId);
-				fs.mkdirSync(sDir, { recursive: true });
 				const metaPath = getMetaPath(currentPiSessionId, meta.sessionId);
-				fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf-8");
+				// Queued behind every other state write, in order, and off the event loop.
+				return stateWrites.write(metaPath, JSON.stringify(meta, null, 2));
 			} catch (err) {
 				logError(`Failed to persist meta for ${meta.sessionId}: ${extractCliError(err)}`);
 			}
@@ -1139,7 +1138,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		const currentBranch = await getGitBranch(cwd);
 		const baseBranch = currentBranch.replace(/^refs\/heads\//, "");
 		let index = await findNextWorktreeIndex(cwd, baseBranch);
-		const orcaAvailable = isCommandAvailable("orca");
+		const orcaAvailable = await isCommandAvailable("orca");
 		const repoName = await getRootRepoName(cwd);
 
 		while (true) {
@@ -1198,7 +1197,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// --- PR Detection ---
 
 	async function detectPullRequest(cwd: string, branch?: string): Promise<number | undefined> {
-		if (!isCommandAvailable("gh")) return undefined;
+		if (!(await isCommandAvailable("gh"))) return undefined;
 
 		// 1. Determine candidate branches: actual checked out branch in cwd, followed by provisioned worktree branch
 		const candidateBranches: string[] = [];
@@ -1500,15 +1499,16 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// --- Startup & Crash Recovery ---
 
-	function recoverState(piSessionId: string): void {
+	async function recoverState(piSessionId: string, signal?: AbortSignal): Promise<void> {
 		currentPiSessionId = piSessionId;
 		const sPath = getStatePath(piSessionId);
 		let raw: string | null = null;
 		try {
-			raw = readFileSyncWithRetry(sPath);
+			raw = await readTextFileWithRetry(sPath);
 		} catch {
 			raw = null;
 		}
+		if (signal?.aborted) return;
 		if (raw == null) {
 			persistState();
 			return;
@@ -1549,8 +1549,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					}
 					let meta: SessionMeta | null = null;
 					for (const mPath of candidates) {
+						if (signal?.aborted) return;
 						try {
-							meta = JSON.parse(readFileSyncWithRetry(mPath)) as SessionMeta;
+							meta = JSON.parse(await readTextFileWithRetry(mPath)) as SessionMeta;
 							break;
 						} catch {}
 					}
@@ -1571,9 +1572,13 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 						} else {
 							// Process is dead: the turn may have completed on devin's side
 							// while pi was down — check the devin session DB.
-							void (async () => {
+							tasks.run(`backfill-${sId}`, async (backfillSignal) => {
 								try {
 									const text = await backfillFinalMessage(meta);
+									// The session may have shut down (or the budget expired) while the session DB
+									// was read. Its results belong to the session that is gone, and the drain
+									// below could otherwise start Devin runs for a session that no longer exists.
+									if (backfillSignal.aborted) return;
 									if (text) {
 										meta.status = "idle";
 										meta.finishedAt = Date.now();
@@ -1591,9 +1596,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 								} catch (err) {
 									logError(`Error reconciling session ${meta.sessionId}: ${extractCliError(err)}`);
 								}
+								if (backfillSignal.aborted) return;
 								updateStatusUI();
 								drainQueue();
-							})();
+							});
 						}
 					}
 					sessions.set(sId, meta);
@@ -1602,7 +1608,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				}
 			}
 
-			// Restore queue
+			// Restore queue. Nothing can have been queued yet: every tool path awaits `recoveryDone`
+			// before it mutates state, so this overwrite cannot discard a live delegation.
 			if (Array.isArray(state.queue)) {
 				queue.length = 0;
 				for (const q of state.queue) {
@@ -1620,11 +1627,35 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
+		const startedAt = performance.now();
+		tasks.resume();
 		lastUIContext = ctx.ui;
 		baseDir = ctx.cwd;
 		const piId = ctx.sessionManager?.getSessionId() || "default";
-		recoverState(piId);
+		// Detached: Pi awaits session_start before it paints the restored transcript, so the disk reads
+		// and orphan reconciliation land afterwards (the status line and queue drain update when done).
+		// `recoveryDone` is the gate tool paths wait on; run() never rejects, so it is safe to keep.
+		recoveryDone = tasks.run(
+			"recover-state",
+			async (signal) => {
+				await recoverState(piId, signal);
+			},
+			{ budgetMs: BOOT_BUDGET_MS },
+		);
+		// (test hook: recovery and state writes are deliberately not awaited on boot)
+		(globalThis as any).__PI_DEVIN_FLUSH__ = async (timeoutMs?: number) => {
+			const limit = timeoutMs ?? 10_000;
+			await tasks.flush(limit);
+			await stateWrites.drain(limit);
+		};
+		checkBudget("session_start", startedAt);
 	});
+
+	// Recovery is detached, so it owns a gate: a tool call that lands while its disk reads are still
+	// running would otherwise see partial state *and* have its mutations overwritten when recovery
+	// finishes (`queue.length = 0`, the restored counters). Tool paths await this first — waiting is
+	// correct there, because the agent asked for the data and Pi is not on a lifecycle boundary.
+	let recoveryDone: Promise<void> = Promise.resolve();
 
 	function cleanupAllClients(): void {
 		for (const client of activeClients.values()) {
@@ -1644,9 +1675,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// the rejected prompt promise is not relied on.
 	// (Dropping lastUIContext: delayed diagnostics after shutdown fall back to
 	// console instead of calling notify on a dead context.)
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", async () => {
+		// Stop recovery work and flush queued state: Pi awaits session_shutdown, so the last write of
+		// the session is durable even though writes are no longer synchronous.
+		tasks.abort();
+		await stateWrites.drain(5_000);
 		delete (globalThis as any)[GLOBAL_GUARD_KEY];
 		delete (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__;
+		delete (globalThis as any).__PI_DEVIN_FLUSH__;
 		lastUIContext = undefined;
 		cleanupAllClients();
 		for (const t of stallTimers.values()) clearInterval(t);
@@ -1709,6 +1745,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			baseDir = ctx.cwd;
 			// Do not re-anchor on tool calls: storage stays with the session_start anchor.
 			const toolPiId = ctx.sessionManager?.getSessionId();
@@ -1827,6 +1866,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
@@ -1977,6 +2019,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			const meta = sessions.get(params.session_id);
 			if (!meta) {
 				return {
@@ -2103,6 +2148,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
@@ -2151,6 +2199,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			// Do not re-anchor on tool calls (same rule as devin_delegate).
 			const toolPiId = ctx.sessionManager?.getSessionId();
 			if (toolPiId && currentPiSessionId !== "default" && toolPiId !== currentPiSessionId) {
@@ -2329,6 +2380,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx: ExtensionToolContext) {
 			lastUIContext = ctx.ui;
+			// Recovery runs detached from session_start: wait for it before reading or mutating state,
+			// or this call's changes are overwritten when recovery finishes (queue, counters).
+			await recoveryDone;
 			const targetId = params.session_id;
 
 			if (params.all_settled) {
@@ -2490,6 +2544,10 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// Global PR closed hook to clean up worktrees whose PRs are merged or closed
 	(globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ = async (prNumber: number, state: string) => {
+		// Called from observe-pr's detached poll tasks. Recovery may still be rebuilding `sessions`,
+		// and a session it has not re-added yet would simply be skipped here — a permanent miss, since
+		// this hook does not fire twice for one PR close. Same gate as every other mutating path.
+		await recoveryDone;
 		for (const [sId, meta] of sessions.entries()) {
 			if (!meta.worktreePath || meta.worktreeStatus !== "active") continue;
 			if (meta.status === "running" || meta.status === "stalled") {
@@ -2534,6 +2592,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			"Devin delegation controls and dashboard (subcommands: list, sessions, limit [n], cancel <id>, allow_bash [on|off|status])",
 		handler: async (args, ctx) => {
 			lastUIContext = ctx.ui;
+			// Same gate as the tools: `/devin cancel` must not run against state recovery is replacing.
+			await recoveryDone;
 			const trimmed = (args || "").trim();
 			const parts = trimmed.split(/\s+/);
 			const sub = parts[0]?.toLowerCase();

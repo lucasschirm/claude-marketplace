@@ -1,7 +1,8 @@
-import { execFile, spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
+import { commandExists } from "./nonblocking.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -146,25 +147,17 @@ export interface OrcaMessageDelivery {
 /**
  * Resolves the path or binary name for Orca CLI commands.
  */
-export function resolveOrcaCmd(): string {
-	if (process.env.ORCA_CLI_COMMAND) {
-		return process.env.ORCA_CLI_COMMAND;
-	}
-	if (process.env.ORCA_BIN) {
-		return process.env.ORCA_BIN;
-	}
-	if (process.env.ORCA_DEV_REPO_ROOT) {
-		return "orca-dev";
-	}
+// The PATH probe used to spawn `which orca-ide` synchronously on **every** Orca call — a
+// synchronous subprocess that freezes the TUI (rendering and keystroke echo) inside live handlers
+// and on every reconcile timer tick. It is now an async stat scan, resolved once per process.
+let orcaCmdPromise: Promise<string> | undefined;
 
-	// Check if orca-ide is available on PATH (used on Linux outside managed terminal)
-	try {
-		const checkTool = process.platform === "win32" ? "where" : "which";
-		execFileSync(checkTool, ["orca-ide"], { stdio: "ignore" });
-		return "orca-ide";
-	} catch {}
-
-	return "orca";
+export function resolveOrcaCmd(): Promise<string> {
+	if (process.env.ORCA_CLI_COMMAND) return Promise.resolve(process.env.ORCA_CLI_COMMAND);
+	if (process.env.ORCA_BIN) return Promise.resolve(process.env.ORCA_BIN);
+	if (process.env.ORCA_DEV_REPO_ROOT) return Promise.resolve("orca-dev");
+	orcaCmdPromise ??= commandExists("orca-ide").then((found) => (found ? "orca-ide" : "orca"));
+	return orcaCmdPromise;
 }
 
 /**
@@ -182,7 +175,7 @@ export function orcaErrorText(env: { error?: { code?: string; message: string } 
  * Executes an Orca CLI command with JSON formatting and returns the parsed envelope.
  */
 export async function execOrca<T = any>(args: string[], options: OrcaCommandOptions = {}): Promise<OrcaEnvelope<T>> {
-	const cmd = resolveOrcaCmd();
+	const cmd = await resolveOrcaCmd();
 	const fullArgs = [...args];
 	if (!fullArgs.includes("--json")) {
 		fullArgs.push("--json");
@@ -238,8 +231,11 @@ export async function execOrca<T = any>(args: string[], options: OrcaCommandOpti
 /**
  * Spawns an Orca long-poll process for orchestration message check.
  */
-export function spawnOrcaCheck(runId?: string, options: { cwd?: string; timeoutMs?: number; ackDeliveryId?: string } = {}): ChildProcess {
-	const cmd = resolveOrcaCmd();
+export async function spawnOrcaCheck(
+	runId?: string,
+	options: { cwd?: string; timeoutMs?: number; ackDeliveryId?: string } = {},
+): Promise<ChildProcess> {
+	const cmd = await resolveOrcaCmd();
 	const args = [
 		"orchestration",
 		"check",

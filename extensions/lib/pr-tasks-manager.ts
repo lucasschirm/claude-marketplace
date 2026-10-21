@@ -816,6 +816,18 @@ export function formatTaskDetail(task: PRTask): string {
 /**
  * Formats the one-time notice sent when a sync finds open tasks whose thread no longer exists.
  */
+/**
+ * Formats the notice for conversations a sync saw for the first time: a reviewer commented while the
+ * agent was finishing, so the settle gate had no task to block on and the agent has to be re-engaged.
+ */
+export function formatNewTaskNotice(newTasks: PRTask[]): string {
+	const list = newTasks.map((t) => `- ${t.conversationId} (PR #${t.prNumber}, ${formatTaskFileLocation(t)})`).join("\n");
+	return (
+		`New PR review conversation(s) were opened since the last check and are now tracked as open tasks:\n${list}\n\n` +
+		`Use **pr_task_detail** to read the comments and **pr_task_resolve** to resolve them (or **pr_task_blocked** if you need information first); stopping is blocked while they stay open.`
+	);
+}
+
 export function formatStaleNotice(staleTasks: PRTask[]): string {
 	const list = staleTasks.map((t) => `- ${t.conversationId} (PR #${t.prNumber}, ${formatTaskFileLocation(t)})`).join("\n");
 	return (

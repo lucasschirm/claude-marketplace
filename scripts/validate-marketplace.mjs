@@ -7,6 +7,8 @@
 //   - `source` resolves to a directory holding .claude-plugin/plugin.json
 //   - the plugin.json `name` matches the marketplace entry it belongs to
 //   - every plugins/*/.claude-plugin/plugin.json is listed in the marketplace
+//   - every plugins/*/.devin-plugin/plugin.json parses and names its own directory
+//   - the copies of extensions/lib/ that a plugin vendors match the originals
 // SKILL.md / agents/*.md frontmatter is NOT checked here: scripts/check-quality.mjs owns that invariant
 // (same BOM/CRLF tolerance and `name` length rule, plus the root skills/ tree this never covered). Two
 // parsers for one rule is how they start to disagree.
@@ -17,6 +19,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkPluginLibs } from "./sync-plugin-libs.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const problems = [];
@@ -83,6 +86,32 @@ if (marketplace) {
 		ok(`${entry.name}: source + manifest ok`);
 	}
 }
+
+// --- Devin CLI manifests ---------------------------------------------------
+
+// Devin installs by directory and reads .devin-plugin/plugin.json, so a plugin can carry a manifest
+// Claude Code never looks at. A broken one there is invisible to every other check.
+if (fs.existsSync(path.join(root, "plugins"))) {
+	for (const dir of fs.readdirSync(path.join(root, "plugins"), { withFileTypes: true })) {
+		if (!dir.isDirectory()) continue;
+		const manifestRel = path.posix.join("plugins", dir.name, ".devin-plugin/plugin.json");
+		if (!fs.existsSync(path.join(root, manifestRel))) continue;
+		const devin = readJson(manifestRel);
+		if (!devin) continue;
+		if (!devin.name) fail(`${manifestRel}: \`name\` is required`);
+		else if (devin.name !== dir.name)
+			fail(`${manifestRel}: name "${devin.name}" != directory "${dir.name}" (Devin resolves plugins by directory)`);
+		if (!devin.description) fail(`${manifestRel}: \`description\` is required`);
+		if (!devin.version) fail(`${manifestRel}: \`version\` is required`);
+		else ok(`${manifestRel}: ok (${devin.name} ${devin.version})`);
+	}
+}
+
+// --- Vendored engine files -------------------------------------------------
+
+// An install copies a plugin directory alone, so a plugin that imports from extensions/lib dies on
+// import inside the host's cache. Plugins carry copies; these must stay byte-identical.
+for (const problem of checkPluginLibs(root)) fail(problem);
 
 // Every plugin on disk must be listed in the marketplace manifest.
 if (fs.existsSync(path.join(root, "plugins"))) {

@@ -1,8 +1,12 @@
 # PR Observer & Conversation Tasks
 
-When working on branches with a GitHub Pull Request:
-- Use `pr_tasks_list` to discover open review comments.
-- Inspect comment details and suggested changes using `pr_task_detail`.
-- Apply suggestions and resolve threads using `pr_task_resolve`.
-- If human clarification is required, flag the task with `pr_task_blocked`.
-- Do not conclude your work while unresolved conversation tasks remain.
+When working on a branch with a GitHub pull request:
+
+- `observe_pr` reads CI and the conversation counts of a PR. It is a snapshot - call it again after
+  pushing, and once more before finishing.
+- `pr_tasks_list` discovers the open review conversations; `pr_task_detail` shows one in full,
+  including its code suggestion.
+- `pr_task_resolve` posts your message and resolves the thread; with `accept_suggestion` it also
+  writes the suggestion, which it only does after that suggestion was shown to you.
+- When a conversation needs a human decision, `pr_task_blocked` posts the reason and holds it.
+- Do not conclude your work while unresolved conversations remain.

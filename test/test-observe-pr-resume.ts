@@ -315,6 +315,11 @@ exit 1
 			// attached-notice window (400ms delay, well after the input transform below).
 			execFileSync("git", ["checkout", "-q", "-b", "feat2"], { cwd: tmpDir });
 			await handlers.turn_end({ type: "turn_end" }, makeCtx());
+			// Branch checks are scheduled off turn_end now (turn_end must not await network I/O), so the
+			// detection lands a moment later. Poll for it instead of flushing: 60's announcement timer is
+			// 400 ms and R6c needs it still pending.
+			const r6b = Date.now() + 15_000;
+			while (!observed()?.has(60) && Date.now() < r6b) await sleep(25);
 			assert(observed()?.has(60), "R6b: 60 must be auto-observed on feat2");
 
 			// Idle input while 60's timer is still pending: only 7's (restored, pending)

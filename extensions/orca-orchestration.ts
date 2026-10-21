@@ -16,6 +16,7 @@ import {
 } from "./lib/orca-client.ts";
 import { capList, type ToolDetails } from "./lib/tool-result.ts";
 import { logError } from "./lib/extension-log.ts";
+import { createTaskScope, reportBudgetViolation } from "./lib/nonblocking.ts";
 
 const GLOBAL_GUARD_KEY = "__PI_ORCA_ORCHESTRATION_EXTENSION_ACTIVE__";
 
@@ -292,10 +293,26 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	let reconcileTimer: NodeJS.Timeout | undefined;
 	let restartCheckTimer: NodeJS.Timeout | undefined;
 	let lastPendingAckDeliveryId: string | undefined;
+	/** The run the pending ack belongs to, so a spawn for another run never carries it. */
+	let lastPendingAckRunId: string | undefined;
 	let lastUIContext: ExtensionUIContext | undefined;
 	let lastCwd: string = process.cwd();
 	let disposed = false;
 	let isReconciling = false;
+
+	// Internal failures go to the file log (extension-log): console.* would interleave with the TUI.
+	function logTask(msg: string): void {
+		logError("orca-orchestration", msg);
+	}
+
+	// Orca CLI rounds run here, never on a path Pi awaits: results land afterwards (status line,
+	// worker state, steer messages). The budget stops a hung orca call from chaining more calls.
+	const BOOT_BUDGET_MS = Number.parseInt(process.env.PI_EXT_BOOT_BUDGET_MS ?? "", 10) || 5_000;
+	const tasks = createTaskScope("orca_orchestration", { onError: logTask, budgetMs: 30_000 });
+
+	function checkBudget(event: string, startedAt: number): void {
+		reportBudgetViolation("orca_orchestration", event, performance.now() - startedAt, 20, logTask);
+	}
 
 	// Keep the in-memory worker registry bounded: once it exceeds the cap, evict the
 	// oldest settled workers (running workers are never evicted). Without this, a
@@ -389,29 +406,76 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 	// --- Check Loop Engine (orca orchestration check --wait) ---
 
-	function startCheckProcess(ackDeliveryId?: string) {
-		if (disposed) return;
+	// Resolving the Orca command is async now (no synchronous `which` on the event loop), so the
+	// spawn is awaited in the background. The generation guards the race: only the newest request
+	// may claim `checkProcess`, and a process that resolved after a stop/session switch is killed.
+	let checkSpawnSeq = 0;
+
+	/**
+	 * Kill the running check process and retire its generation, so a spawn whose command resolution
+	 * is still in flight can no longer claim `checkProcess`. Every path that stops the check loop
+	 * goes through here: a stop that only kills the process lets a late spawn start observing again
+	 * for a session that asked to stop.
+	 */
+	function stopCheckProcess() {
+		checkSpawnSeq++;
+		// A `check --wait` exit schedules a respawn a second later whenever a run still looks live.
+		// Stopping has to cancel that too, or the timer spawns a fresh 900 s watcher for a run the
+		// user just stopped — and its deliveries would steer into the stopped session.
+		if (restartCheckTimer) {
+			clearTimeout(restartCheckTimer);
+			restartCheckTimer = undefined;
+		}
 		if (checkProcess) {
 			try {
 				checkProcess.kill("SIGTERM");
 			} catch {}
 			checkProcess = null;
 		}
+	}
 
-		try {
-			checkProcess = spawnOrcaCheck(activeRunId, {
-				cwd: lastCwd,
-				timeoutMs: 900000,
-				ackDeliveryId: ackDeliveryId || lastPendingAckDeliveryId,
-			});
-		} catch (err) {
-			logError("orca-orchestration", "Failed to spawn orchestration check process", err);
-			return;
-		}
+	function startCheckProcess() {
+		if (disposed) return;
+		stopCheckProcess();
 
-		lastPendingAckDeliveryId = undefined;
-		const proc = checkProcess;
+		// Bound to one run for the whole spawn: `activeRunId` can change while the orca command
+		// resolves, and a watcher for the new run must not carry an ack recorded for the old one.
+		const runId = activeRunId;
+		const pendingAck = lastPendingAckRunId === runId ? lastPendingAckDeliveryId : undefined;
+		const seq = ++checkSpawnSeq;
 
+		void (async () => {
+			let proc: ChildProcess;
+			try {
+				proc = await spawnOrcaCheck(runId, { cwd: lastCwd, timeoutMs: 900000, ackDeliveryId: pendingAck });
+			} catch (err) {
+				logError("orca-orchestration", "Failed to spawn orchestration check process", err);
+				return;
+			}
+			if (disposed || seq !== checkSpawnSeq) {
+				// A ChildProcess that emits 'error' with no listener crashes the process, and
+				// wireCheckProcess() (which attaches one) never runs for a discarded spawn.
+				proc.on("error", (err) => logError("orca-orchestration", "Discarded check process errored", err));
+				try {
+					proc.kill("SIGTERM");
+				} catch {}
+				return;
+			}
+			// The ack is consumed only now. Resolving the orca command is async, so this spawn can be
+			// discarded (a newer start, or a shutdown) while it was still in flight — clearing the pending
+			// ack up front would leave the process that replaces this one unable to ack, and Orca
+			// re-delivers that delivery, which `handleCheckDelivery` would surface a second time.
+			if (lastPendingAckDeliveryId === pendingAck) {
+				lastPendingAckDeliveryId = undefined;
+				lastPendingAckRunId = undefined;
+			}
+			checkProcess = proc;
+			wireCheckProcess(proc, runId);
+		})();
+	}
+
+	/** `runId` is the run this watcher was spawned for, not whatever is current when a line arrives. */
+	function wireCheckProcess(proc: ChildProcess, runId?: string) {
 		proc.on("error", (err) => {
 			logError("orca-orchestration", "Check process error", err);
 		});
@@ -430,7 +494,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 					return;
 				}
 
-				handleCheckDelivery(data);
+				handleCheckDelivery(data, runId);
 			} catch {
 				// Non-JSON output (log headers, etc.)
 			}
@@ -438,7 +502,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 		proc.on("close", (code) => {
 			if (disposed) return;
-			checkProcess = null;
+			if (checkProcess === proc) checkProcess = null;
 
 			// If active dispatches remain, restart the check process after brief pause
 			let hasRunningWorkers = false;
@@ -459,12 +523,15 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		});
 	}
 
-	function handleCheckDelivery(data: any) {
+	function handleCheckDelivery(data: any, runId?: string) {
 		const delivery: any = data.result?.delivery || data.delivery || data.result || data;
 
 		const deliveryId = delivery?.deliveryId || data.result?.deliveryId || data.deliveryId;
 		if (deliveryId) {
 			lastPendingAckDeliveryId = deliveryId;
+			// The run of the watcher that delivered it: during a run switch `activeRunId` is already
+			// the next run, and an ack bound to that run would be applied where it does not belong.
+			lastPendingAckRunId = runId;
 		}
 
 		const messages = delivery?.messages || (Array.isArray(data.result) ? data.result : Array.isArray(data) ? data : []);
@@ -548,12 +615,18 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 	// --- Reconciliation Watcher (orca orchestration worker-list) ---
 
-	async function reconcileWorkers() {
-		if (disposed || isReconciling) return;
+	async function reconcileWorkers(signal?: AbortSignal) {
+		// `signal` comes from the task scope: a round that was aborted (session gone, superseded) must
+		// not keep mutating the worker registry or notifying the coordinator.
+		if (disposed || isReconciling || signal?.aborted) return;
 		isReconciling = true;
 
 		try {
 			const res = await execOrca<{ workers?: OrcaWorkerRow[]; rows?: OrcaWorkerRow[] }>(["orchestration", "worker-list"], { cwd: lastCwd });
+			// The round-trip is the abortable part: `session_shutdown` can land inside it, and the
+			// context is still live during the shutdown emit, so without this a torn-down session gets
+			// its registry mutated and steer messages queued after it was supposed to stop.
+			if (signal?.aborted || disposed) return;
 
 			const rows: OrcaWorkerRow[] =
 				res.ok && res.result ? (res.result as any).workers || res.result.rows || (Array.isArray(res.result) ? res.result : []) : [];
@@ -562,6 +635,8 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				for (const row of rows) {
 					const dId = row.dispatchId;
 					if (!dId) continue;
+					// One row at a time, because the notify below is the part the user feels.
+					if (signal?.aborted || disposed) return;
 
 					let w = observedWorkers.get(dId);
 					const verdict = row.projection?.liveness?.verdict;
@@ -632,13 +707,15 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		if (reconcileTimer) clearInterval(reconcileTimer);
 		const interval = getObserverInterval();
 		reconcileTimer = setInterval(() => {
-			reconcileWorkers();
+			tasks.schedule("reconcile", (signal) => reconcileWorkers(signal));
 		}, interval * 1000);
 	}
 
-	async function discoverActiveRun(cwd: string) {
+	async function discoverActiveRun(cwd: string, signal?: AbortSignal) {
 		try {
 			const res = await execOrca<{ run: any }>(["orchestration", "run-current"], { cwd });
+			// A run discovered after this round was superseded belongs to a session that is gone.
+			if (signal?.aborted || disposed) return;
 			if (res.ok && res.result?.run) {
 				const run = res.result.run;
 				activeRunId = run.id || run.runId;
@@ -651,19 +728,36 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	// --- Lifecycle Hooks ---
 
 	pi.on("session_start", async (_evt, ctx) => {
+		const startedAt = performance.now();
+		tasks.resume();
 		lastUIContext = ctx.ui;
 		lastCwd = ctx.cwd || process.cwd();
 		disposed = false;
 		updateStatusUI(ctx.ui);
-		await discoverActiveRun(lastCwd);
-		await reconcileWorkers();
+		// Detached: Pi awaits session_start before it paints the restored transcript, and every orca
+		// call costs a process spawn. The timer starts now and the discovered run/worker state is
+		// applied when the round lands (startCheckProcess and the status line are both re-entrant).
+		tasks.run(
+			"boot-discovery",
+			async (signal) => {
+				await discoverActiveRun(lastCwd, signal);
+				if (signal.aborted || disposed) return;
+				await reconcileWorkers(signal);
+			},
+			{ budgetMs: BOOT_BUDGET_MS },
+		);
 		startReconcileTimer();
+		(globalThis as any).__PI_ORCA_ORCHESTRATION_FLUSH__ = (timeoutMs?: number) => tasks.flush(timeoutMs);
+		checkBudget("session_start", startedAt);
 	});
 
 	pi.on("turn_end", async (_evt, ctx) => {
+		const startedAt = performance.now();
 		if (ctx?.cwd) lastCwd = ctx.cwd;
 		if (ctx?.ui) lastUIContext = ctx.ui;
-		await reconcileWorkers();
+		// Scheduled, not awaited: an awaited round keeps Pi busy after every turn.
+		tasks.schedule("reconcile", (signal) => reconcileWorkers(signal));
+		checkBudget("turn_end", startedAt);
 	});
 
 	const AUTO_OBSERVATION_PROMPT_MESSAGE =
@@ -698,14 +792,11 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		disposed = true;
+		tasks.abort();
+		delete (globalThis as any).__PI_ORCA_ORCHESTRATION_FLUSH__;
 		if (reconcileTimer) clearInterval(reconcileTimer);
 		if (restartCheckTimer) clearTimeout(restartCheckTimer);
-		if (checkProcess) {
-			try {
-				checkProcess.kill("SIGTERM");
-			} catch {}
-			checkProcess = null;
-		}
+		stopCheckProcess();
 		// Release the per-session state: the worker registry (including every
 		// dispatched spec text) must not accumulate across sessions in one process,
 		// and the stale UI context must not be used by post-shutdown events.
@@ -995,12 +1086,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 				activeRunId = undefined;
 				activeObjective = undefined;
 
-				if (checkProcess) {
-					try {
-						checkProcess.kill("SIGTERM");
-					} catch {}
-					checkProcess = null;
-				}
+				stopCheckProcess();
 				updateStatusUI(ctx.ui);
 				return {
 					details: toolDetails("orca_orchestration_observe", { result: "observation_stopped", scope: "all" }),
