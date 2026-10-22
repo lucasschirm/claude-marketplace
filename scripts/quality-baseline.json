@@ -16,15 +16,15 @@
     "biome.complexity/useOptionalChain": 8,
     "biome.suspicious/noExplicitAny": 160,
     "biome.style/noNonNullAssertion": 5,
-    "biome.suspicious/noConsole": 10,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
     "extensions/devin-delegate.ts": 2684,
-    "extensions/lib/ci-verdict.ts": 102,
+    "extensions/lib/ci-verdict.ts": 119,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
     "extensions/lib/extension-log.ts": 135,
@@ -34,7 +34,7 @@
     "extensions/lib/orca-client.ts": 572,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 2029,
+    "extensions/observe-pr.ts": 2058,
     "extensions/orca-orchestration.ts": 1735,
     "extensions/pr-tasks.ts": 1505,
     "extensions/tools.ts": 627
@@ -107,8 +107,16 @@
         "extensions/lib/ci-verdict.ts: 102 lines > baseline 66 (files may only shrink)",
         "extensions/observe-pr.ts: 2029 lines > baseline 1992 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-22",
+      "reason": "Authored here, not inherited: review round 1 fixed a permanent strand and a duplicate pass, growing ci-verdict.ts from 102 to 119 lines and observe-pr.ts from 2029 to 2058.",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 119 lines > baseline 102 (files may only shrink)",
+        "extensions/observe-pr.ts: 2058 lines > baseline 2029 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "77df7e3",
+  "generatedFrom": "d3e75d8",
   "biomeConfigHash": "184447d011b421d7"
 }

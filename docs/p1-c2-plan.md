@@ -348,3 +348,25 @@ being the single door matters more than the detector.
 - Independent review said "ready to merge" at the head SHA actually merged, by an engine that did not author the diff.
 - Issue #35: the External-call hygiene boxes and the Devin CI-coverage boxes ticked, anything done differently from the
   issue text annotated inline instead of quietly re-pointed.
+
+## C2.5 as landed, and what review round 1 changed
+
+PR #47 landed the head-SHA scoping; the independent review (Antigravity, at `d3e75d8`) returned *ready to merge* with
+two should-fix findings, both real, both fixed before merge. They are recorded here because each is a class of mistake,
+not a typo.
+
+| Finding | What was actually wrong | What it became |
+| --- | --- | --- |
+| R-1 · duplicate pass | `checkAllCIPassed` latched `allPassedReported` only *after* awaiting `gh pr checks`, so the 2 s poll and a run-completion callback could both pass the entry check on the same answer and announce the same pass twice. The reviewer hit it live in a full suite run. | A per-PR `ciCheckInFlight` guard, released in a `finally`. Proven both ways: with the guard 4/4 suite runs pass; with the guard removed 4/4 fail (T4's exactly-once, or T5 seeing two passes). The window is widened deliberately by a `slow_checks` marker in the mock - an assertion that only fires when the reviewer's machine happened to be slow is not an assertion. |
+| R-2 · the strand | My own scoping was `commonRunSha(completedRuns)`: *all* completed runs had to agree on one commit. But `completedRuns` accumulates across pushes, so after the second push a legitimately green head was `unknown` forever - silently, on every poll, with no user-visible signal. The reviewer wrote the reproducer; my tests did not have it. | `bookkeepingAtHead(headSha, runs)`: runs whose recorded commit is not the head are **ignored**, not counted - a green on `A` cannot pass `B`, and a red on `A` cannot strand `B`. |
+
+R-2 is the lesson worth keeping. Scoping a claim to a commit has two directions, and I only tested the one that felt
+dangerous: *do not pass what you did not watch*. The other direction - *do not go silent on what you did watch* - is
+the same one line of code, and its failure mode is an observer that says nothing forever. The e2e now covers both:
+run 777 belongs to the pre-push commit and produces nothing, then run 778 arrives on the head commit and must produce
+exactly one pass while 777 stays in `completedRuns`. Reverting to the `commonRunSha` rule reproduces the reviewer's
+prediction exactly: the negative assertion still passes, and the positive one times out.
+
+The first version of the negative assertion was a point-in-time check that **passed with the fix reverted** - a race
+masquerading as a test, the same failure mode `test/quality-gate-fixtures.sh` was de-hardcoded against. It is now a
+six-second window (three poll cycles) after the run has demonstrably completed.

@@ -5,7 +5,7 @@ import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
-import { commonRunSha, evaluateCiVerdict } from "./lib/ci-verdict.ts";
+import { bookkeepingAtHead, evaluateCiVerdict, type ObservedRun } from "./lib/ci-verdict.ts";
 import { logError } from "./lib/extension-log.ts";
 import { commandExists, createTaskScope, mapLimited, reportBudgetViolation } from "./lib/nonblocking.ts";
 
@@ -50,9 +50,26 @@ interface ObservedPR {
 	restartTimer?: NodeJS.Timeout;
 	knownComments: Map<string, CommentInfo>;
 	allPassedReported?: boolean;
+	/**
+	 * A CI evaluation is in flight for this PR. Not persisted: it describes a live await, and a
+	 * restored observation starts with none. See checkAllCIPassed.
+	 */
+	ciCheckInFlight?: boolean;
 	/** The agent has already been told this PR is observed (notice delivered, or the observation
 	 * was explicitly started via the tool, whose result is the notification). */
 	announced?: boolean;
+}
+
+/**
+ * The observer's own run history for a PR, with each run's commit attached. Feeds
+ * bookkeepingAtHead(), which decides which of these runs are evidence about the head commit.
+ */
+function observedRuns(pr: ObservedPR): ObservedRun[] {
+	const runs = new Map<string, ObservedRun>();
+	for (const id of pr.completedRuns) runs.set(id, { sha: pr.runShas.get(id) });
+	// Written second so an id in both sets counts as the failure it cannot un-be.
+	for (const id of pr.failedRuns) runs.set(id, { sha: pr.runShas.get(id), failed: true });
+	return [...runs.values()];
 }
 
 const STATE_CUSTOM_TYPE = "pi_observe_pr_state";
@@ -674,71 +691,83 @@ export default async function (pi: ExtensionAPI) {
 	async function checkAllCIPassed(prNumber: number, pr: ObservedPR) {
 		if (pr.activeRuns.size !== 0) return;
 		if (pr.allPassedReported) return;
+		// One evaluation per PR at a time. allPassedReported is only set *after* the gh await, so the
+		// interval poll and a run-completion callback can both get past it with the same empty answer
+		// and announce the same pass twice - not hypothetical, it is how T4 of
+		// test-observe-pr-gh-failure failed once the two aligned. Skipping is not losing: the poll asks
+		// again on its next cycle, and allPassedReported stays false until a real pass.
+		if (pr.ciCheckInFlight) return;
 		if (!ghHealth.acquireSlot()) return;
 
-		// The verdict is decided by evaluateCiVerdict(), which never answers "passed" for a failed
-		// `gh pr checks` call or an unusable payload. Both of those branches used to announce
-		// "All CI passed" as long as one run had completed and none had failed — the most expensive
-		// false green an agent can be handed. A non-pass verdict just waits for the next slot, and
-		// allPassedReported stays false until there is a real pass.
-		let checks: unknown;
-		let ghErr: unknown;
-		// `stale` is read only by the finally below: a stale call still releases the slot, but it
-		// must not touch ghHealth (it never saw the response) or announce anything.
-		let stale = false;
-		// acquireSlot() to release() must be exception-safe: the singleton counts a missed release
-		// as a permanently busy slot, so from then on no timer anywhere can claim a retry again.
-		// That includes JSON.parse, so it happens inside the guarded block.
+		pr.ciCheckInFlight = true;
 		try {
-			const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
-				cwd: pr.cwd,
-				timeout: GH_TIMEOUT_MS,
-			});
-			// A stop or a resume-restore during the gh await must not let this stale call
-			// deliver "All CI passed" through the replacement entry's turn.
-			if (observedPRs.get(prNumber) !== pr) {
-				stale = true;
-				return;
+			// The verdict is decided by evaluateCiVerdict(), which never answers "passed" for a failed
+			// `gh pr checks` call or an unusable payload. Both of those branches used to announce
+			// "All CI passed" as long as one run had completed and none had failed — the most expensive
+			// false green an agent can be handed. A non-pass verdict just waits for the next slot, and
+			// allPassedReported stays false until there is a real pass.
+			let checks: unknown;
+			let ghErr: unknown;
+			// `stale` is read only by the finally below: a stale call still releases the slot, but it
+			// must not touch ghHealth (it never saw the response) or announce anything.
+			let stale = false;
+			// acquireSlot() to release() must be exception-safe: the singleton counts a missed release
+			// as a permanently busy slot, so from then on no timer anywhere can claim a retry again.
+			// That includes JSON.parse, so it happens inside the guarded block.
+			try {
+				const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
+					cwd: pr.cwd,
+					timeout: GH_TIMEOUT_MS,
+				});
+				// A stop or a resume-restore during the gh await must not let this stale call
+				// deliver "All CI passed" through the replacement entry's turn.
+				if (observedPRs.get(prNumber) !== pr) {
+					stale = true;
+					return;
+				}
+				checks = JSON.parse(res.stdout);
+			} catch (err) {
+				ghErr = err;
+			} finally {
+				if (!stale) {
+					if (ghErr === undefined) ghHealth.recordSuccess();
+					else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+				}
+				ghHealth.release();
 			}
-			checks = JSON.parse(res.stdout);
-		} catch (err) {
-			ghErr = err;
-		} finally {
-			if (!stale) {
-				if (ghErr === undefined) ghHealth.recordSuccess();
-				else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
-			}
-			ghHealth.release();
-		}
 
-		try {
-			if (ghErr !== undefined) {
-				// A failed call carries no verdict at all. GitHub-availability failures stay silent
-				// (the shared backoff re-checks); any other gh failure is logged, never reported as
-				// a pass, and malformed output is treated the same way.
-				if (!isGhAvailabilityError(ghErr)) logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
-			} else if (
-				evaluateCiVerdict({
-					checks,
-					ghFailed: false,
-					headSha: pr.headSha,
-					// only consulted for an empty check list, where it is the remaining evidence - and only
-					// evidence about the commit the completed runs all agree on
-					bookkeeping: {
-						completed: pr.completedRuns.size,
-						failed: pr.failedRuns.size,
-						sha: commonRunSha(Array.from(pr.completedRuns, (id) => pr.runShas.get(id))),
-					},
-				}) === "passed"
-			) {
-				pr.allPassedReported = true;
-				sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
-				// Persisted so a session restart does not announce the same pass again.
-				persistState();
+			try {
+				if (ghErr !== undefined) {
+					// A failed call carries no verdict at all. GitHub-availability failures stay silent
+					// (the shared backoff re-checks); any other gh failure is logged, never reported as
+					// a pass, and malformed output is treated the same way.
+					if (!isGhAvailabilityError(ghErr)) logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
+				} else if (
+					evaluateCiVerdict({
+						checks,
+						ghFailed: false,
+						headSha: pr.headSha,
+						// Only consulted for an empty check list, and then only the runs recorded for the commit
+						// being polled: a green from an earlier commit cannot pass a push that was never built, and
+						// a red from an earlier commit must not strand one that was. Scoping here rather than
+						// requiring one common commit across completedRuns is what keeps a long observation - which
+						// accumulates runs across pushes - able to report a pass at all.
+						bookkeeping: bookkeepingAtHead(pr.headSha, observedRuns(pr)),
+					}) === "passed"
+				) {
+					pr.allPassedReported = true;
+					sendAgentMessage(`All CI passed for the PR ${prNumber}.`);
+					// Persisted so a session restart does not announce the same pass again.
+					persistState();
+				}
+			} catch (err) {
+				// A throwing verdict/notify path must not escape with the slot held either.
+				logInternal(`Error evaluating CI status for PR ${prNumber}`, err);
 			}
-		} catch (err) {
-			// A throwing verdict/notify path must not escape with the slot held either.
-			logInternal(`Error evaluating CI status for PR ${prNumber}`, err);
+		} finally {
+			// Every path above returns or throws out of the guarded block, including the stale-call
+			// return; a flag left true would silence CI reporting for this PR forever.
+			pr.ciCheckInFlight = false;
 		}
 	}
 	// A run whose watcher died on a GitHub-availability error is re-watched on the next
