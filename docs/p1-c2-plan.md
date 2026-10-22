@@ -79,9 +79,11 @@ and is exempted by the invariant's existing allow-list).
 
 - Default `timeoutMs` is **mandatory, not optional**: the signature has no path to "no timeout". Each call site
   passes its own value where the current one matters (`GH_TIMEOUT_MS` for `gh`, etc.).
-- Long-lived children are a separate door: `spawnLongLived(cmd, args, { idleTimeoutMs })`. The `devin acp` child is
-  a session, not a request, and a flat `timeout` on it would kill a healthy delegation. `execTimeout` accepts
-  `idleTimeoutMs` as satisfying the rule; that exception needs a **fixture in the same commit** (an invariant with no
+- Long-lived children are a separate door: `spawnLongLived(cmd, args, { idleNoToolMs, idleWithToolMs })`. The
+  `devin acp` child is a session, not a request, and a flat `timeout` on it would kill a healthy delegation; the two
+  thresholds are measured in D7 below (90 s of silence with no tool open, 30 min while a tool call is open), and the
+  open-tool state is tracked as a **set of `toolCallId`s**, not a flag, because Devin runs tools concurrently.
+  `execTimeout` accepts `idleNoToolMs` as satisfying the rule; that exception needs a **fixture in the same commit** (an invariant with no
   failing fixture is an invariant that measures nothing - four of them did when the gate was written).
 - Validation failure is an error with `code = "BAD_SCHEMA"`, reported with the path biome-style (`/workers/0/id`),
   and **never** with the payload embedded if the payload can contain secrets.
@@ -178,7 +180,72 @@ boxes with inline annotations saying what landed differently, and post the ratch
 - Sweeping `any` (160) wholesale, coverage floors, `test/harness.ts`, and the numbered-harness migration.
 - Changing `biome.jsonc` rules beyond the `noConsole` flip - the config hash makes every edit a recorded decision.
 
-## Decision gates (need a call before the relevant step)
+## Decisions (locked 2026-10-21)
+
+**D4 = (a)** discriminated envelope. **D6 = (a)** `DEVIN_COMMAND`. **D8 = (b)** the zero-drop reason rule extends to
+repo invariants. **D7** is answered from logs below.
+
+### D7 - what "idle" means for a Devin delegation, measured
+
+The question was how long a healthy Devin turn can go without the agent doing anything. Answered from the extension's
+own event logs: `~/.pi/agent/devin_delegate/<piSession>/<devinSession>/events.jsonl` (419 sessions on this machine,
+735 MB; 179 large enough to contain turns). A turn is delimited by a logged `user_message` and the ACP frame carrying
+`stopReason`, so **every gap below comes from a turn that completed normally** - which is the only population that can
+measure a false positive.
+
+Activity = the ACP `session/update` kinds the stream actually produces: `agent_thought_chunk`, `agent_message_chunk`,
+`tool_call`, `tool_call_update`, `plan` (plus `usage_update`, measured and **useless as a heartbeat** - counting it as
+liveness changed nothing, so it is not a keepalive).
+
+| Population | n | p99 | p99.9 | **max** |
+| --- | --- | --- | --- | --- |
+| Silence with **no tool call open** (genuinely the model thinking) | 10,257 | 14.2 s | 25.6 s | **37.1 s** |
+| Silence while **a tool call is open** (agent waiting on a command) | 125,344 | 13 s | 58 s | **297 s** |
+| Tool duration, `tool_call` -> `completed`/`failed` | 7,396 | 79 s | 748 s | **1,335 s** (22 min) |
+
+Per-turn maximum of the no-tool silence: p50 1 s, p90 21 s, p95 25 s, p99 33 s, **max 37 s** - **0 of 191 turns** would
+have been flagged at 60 s or above. Two classification facts drive the design:
+
+- **Every** silence over 120 s (41/41) and over 180 s (32/32) had a `tool_call` still open. 82% of those over 60 s did.
+  The long quiet periods are not the agent thinking; they are `npm ci`, test suites and builds, which are silent by
+  nature. A timer that ignores open tool calls would therefore call 18 real tool runs "stalled" at 300 s (0.24% of
+  tools) and would have misdiagnosed the longest-silent turn in the dataset (297 s, a tool in flight).
+- Real model silence is short and tight: the worst in the whole corpus is **37 s**, and only 5 gaps out of 10,257
+  exceeded 30 s.
+
+**Therefore:**
+
+```ts
+spawnLongLived("devin", args, {
+	idleNoToolMs: 90_000,   // >2x the 37s observed max; nothing healthy is silent this long with no tool open
+	idleWithToolMs: 1_800_000, // > max tool duration 1335s; a build/test may be quiet for 20 minutes legitimately
+});
+```
+
+And the action stays what the existing stall watchdog already does (`devin-delegate.ts:713-731`): mark `stalled`, send
+one steering message telling the user to check `devin_status` / `devin_cancel` / `devin_restart`, and **never**
+auto-fail or kill - process death is already detected by `onExit` as `interrupted`. What changes in C2 is the number
+and the condition, not the policy:
+
+- Today's default is **30 minutes** of no ACP update at all (`stallTimeoutMinutes`, `devin-delegate.ts:617`) - about
+  49x the observed true-silence maximum, which is why it has never been useful.
+- The replacement is tool-aware: 90 s with no tool open, 30 min with a tool open. Suppression on `tool_call` and
+  re-arm on the terminal `tool_call_update` must be tracked **by `toolCallId` as a set**, because Devin runs tools
+  concurrently - single-slot tracking misclassified 41 gaps over 120 s the first time it was tried here, and produced
+  a fictitious 297 s "thinking" gap.
+- Request-shaped calls keep plain deadlines: `GH_TIMEOUT_MS = 60_000` (8 sites), `FETCH_TIMEOUT_MS = 60_000` (6 read
+  sites), `MUTATION_TIMEOUT_MS = 120_000` - so the default for `runJson`/`runText` is 60 s with writes at 120 s, not
+  the 30 s this plan first proposed. 30 s would newly break calls that are healthy today. The `timeoutMs: 900000` at
+  `orca-orchestration.ts:450` is not a counterexample: it is `--timeout-ms` passed into orca's own argv, not our
+  process deadline.
+
+Limits of the measurement, stated because the recommendation depends on it: one machine, one user, 191 matched turns,
+mixed Devin models that the event log does not label, and `events.jsonl` files truncated by the log-size trim - so
+the 37 s maximum is an order statistic from a modest tail, and the 90 s threshold keeps >2x headroom rather than 1.1x.
+
+---
+
+## Decision gates (historical - resolved above)
 
 **D4 - envelope shape for `lib/exec.ts`.**
 (a) Discriminated union `{ ok: true, data: T } | { ok: false, code, message }` - `data` does not exist on the failure
@@ -196,10 +263,9 @@ import anything Pi-only, so `test --test` can exercise it without booting Pi.
 field on the manager class. *Recommendation: (a)* - it also works for the shim-based tests without touching
 constructors, and it matches the precedent the repo already set.
 
-**D7 - timeouts.** (a) one default (`30_000`) with per-site overrides; (b) a per-verb table. *Recommendation: (a)* -
-the current spread is 30 s for `gh`, and there is no measured slow verb that needs an exception; exceptions get
-justified inline. Long-lived children go through `spawnLongLived({ idleTimeoutMs })`, never a flat timeout, or a busy
-Devin delegation dies mid-turn.
+**D7 - timeouts.** Resolved from logs rather than from a guess: see the D7 evidence table above. The plan's original
+"30 s default" is withdrawn; 60 s reads / 120 s writes, and a tool-aware idle rule for Devin (90 s no tool open /
+30 min with a tool open, notice-only as today).
 
 **D8 - should the zero-drop reason rule cover repo invariants too?** It currently covers Biome metrics: a metric that
 falls to zero needs `--write --reason`, because a fall to zero is indistinguishable from the rule being renamed or
@@ -216,7 +282,7 @@ Orca boundary), then C2.2, C2.3, C2.5, C2.6, C2.7.
 | Risk | Why it is real | Mitigation |
 | --- | --- | --- |
 | A timeout that never fired before now kills a working call | Nothing has ever bounded 25 of these calls; some may be slow in practice and nobody noticed because there was no timeout | Add the timeout per file, run that file's suite repeatedly (`observe-pr-gh-failure` three times was how the gh-health race was found), and keep the failure text distinguishable ("timed out after 30s" vs "gh failed") |
-| Killing a live `devin acp` child | A flat `timeout` on a session-shaped spawn is a bug factory | `spawnLongLived({ idleTimeoutMs })`, exempted by an invariant change that ships with a fixture |
+| Killing a live `devin acp` child | A flat `timeout` on a session-shaped spawn is a bug factory, and the log evidence is blunt: silences over 120 s had an open tool call in 41 of 41 cases, up to 297 s, while real model silence never exceeded 37 s | `spawnLongLived({ idleNoToolMs, idleWithToolMs })`, tool-aware and notice-only, exempted by an invariant change that ships with a fixture |
 | Schema validation rejecting output `gh`/`orca` legitimately sends | A strict `Type.Object` rejects extra keys and any field that is sometimes absent | Schemas are permissive on unknown keys and mark genuinely-optional fields `Type.Optional`; rejection is surfaced as `BAD_SCHEMA` with the path, never silently coerced |
 | `maxBuffer` truncation turning into `BAD_JSON` | Large `worker-list` output today succeeds because the default buffer is generous | Set it explicitly in `runJson` and include the byte count in the error code text |
 | Regressing C1's security work | `lib/github-review-threads.ts` holds the git-metadata, symlink and `.git`-containment logic that took two review rounds | C2.3 must leave `test/test-review-thread-paths.ts` at 19/19 with no edits to its assertions |
