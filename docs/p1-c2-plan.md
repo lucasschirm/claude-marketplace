@@ -305,7 +305,8 @@ the 37 s maximum is an order statistic from a modest tail, and the 90 s threshol
 10. `fix(qa): a fall to zero is a decision for every invariant, not just biome's` - D8, with its fixture.
 11. `docs: what C2 changed` - plan doc, `CLAUDE.md`, issue ticks.
 
-Then: merge `origin/main`, re-run `bash test/run.sh` (19 suites) and `quality-fixtures` (132) at that SHA, and get an
+Then: merge `origin/main`, re-run `bash test/run.sh` (20 suites since main's `devin-queue` landed) and
+`quality-fixtures` (132) at that SHA, and get an
 **independent review at the exact head SHA**. If findings and a merge follow, the merge commit is re-verified the same
 way - C1 needed rounds 6 and 7 precisely because that rule was the only thing standing between a green PR and a green
 commit nobody looked at.
