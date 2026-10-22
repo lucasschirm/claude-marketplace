@@ -1,6 +1,6 @@
 {
   "metrics": {
-    "execLocation": 25,
+    "execLocation": 24,
     "execTimeout": 25,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
@@ -14,19 +14,22 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
-    "biome.suspicious/noExplicitAny": 160,
     "biome.style/noNonNullAssertion": 5,
-    "biome.suspicious/noConsole": 10,
+    "biome.suspicious/noExplicitAny": 160,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2684,
+    "extensions/devin-delegate.ts": 2650,
+    "extensions/lib/acp-client.ts": 320,
     "extensions/lib/ci-verdict.ts": 66,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
+    "extensions/lib/devin-permissions.ts": 137,
+    "extensions/lib/devin-slots.ts": 44,
     "extensions/lib/extension-log.ts": 135,
     "extensions/lib/gh-health.ts": 280,
     "extensions/lib/github-review-threads.ts": 590,
@@ -35,7 +38,7 @@
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
     "extensions/observe-pr.ts": 1992,
-    "extensions/orca-orchestration.ts": 1735,
+    "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1505,
     "extensions/tools.ts": 627
   },
@@ -99,8 +102,16 @@
         "extensions/orca-orchestration.ts: 1735 lines > baseline 1649 (files may only shrink)",
         "extensions/pr-tasks.ts: 1505 lines > baseline 1382 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-22",
+      "reason": "devin-delegate.ts 2646->2650 and devin-permissions.ts 118->137: Devin-supplied command text is JSON-quoted and capped before it reaches the agent (prompt injection), and a failed start releases its slot before reporting it. devin-delegate.ts stays below its pre-PR 2684.",
+      "changes": [
+        "extensions/devin-delegate.ts: 2650 lines > baseline 2646 (files may only shrink)",
+        "extensions/lib/devin-permissions.ts: 137 lines > baseline 118 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "76295b3",
+  "generatedFrom": "9012fdd",
   "biomeConfigHash": "184447d011b421d7"
 }

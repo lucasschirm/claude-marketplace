@@ -1,6 +1,6 @@
 ---
 name: delegate-to-devin
-description: Use when handing research, planning, code review, debugging, or coding work to Devin through the devin_delegate, devin_status, devin_message, devin_cancel and devin_restart tools. Covers picking the Devin model per task class, writing the delegation prompt, running tasks in parallel in isolated worktrees, and verifying what comes back.
+description: Use when handing research, planning, code review, debugging, or coding work to Devin through the devin_delegate, devin_status, devin_message, devin_permission, devin_cancel and devin_restart tools. Covers picking the Devin model per task class, writing the delegation prompt, running tasks in parallel in isolated worktrees, and verifying what comes back.
 ---
 
 # Delegate to Devin
@@ -19,7 +19,8 @@ The `devin_*` tools run Devin sessions in the background over its Agent Client P
 | `devin_status` | Check sessions. No args: last 3 messages of every session. `session_id` + `complete: true`: full transcript. |
 | `devin_message` | Send a follow-up to an existing session (`session_id`, `message`). |
 | `devin_cancel` | Cancel a running or queued session (session id or queue id). |
-| `devin_restart` | Resume a failed, interrupted or stopped session in its original worktree. Optional new `prompt`. |
+| `devin_permission` | Answer a session's pending permission request (`session_id`, `decision`: `allow`, `allow_session` or `reject`). |
+| `devin_restart` | Resume a failed, interrupted or stopped session in its original worktree. Optional new `prompt` and `mode`. |
 | `devin_clean_worktree` | Release and delete the worktree for a settled session (`session_id`), or all settled sessions whose PRs are merged/closed (`all_settled: true`). Optional `force`. |
 
 Do not run the `devin` CLI through bash. The extension blocks it and the call fails with a message pointing back to these tools. Only read-only commands are allowed (`devin models list`, `devin ls`, `devin version`, `devin --help`). If a direct CLI run is truly needed, ask the user to run `/devin allow_bash`.
@@ -46,7 +47,9 @@ Pick the model by what a *successful run must do*, not by prompt length.
 
 ## Choosing `mode`
 
-`mode` defaults to `dangerous` (mapped to ACP `bypass`), which auto-approves every tool, including destructive shell. It is the only mode that reliably completes an unattended coding run. `auto` and `accept-edits` abort on the first tool call that needs confirmation, and shell calls always need it.
+`mode` defaults to `dangerous` (mapped to ACP `bypass`), which auto-approves every tool, including destructive shell. It is the only mode that completes an unattended coding run without your involvement.
+
+In every other mode (`smart`, alias `auto`; `accept-edits`; `plan`; `ask`), Devin asks before running tools it may not run on its own, and its turn **blocks until you answer**. You get a message naming the session and the command; answer it with `devin_permission`. `accept-edits` asks before every shell command. An unanswered request is rejected automatically after 5 minutes; Devin then continues without that command. A blocked session holds one of the 2 slots, so answer promptly or the queue stalls behind it. Unknown modes are refused.
 
 Treat `dangerous` as a decision, not a default: pair it with `create_worktree: true` for anything that writes, and for read-only work say "do not modify any files" in the prompt.
 
@@ -57,8 +60,9 @@ Treat `dangerous` as a decision, not a default: pair it with `create_worktree: t
 3. Call `devin_delegate`. You get either `Your session started with id: …` or a queue position. At most 2 sessions run at once; the rest queue FIFO and report their id when they start.
 4. Carry on with other work. **Do not poll `devin_status`.** A follow-up message arrives when a session finishes (including a PR link if one was opened) or fails.
 5. On completion, read the result with `devin_status` (`session_id`, `complete: true` for the full transcript).
-6. Course-correct with `devin_message`, or resume a failed session with `devin_restart`. Use `devin_cancel` when the task is no longer wanted.
-7. Verify the result before reporting it (below).
+6. Answer permission requests with `devin_permission` as they arrive (any mode but `dangerous`).
+7. Course-correct with `devin_message`, or resume a failed session with `devin_restart`. Use `devin_cancel` when the task is no longer wanted.
+8. Verify the result before reporting it (below).
 
 ## Isolating work with `create_worktree`
 
@@ -106,4 +110,5 @@ For research and planning, state the question, the scope of the search, and the 
 - Delegating a mixed task ("review and fix") in one call.
 - Running parallel coding sessions without `create_worktree`, or without telling them which shared files are off limits.
 - Reading `status: failed` as a prompt problem before checking `devin_status` with `complete: true`. Prefer `devin_restart` over a fresh delegation when the worktree already holds useful progress.
+- Cancelling and restarting a session that is waiting for permission: the restart repeats its mode and blocks again. Answer with `devin_permission`, or restart with `mode: "dangerous"`.
 - Treating `devin_cancel` as undo. It stops the session; it does not revert files already written.
