@@ -175,7 +175,16 @@ interface Server {
 	call(method: string, params?: unknown): Promise<any>;
 	text(result: any): string;
 	stderr(): string;
-	exited: Promise<number | null>;
+	/**
+	 * Resolves with the exit code when the child is gone **and its stdio has reached EOF** ('close').
+	 * Deliberately the only way to wait for the server: 'exit' fires when the process is reaped, and a
+	 * message it wrote to stderr on its way out can still be in flight, so `await <exit>` followed by
+	 * `stderr()` is a race. CI met it: the launcher exited 1 and `stderr()` came back empty 11 ms later
+	 * (`a25d729` era, unit job of run 39872388212), while 240 local trials never lost a byte - a
+	 * scheduling difference on a throttled runner, not something a longer sleep fixes. Waiting for
+	 * stdio EOF is the documented guarantee, and there is no `exited` seam to reach for by mistake.
+	 */
+	closed: Promise<number | null>;
 	close(): void;
 }
 
@@ -205,7 +214,7 @@ function startServer(options: {
 	child.stderr.setEncoding("utf8");
 	child.stderr.on("data", (chunk) => (stderr += chunk));
 
-	const exited = new Promise<number | null>((resolve) => child.on("exit", resolve));
+	const closed = new Promise<number | null>((resolve) => child.on("close", resolve));
 	const waiting = new Map<number, (message: any) => void>();
 	let buffer = "";
 	let exitCode: number | null = null;
@@ -249,7 +258,7 @@ function startServer(options: {
 			return result.result.content[0].text as string;
 		},
 		stderr: () => stderr,
-		exited,
+		closed,
 		close: () => {
 			child.stdin.end();
 			child.kill();
@@ -360,9 +369,15 @@ test("the handshake succeeds when nothing is substituted and only the cache is t
 
 test("an unusable plugin says why instead of dying silently", async () => {
 	const server = startServer({ home: tmpDir("pr-observer-home-"), cwd: workspace() });
-	const code = await server.exited;
+	const code = await server.closed;
 	assert.equal(code, 1, "the launcher must exit non-zero when it cannot find the server");
-	assert.match(server.stderr(), /could not locate the plugin directory/);
+	// Names what was actually captured, so a future failure says whether stderr never arrived or said
+	// something else - the difference between a broken launcher and a test that read too early.
+	assert.match(
+		server.stderr(),
+		/could not locate the plugin directory/,
+		`the launcher must say why it gave up; captured stderr was ${JSON.stringify(server.stderr())}`,
+	);
 	server.close();
 });
 
