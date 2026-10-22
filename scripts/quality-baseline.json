@@ -1,6 +1,6 @@
 {
   "metrics": {
-    "execLocation": 25,
+    "execLocation": 24,
     "execTimeout": 25,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
@@ -15,18 +15,21 @@
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
     "biome.suspicious/noExplicitAny": 160,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2684,
+    "extensions/devin-delegate.ts": 2646,
+    "extensions/lib/acp-client.ts": 320,
     "extensions/lib/ci-verdict.ts": 66,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
+    "extensions/lib/devin-permissions.ts": 118,
+    "extensions/lib/devin-slots.ts": 44,
     "extensions/lib/extension-log.ts": 135,
     "extensions/lib/gh-health.ts": 280,
     "extensions/lib/github-review-threads.ts": 590,
@@ -35,7 +38,7 @@
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
     "extensions/observe-pr.ts": 1992,
-    "extensions/orca-orchestration.ts": 1735,
+    "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1505,
     "extensions/tools.ts": 627
   },
@@ -101,6 +104,6 @@
       ]
     }
   ],
-  "generatedFrom": "76295b3",
+  "generatedFrom": "dd31761",
   "biomeConfigHash": "184447d011b421d7"
 }

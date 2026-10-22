@@ -180,7 +180,7 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
   - **`devin_delegate`**:
     - `prompt` (mandatory): Task instructions.
     - `model` (optional, default `"swe-2-high"`): Devin model to run.
-    - `mode` (optional, default `"dangerous"`): Permission mode (`dangerous` maps to ACP `bypass` mode).
+    - `mode` (optional, default `"dangerous"`): Permission mode. `dangerous` maps to ACP `bypass` (approves every tool call); `smart` (alias `auto`) approves what Devin judges safe; `accept-edits`, `plan` and `ask` are passed through. Any other value is refused, because Devin silently ignores unknown modes.
     - `create_worktree` (optional, default `false`): Spin up an isolated worktree branch (`${currentBranch}-dt${N}`).
     - Runs asynchronously: returns immediately with session ID or queue position.
   - **`devin_status`**:
@@ -192,7 +192,13 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
   - **`devin_cancel`**:
     - `session_id` (mandatory): Cancels an active or queued session and automatically advances the queue.
   - **`devin_restart`**:
-    - `session_id` (mandatory), `prompt` (optional): Resumes or restarts a failed, interrupted, or stopped session in its existing worktree.
+    - `session_id` (mandatory), `prompt` (optional), `mode` (optional, default: the original session's): Resumes or restarts a failed, interrupted, or stopped session in its existing worktree.
+  - **`devin_permission`**:
+    - `session_id` (mandatory), `decision` (`allow`, `allow_session` or `reject`): Answers the session's oldest pending permission request.
+- **Permission Requests**:
+  - In every mode but `dangerous`, Devin asks before running some tools and blocks its turn until it gets an answer. The extension forwards each request to the agent (with the command Devin wants to run), shows it in `devin_status` and the status bar, and answers it with the agent's `devin_permission` decision.
+  - An unanswered request is rejected automatically after 5 minutes, so a session never hangs on it. **CLI Flag `--devin-permission-timeout <minutes>`** changes the wait.
+  - `allow_session` never picks Devin's project-wide or global "always allow" options, nor its "switch to bypass" option.
 - **Bash Guard**:
   - Blocks the agent from running the `devin` CLI through the `bash`/`powershell` tools (including nested calls from codemode scripts), so all delegation goes through the tracked, queued `devin_*` tools. The block message points the agent to `devin_delegate`.
   - Detects direct calls, pipelines and lists, `$(...)`/backtick substitutions, `bash -c`/`eval` strings, wrappers (`sudo`, `env`, `timeout`, `xargs`, ...) and `find -exec`.
@@ -200,7 +206,7 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
   - Static analysis has limits: variable expansion (`$CMD -p x`), scripts run from a file and heredocs fed to a shell are not inspected.
   - **Slash command `/devin allow_bash [on|off|status]`** lifts or restores the block for the current session (no argument toggles). The block is on by default and resets when pi restarts.
 - **Concurrency & FIFO Queueing**:
-  - Default limit of 2 concurrent running sessions.
+  - Default limit of 2 concurrent sessions. A session holds its slot from the moment it is admitted, while its turn runs, stalls or waits for permission, so parallel calls and queue drains cannot overshoot the limit.
   - Automatically queues additional requests in FIFO order and dequeues them as runs finish.
   - **CLI Flag `--devin-max-runs <n>`**: Configures the concurrency limit on startup.
   - **Slash Command `/devin limit [n]`**: Inspects or modifies the concurrency limit interactively.
@@ -213,7 +219,7 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
   - Message transcripts are never retained in RAM; streamed directly to `~/.pi/agent/devin_delegate/<pi-session-id>/<devin-session-id>/events.jsonl`.
   - Queue and state are persistently saved to `state.json` on disk, allowing complete recovery across crashes or power outages.
 - **Interface & Controls**:
-  - **Status bar**: Displays live metrics in the footer: `Devin <running>/<queued>/<completed>`.
+  - **Status bar**: Displays live metrics in the footer: `Devin <in flight>/<limit> · <queued> queued · <completed> done`, with `(N stalled, M awaiting permission)` when any session holds its slot without making progress.
   - **Interactive TUI Dashboard (`/devin list` or `/devin sessions`)**:
     - Use `Up` / `Down` arrow keys to browse sessions.
     - Use `Right` / `Enter` to view message details streamed directly from disk.
@@ -221,7 +227,7 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding a
 
 #### Tests
 
-The bash guard has standalone unit tests: `node --test test/test-devin-bash-guard.ts`. `test/test-devin-delegate.ts` runs inside Pi and starts real Devin sessions, so run it only deliberately.
+The bash guard has standalone unit tests: `node --test test/test-devin-bash-guard.ts`, and so do the permission and slot helpers: `node --test test/test-devin-permissions.ts`. The `devin-queue` suite (`bash test/run.sh devin-queue`) drives the extension inside Pi against a fake `devin acp` (`test/fake-acp-server.mjs`): concurrency under parallel calls, permission forwarding and timeout, and mode validation. `test/test-devin-delegate.ts` runs inside Pi and starts real Devin sessions, so run it only deliberately.
 
 #### Skill: `delegate-to-devin`
 
@@ -339,7 +345,7 @@ Every pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml), 
 | Job | What it runs |
 |---|---|
 | **Manifests & unit tests** | `node scripts/validate-marketplace.mjs` (marketplace/plugin/Pi manifests + skill & agent frontmatter) and `node --test` on the standalone unit tests |
-| **Pi extension tests** | one matrix job per suite: `observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools` — each installs Pi (`@earendil-works/pi-coding-agent`) and runs the suite inside the Pi runtime with mocked `gh` and `--offline`, so no model credentials are needed |
+| **Pi extension tests** | one matrix job per suite: `observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`, `devin-queue` — each installs Pi (`@earendil-works/pi-coding-agent`) and runs the suite inside the Pi runtime with mocked `gh` and `--offline`, so no model credentials are needed |
 
 Run the same suites locally (Node >= 23.6 is required — `node --test` runs the TypeScript tests directly):
 
