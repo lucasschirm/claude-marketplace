@@ -5,7 +5,7 @@ import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
-import { evaluateCiVerdict } from "./lib/ci-verdict.ts";
+import { commonRunSha, evaluateCiVerdict } from "./lib/ci-verdict.ts";
 import { logError } from "./lib/extension-log.ts";
 import { commandExists, createTaskScope, mapLimited, reportBudgetViolation } from "./lib/nonblocking.ts";
 
@@ -37,6 +37,13 @@ interface ObservedPR {
 	seenRuns: Set<string>;
 	failedRuns: Set<string>;
 	completedRuns: Set<string>;
+	/**
+	 * runId -> the commit that run was for (`gh run view --json headSha`). The empty-check-list
+	 * fallback in checkAllCIPassed only trusts completed runs whose commit matches headSha below.
+	 */
+	runShas: Map<string, string>;
+	/** The PR's current commit, from the poll's `headRefOid`. Undefined until the first poll lands. */
+	headSha?: string;
 	runProcesses: Map<string, ChildProcess>;
 	rewatchTimers: Map<string, NodeJS.Timeout>;
 	pollTimer?: NodeJS.Timeout;
@@ -57,6 +64,12 @@ interface PersistedObservedPR {
 	seenRuns: string[];
 	failedRuns: string[];
 	completedRuns: string[];
+	/**
+	 * Optional on purpose: state written before commits were recorded still restores. Those runs
+	 * keep their bookkeeping (no re-notify, no re-watch) but carry no commit, so the empty-check-list
+	 * fallback stays silent for them instead of passing on evidence of unknown vintage.
+	 */
+	runShas?: Record<string, string>;
 	// Comment bodies are omitted to keep session entries small; updatedAt-based edit detection
 	// still works after a restore (pollPR tolerates a missing body on the stored entry).
 	knownComments: Array<{ id: string; number: string; updatedAt?: string }>;
@@ -429,6 +442,7 @@ export default async function (pi: ExtensionAPI) {
 					seenRuns: Array.from(p.seenRuns),
 					failedRuns: Array.from(p.failedRuns),
 					completedRuns: Array.from(p.completedRuns),
+					runShas: Object.fromEntries(p.runShas),
 					knownComments: Array.from(p.knownComments.values()).map((c) => ({
 						id: c.id,
 						number: c.number,
@@ -548,6 +562,11 @@ export default async function (pi: ExtensionAPI) {
 				seenRuns: new Set(Array.isArray(p.seenRuns) ? p.seenRuns : []),
 				failedRuns: new Set(Array.isArray(p.failedRuns) ? p.failedRuns : []),
 				completedRuns: new Set(Array.isArray(p.completedRuns) ? p.completedRuns : []),
+				runShas: new Map(
+					p.runShas && typeof p.runShas === "object"
+						? Object.entries(p.runShas).filter((entry): entry is [string, string] => typeof entry[1] === "string")
+						: [],
+				),
 				runProcesses: new Map(),
 				rewatchTimers: new Map(),
 				knownComments: new Map(
@@ -702,8 +721,14 @@ export default async function (pi: ExtensionAPI) {
 				evaluateCiVerdict({
 					checks,
 					ghFailed: false,
-					// only consulted for an empty check list, where it is the remaining evidence
-					bookkeeping: { completed: pr.completedRuns.size, failed: pr.failedRuns.size },
+					headSha: pr.headSha,
+					// only consulted for an empty check list, where it is the remaining evidence - and only
+					// evidence about the commit the completed runs all agree on
+					bookkeeping: {
+						completed: pr.completedRuns.size,
+						failed: pr.failedRuns.size,
+						sha: commonRunSha(Array.from(pr.completedRuns, (id) => pr.runShas.get(id))),
+					},
 				}) === "passed"
 			) {
 				pr.allPassedReported = true;
@@ -793,16 +818,18 @@ export default async function (pi: ExtensionAPI) {
 			// failure: on a GitHub-availability error we stay silent and re-watch on
 			// the next backoff slot instead of reporting a verdict.
 			let conclusion = "unknown";
+			let runSha: string | undefined;
 			let viewError: unknown;
 			let viewDone = false;
 			if (ghHealth.acquireSlot()) {
 				try {
-					const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status"], {
+					const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status,headSha"], {
 						cwd,
 						timeout: GH_TIMEOUT_MS,
 					});
 					const parsed = JSON.parse(stdout);
 					conclusion = String(parsed.conclusion || "").toLowerCase();
+					runSha = typeof parsed.headSha === "string" && parsed.headSha !== "" ? parsed.headSha : undefined;
 					viewDone = true;
 				} catch (err) {
 					viewError = err;
@@ -840,6 +867,10 @@ export default async function (pi: ExtensionAPI) {
 			// Re-check: a stop or a resume-restore during the gh await must not let this stale
 			// close mutate (or notify through) the replacement entry.
 			if (observedPRs.get(prNumber) !== currentPr) return;
+
+			// Which commit this run belonged to, recorded with the run. A run that went green on one
+			// commit is not evidence about a later push, and the watcher outlives pushes.
+			if (runSha) currentPr.runShas.set(runId, runSha);
 
 			if (isFailure) {
 				currentPr.failedRuns.add(runId);
@@ -891,7 +922,7 @@ export default async function (pi: ExtensionAPI) {
 		try {
 			const { stdout } = await execFileAsync(
 				"gh",
-				["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup"],
+				["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup,headRefOid"],
 				{ cwd: pr.cwd, timeout: GH_TIMEOUT_MS },
 			);
 			data = JSON.parse(stdout);
@@ -929,6 +960,11 @@ export default async function (pi: ExtensionAPI) {
 				}
 				return;
 			}
+
+			// The commit the checks and the run watchers belong to. Not persisted: after a resume the
+			// first poll lands it again, and until then the fallback has nothing to compare against and
+			// stays silent, which is the correct answer rather than a stale one.
+			if (typeof data.headRefOid === "string" && data.headRefOid !== "") pr.headSha = data.headRefOid;
 
 			// Check for newly triggered runs via statusCheckRollup
 			if (Array.isArray(data.statusCheckRollup)) {
@@ -1129,6 +1165,7 @@ export default async function (pi: ExtensionAPI) {
 			seenRuns: new Set(),
 			failedRuns: new Set(),
 			completedRuns: new Set(),
+			runShas: new Map(),
 			runProcesses: new Map(),
 			rewatchTimers: new Map(),
 			knownComments: new Map(),
