@@ -67,7 +67,34 @@ cp /tmp/spike-typebox.ts ./spike-typebox.ts && pi -ne -e spike-typebox.ts -p hi 
 
 ## Scope
 
-One PR per numbered step. Steps 1-2 are the load-bearing ones; 3-6 are small and independently pickable.
+Seven steps, **two PRs**. Not seven, because review is the bottleneck and each PR re-runs the whole loop; not one,
+because the failure modes are unrelated and `main` moves fast (it took four PRs while C1 sat open, forcing two conflict
+resolutions and two extra review rounds).
+
+| PR | Steps | Why they belong together |
+| --- | --- | --- |
+| **A** - the runtime core | C2.1 `lib/exec.ts`, C2.4 `lib/orca-schema.ts`, C2.2 logger + `noConsole` error, C2.3 `lib/git-repo.ts` + cache TTLs | one theme: how the extensions talk to the outside world. C2.4 and C2.1 touch the same file (`lib/orca-client.ts`), C2.2 and C2.1 both touch `devin-delegate.ts`, so splitting them buys a revert boundary and costs a second conflict pass over the same lines |
+| **B** - contracts and leftovers | C2.5 head-SHA scoping, C2.6 `DEVIN_COMMAND` + CI wiring, C2.7 closeout | C2.5 changes a **persisted format** (the serialised run sets at `observe-pr.ts:430,:549`) and needs a resume-safety story of its own; C2.6 is CI infrastructure. Neither is a reason to hold up PR A |
+
+`main` uses merge commits, so each step lands as its own commit on `main`: bisect and `git revert` granularity stay
+per-step even inside a PR - provided every commit passes `npm run qa` on its own. That is the condition, and the one
+thing not to relax when a step gets tangled.
+
+### Standing rules (every commit, both PRs)
+
+- **Every commit green alone:** `npm run qa` (typecheck, lint, format, invariants, manifests, unit).
+- **Vendored copies.** `plugins/pr-observer/lib/` carries byte-copies of `ci-verdict.ts`, `github-review-threads.ts`
+  and `pr-tasks-manager.ts`, and `npm run validate` fails when they drift - #37 proved it, because the format sweep had
+  silently desynchronised three of them. Any commit touching those files runs
+  `node scripts/sync-plugin-libs.mjs --write` in the **same** commit.
+- **New libs must be used.** `noUnusedLibs` fails an `extensions/lib/*.ts` with no entry-file importer, and
+  `fileLineBudget` gives a new lib a 500-line start - so `exec.ts`, `git-repo.ts` and `orca-schema.ts` each land with
+  their first caller, never as a dangling module.
+- **Invariant changes carry fixtures.** Only D8 edits `check-quality.mjs`; it ships the fixture that fails without the
+  change, in the same commit, and stays away from migration commits because it changes what the rest is measured by.
+- **Baseline rises name their source.** `--write --reason` says whether debt was authored here or inherited from
+  `main`, and an inherited figure is verified by measuring `origin/main` with the same script and `biome.jsonc`.
+- **Reviews attach to the SHA they ran on**, and the reviewer is not the engine that wrote the diff.
 
 ### C2.1 — `extensions/lib/exec.ts`, one door for every subprocess
 
@@ -106,9 +133,10 @@ Migrate the 10 remaining `console.*` call sites (`tools.ts` 8, `devin-delegate.t
 `extensions/lib/extension-log.ts`, then flip `noConsole` from warn to **error in the same commit** - the documented
 policy: a rule that errors while ten calls remain buys ten suppressions, which is debt that reads like compliance.
 
-**Accept:** `noConsole` at 0 in the baseline, `biome.jsonc` with `noConsole: "error"`, and `npm run check` passing
-without `--reason` on that metric (falls to zero are reasoned only for Biome metrics *entering* zero from a silenced
-rule - see D8).
+**Accept:** `npm run check` fails first with the fall to zero refused, and
+`npm run qa:baseline -- --write --reason "..."` records it (D8 makes the reason mandatory for any metric reaching zero,
+Biome or repo); `biome.jsonc` shows `noConsole: "error"`, and a fixture asserts that a fresh `console.log` in
+`extensions/` now fails the gate instead of warning.
 
 ### C2.3 — `extensions/lib/git-repo.ts`
 
@@ -180,7 +208,7 @@ boxes with inline annotations saying what landed differently, and post the ratch
 - Sweeping `any` (160) wholesale, coverage floors, `test/harness.ts`, and the numbered-harness migration.
 - Changing `biome.jsonc` rules beyond the `noConsole` flip - the config hash makes every edit a recorded decision.
 
-## Decisions (locked 2026-10-21)
+## Decisions (locked) and the measurement behind D7
 
 **D4 = (a)** discriminated envelope. **D6 = (a)** `DEVIN_COMMAND`. **D8 = (b)** the zero-drop reason rule extends to
 repo invariants. **D7** is answered from logs below.
@@ -245,39 +273,52 @@ the 37 s maximum is an order statistic from a modest tail, and the 90 s threshol
 
 ---
 
-## Decision gates (historical - resolved above)
+### Decision record (options, reversibility)
 
-**D4 - envelope shape for `lib/exec.ts`.**
-(a) Discriminated union `{ ok: true, data: T } | { ok: false, code, message }` - `data` does not exist on the failure
-branch, so forgetting to check is a compile error, and `mutationResultChecked` becomes belt-and-braces rather than
-the only defence. (b) Today's `OrcaEnvelope<T>` shape (`ok`, `data?`, `error?`) everywhere - smaller diff across ~40
-call sites, but `data` can be read on a failed call and typecheck stays quiet.
-*Recommendation: (a).* The whole C2 theme is that trust boundaries should be enforced by the compiler where the
-compiler can do it.
-
-**D5 - schema validation.** Resolved by the spike: (a) `Check` from `typebox/value` - no new dependency, works under
-the loader, proven above; (b) hand-written validators. *Recommendation: (a)*, with one guard: the schema file must not
-import anything Pi-only, so `test --test` can exercise it without booting Pi.
-
-**D6 - Devin binary injection.** (a) `DEVIN_COMMAND` env var, symmetric with `ORCA_CLI_COMMAND`; (b) an injectable
-field on the manager class. *Recommendation: (a)* - it also works for the shim-based tests without touching
-constructors, and it matches the precedent the repo already set.
-
-**D7 - timeouts.** Resolved from logs rather than from a guess: see the D7 evidence table above. The plan's original
-"30 s default" is withdrawn; 60 s reads / 120 s writes, and a tool-aware idle rule for Devin (90 s no tool open /
-30 min with a tool open, notice-only as today).
-
-**D8 - should the zero-drop reason rule cover repo invariants too?** It currently covers Biome metrics: a metric that
-falls to zero needs `--write --reason`, because a fall to zero is indistinguishable from the rule being renamed or
-silenced. `execLocation`, `execTimeout` and `jsonParseLocation` will legitimately hit zero in C2. (a) leave as is -
-those falls are auto-written; (b) extend the rule to every invariant, so "the last violator disappeared" is always a
-recorded line in `notes`. *Recommendation: (b)*, plus a fixture in `test/quality-gate-fixtures.sh` for the new bite -
-and note this is the one step where C2 edits the gate, so it needs its own commit, away from the migrations.
+| | Chosen | Rejected | Why |
+| --- | --- | --- | --- |
+| **D4** | Discriminated envelope `{ ok: true; data: T } \| { ok: false; code; message }` | reuse `OrcaEnvelope` (`ok`, `result?`, `error?`) | reading `data` on a failed call becomes a compile error instead of an `undefined` at runtime; the five causes (`ENOENT`, `EXIT`, `TIMEOUT`, `BAD_JSON`, `BAD_SCHEMA`) stop rendering identically in UI text. `mutationResultChecked` already gates unread envelopes at baseline 0, but it is a regex scanner with a known blind spot (`const s = cp.spawn; s(...)`); the type system has none. Reversing later is cheap one way (a)\u2192(b) and 40 call sites the other |
+| **D5** | `Check` from `typebox/value` | hand-written validators | the spike proves it resolves and discriminates under Pi's loader, and `typebox@^1.4.2` is already a runtime import for tool parameters, so nothing new is installed. Guard: the schema file imports nothing Pi-only, so `node --test` exercises it without booting Pi |
+| **D6** | `DEVIN_COMMAND` env var | injectable constructor field | symmetric with `resolveOrcaCmd()`/`ORCA_CLI_COMMAND`; the existing lifecycle test prepends a directory to `process.env.PATH` (`test-devin-delegate-lifecycle.ts:57`), which re-points every binary lookup in the process and can leak across tests, and a PATH shim needs `.cmd` on Windows. Caveat kept visible: a command taken from the environment is a trust boundary, same class as `ORCA_CLI_COMMAND` and `PATH`, and `AGENTS.md` (C3) should state it |
+| **D7** | Tool-aware idle rule: 90 s with no tool open, 30 min while a `toolCallId` is open, notice-only as today. Requests: 60 s default, 120 s for mutations | a flat `timeout` on the spawn; this plan's original 30 s default | measured on 191 completed turns - real model silence maxes at 37 s, while 41/41 silences over 120 s had a tool running. A flat or naive rule kills healthy work; 30 s would newly break calls the tree already runs at 60 s. Evidence above |
+| **D8** | zero-drop `--reason` rule extended from `biome.*` to every invariant | Biome-only | `execLocation`/`execTimeout`/`jsonParseLocation` hit zero **because code moved into `lib/exec.ts`**, and would hit zero identically if a scanner regex stopped matching or `extensionFiles()` stopped seeing a directory. The two outcomes are the same number; a human signs the difference into `notes`. Cost: three reason lines and one fixture |
 
 ## Sequencing and risk
 
-Suggested order: **C2.1** (biggest, needs D4/D7), then **C2.4** (its schemas make C2.1's `runJson` useful at the
-Orca boundary), then C2.2, C2.3, C2.5, C2.6, C2.7.
+### PR A - commit sequence
+
+1. `feat(exec): lib/exec.ts` - the door, the envelope (D4), 60 s/120 s defaults, `spawnLongLived` with the two D7
+   thresholds, unit tests. Nothing migrates yet, so this commit changes no behaviour at runtime.
+2. `refactor(orca): runJson + schemas at the orca boundary` - C2.4's `lib/orca-schema.ts` together with the 10
+   `lib/orca-client.ts` sites, because a schema without a caller trips `noUnusedLibs` and a caller without a schema is
+   the `any` we are removing.
+3. `refactor(review-threads): exec.ts for the gh and git calls` - 6 sites, `sync-plugin-libs --write` in the same commit.
+4. `refactor(observe-pr): exec.ts for the 14 gh sites`.
+5. `refactor(pr-tasks): exec.ts for the last direct gh site`.
+6. `refactor(devin-delegate): exec.ts for the gh/git calls` - 9 request sites (the `devin acp` spawn is the tenth
+   exec site and moves in step 7).
+7. `fix(devin): tool-aware stall thresholds from the log evidence` - `DEVIN_COMMAND` (D6) plus `spawnLongLived` on the
+   ACP child, replacing the 30-minute default. C2.6's first half lives here: the injection and the watchdog are
+   the same two lines.
+8. `style(logging): the last 10 console.* calls, noConsole becomes an error` - C2.2.
+9. `refactor(git): lib/git-repo.ts and the repo caches` - C2.3, `sync-plugin-libs --write`.
+10. `fix(qa): a fall to zero is a decision for every invariant, not just biome's` - D8, with its fixture.
+11. `docs: what C2 changed` - plan doc, `CLAUDE.md`, issue ticks.
+
+Then: merge `origin/main`, re-run `bash test/run.sh` (19 suites) and `quality-fixtures` (132) at that SHA, and get an
+**independent review at the exact head SHA**. If findings and a merge follow, the merge commit is re-verified the same
+way - C1 needed rounds 6 and 7 precisely because that rule was the only thing standing between a green PR and a green
+commit nobody looked at.
+
+### PR B - commit sequence
+
+1. `fix(observe-pr): the CI-pass fallback trusts only the head SHA it was recorded for` - C2.5, with a resume test for
+   the older persisted shape.
+2. `test(ci): wire the devin lifecycle suite, delete the stale exclusion block` - C2.6's second half; `DEVIN_COMMAND`
+   replaces the PATH shim rather than adding a new seam.
+3. `docs: C2 closeout` - ratchet delta table and issue #35 ticks with deviations annotated inline.
+
+Same gate: green at the exact head SHA, independent review, re-verified after any merge.
 
 | Risk | Why it is real | Mitigation |
 | --- | --- | --- |
@@ -293,3 +334,17 @@ whose runs silently never start looks untouched (that is exactly what happened d
 #37 - fix is branch protection, an admin action); and the regex scanners behind `check-quality.mjs` cannot see
 dynamically aliased calls (`const s = cp.spawn; s(...)`) - a documented, bounded limit, and the reason `lib/exec.ts`
 being the single door matters more than the detector.
+
+## Definition of done for C2
+
+- `execLocation` 0, `execTimeout` 0, `jsonParseLocation` 0 for command output, `noConsole` 0 with the rule at `error`;
+  every fall to zero is a line in `quality-baseline.json`'s `notes` naming what earned it.
+- No extension calls `execFile*`/`spawn` outside `lib/exec.ts`, and no extension parses command output.
+- A failed external call is a typed branch, not an `undefined` read, and names which of the five causes it was.
+- A Devin turn is never killed by the wall clock: 90 s of silence with nothing running produces a stall notice, an open
+  tool suppresses it up to 30 minutes, `onExit` still owns real death - and the constants cite the measurement.
+- The Devin lifecycle suite runs in CI and the "run deliberately" block is gone.
+- Every commit in both PRs passes `npm run qa` alone; `plugins/pr-observer/lib/` never drifts from its originals.
+- Independent review said "ready to merge" at the head SHA actually merged, by an engine that did not author the diff.
+- Issue #35: the External-call hygiene boxes and the Devin CI-coverage boxes ticked, anything done differently from the
+  issue text annotated inline instead of quietly re-pointed.
