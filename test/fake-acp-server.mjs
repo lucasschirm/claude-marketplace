@@ -11,6 +11,10 @@
 //   FAKE_PERMISSION    "1": the turn asks session/request_permission (the real payload shape) and
 //                      ends as soon as the client answers, reporting the chosen option
 //   FAKE_UNKNOWN_REQUEST "1": after session/new, send a request the client does not implement
+//   FAKE_PERMISSION_COUNT  how many permission requests the turn sends at once (default 1); the turn
+//                      ends when all are answered and reports the outcomes in request order
+//   FAKE_PERMISSION_COMMAND  the command text the request carries (default: an rg command)
+//   FAKE_NEW_FAIL_FILE if this file exists, the first session/new to claim it (atomic rename) fails
 //
 // It mimics real `devin acp` behavior that matters to the extension:
 //  - streams session/update events (agent_message_chunk, tool_call, usage_update)
@@ -34,6 +38,20 @@ const markerDir = process.env.FAKE_MARKER_DIR || "";
 const newDelay = parseInt(process.env.FAKE_NEW_DELAY_MS || "0", 10);
 const askPermission = process.env.FAKE_PERMISSION === "1";
 const sendUnknownRequest = process.env.FAKE_UNKNOWN_REQUEST === "1";
+const permissionCount = parseInt(process.env.FAKE_PERMISSION_COUNT || "1", 10);
+const permissionCommand = process.env.FAKE_PERMISSION_COMMAND || "rg -l table-access-policy backend/test/help/";
+const newFailFile = process.env.FAKE_NEW_FAIL_FILE || "";
+
+// Claim the one-shot failure: rename is atomic, so of several concurrent spawns exactly one fails.
+function claimNewFailure() {
+	if (!newFailFile) return false;
+	try {
+		fs.renameSync(newFailFile, `${newFailFile}.claimed-${process.pid}`);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 function send(obj) {
 	process.stdout.write(JSON.stringify(obj) + "\n");
@@ -83,7 +101,7 @@ function permissionParams() {
 		sessionId,
 		toolCall: {
 			toolCallId: "call_fake#1",
-			_meta: { "cognition.ai/editableCommand": "rg -l table-access-policy backend/test/help/" },
+			_meta: { "cognition.ai/editableCommand": permissionCommand },
 		},
 		options: [
 			{ optionId: "allow_once", name: "Allow", kind: "allow_once" },
@@ -143,6 +161,10 @@ rl.on("line", (line) => {
 			result: { protocolVersion: 1, agentCapabilities: {}, agentInfo: { name: "fake-devin", version: "0.0.0" } },
 		});
 	} else if (m === "session/new") {
+		if (claimNewFailure()) {
+			send({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "fake session/new failure" } });
+			return;
+		}
 		marker(turnMarker);
 		setTimeout(() => answerSessionNew(msg), newDelay);
 	} else if (m === "session/set_mode") {
@@ -185,11 +207,15 @@ rl.on("line", (line) => {
 		}
 		if (askPermission) {
 			// Real devin goes silent here until the client answers: no updates, no turn end.
-			requestClient(`perm-${promptId}`, "session/request_permission", permissionParams(), (res) => {
-				const outcome = res.result?.outcome;
-				const chosen = outcome?.outcome === "selected" ? outcome.optionId : (outcome?.outcome ?? "invalid");
-				finishTurn(promptId, `Permission outcome: ${chosen}.`);
-			});
+			const outcomes = new Array(permissionCount).fill(null);
+			for (let i = 0; i < permissionCount; i++) {
+				const id = permissionCount === 1 ? `perm-${promptId}` : `perm-${promptId}-${i}`;
+				requestClient(id, "session/request_permission", permissionParams(), (res) => {
+					const outcome = res.result?.outcome;
+					outcomes[i] = outcome?.outcome === "selected" ? outcome.optionId : (outcome?.outcome ?? "invalid");
+					if (outcomes.every((o) => o !== null)) finishTurn(promptId, `Permission outcome: ${outcomes.join(", ")}.`);
+				});
+			}
 			return;
 		}
 		setTimeout(() => finishTurn(promptId, "Final answer from fake devin."), delay);

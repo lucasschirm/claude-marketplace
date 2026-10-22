@@ -92,6 +92,25 @@ export function parsePermissionRequest(requestId: number | string, rawParams: un
 	return { requestId, toolCallId: toolCall.toolCallId, command: String(command), options, requestedAt: now };
 }
 
+/** Longest command text shown to the agent; the rest is cut and its length reported. */
+const COMMAND_PREVIEW_MAX = 500;
+
+// Characters JSON.stringify leaves raw that can still break a line or reorder what is displayed.
+const INVISIBLE_OR_LINE_BREAKING = /[\u0085\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u2069\ufeff]/g;
+
+/**
+ * The command as data for the agent. It comes from the Devin session, which reads untrusted repository
+ * content, and lands in a message asking the agent to approve it, so it is JSON-quoted (newlines,
+ * quotes and control characters escaped: it cannot break out into the surrounding prose) and capped.
+ */
+export function quoteCommand(command: string): string {
+	const shown =
+		command.length > COMMAND_PREVIEW_MAX
+			? `${command.slice(0, COMMAND_PREVIEW_MAX)}... [${command.length - COMMAND_PREVIEW_MAX} more characters]`
+			: command;
+	return JSON.stringify(shown).replace(INVISIBLE_OR_LINE_BREAKING, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 /** What the agent may answer. `allow_session` also approves the same command for the rest of the session. */
 export const PERMISSION_DECISIONS = ["allow", "allow_session", "reject"] as const;
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number];
