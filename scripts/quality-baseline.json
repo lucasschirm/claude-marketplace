@@ -25,7 +25,7 @@
     "extensions/compaction-fail-recovery.ts": 734,
     "extensions/devin-delegate.ts": 2650,
     "extensions/lib/acp-client.ts": 320,
-    "extensions/lib/ci-verdict.ts": 66,
+    "extensions/lib/ci-verdict.ts": 119,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
     "extensions/lib/devin-permissions.ts": 137,
@@ -37,7 +37,7 @@
     "extensions/lib/orca-client.ts": 572,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 1992,
+    "extensions/observe-pr.ts": 2058,
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1505,
     "extensions/tools.ts": 627
@@ -110,8 +110,32 @@
         "extensions/devin-delegate.ts: 2650 lines > baseline 2646 (files may only shrink)",
         "extensions/lib/devin-permissions.ts: 137 lines > baseline 118 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-22",
+      "reason": "Authored in this change, not inherited: the head-SHA scoping adds the run-to-commit map and the commit comparison, growing ci-verdict.ts from 66 to 102 lines and observe-pr.ts from 1992 to 2029.",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 102 lines > baseline 66 (files may only shrink)",
+        "extensions/observe-pr.ts: 2029 lines > baseline 1992 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-22",
+      "reason": "Authored here, not inherited: review round 1 fixed a permanent strand and a duplicate pass, growing ci-verdict.ts from 102 to 119 lines and observe-pr.ts from 2029 to 2058.",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 119 lines > baseline 102 (files may only shrink)",
+        "extensions/observe-pr.ts: 2058 lines > baseline 2029 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-22",
+      "reason": "Merge reconciliation with main: the only two figures above baseline are this branch's own authored debt, already recorded in the notes above (ci-verdict.ts 66 to 102 to 119, observe-pr.ts 1992 to 2029 to 2058). Every other figure is the stricter of the two sides, so the merge widens nothing.",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 119 lines > baseline 66 (files may only shrink)",
+        "extensions/observe-pr.ts: 2058 lines > baseline 1992 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "9012fdd",
+  "generatedFrom": "9eaa302",
   "biomeConfigHash": "184447d011b421d7"
 }

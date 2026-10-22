@@ -77,10 +77,26 @@ export default function (pi: any) {
 	execSync("git config user.name 'Test Runner'", { cwd: tmpDir });
 	execSync("git config user.email 'test@example.com'", { cwd: tmpDir });
 	process.env.GH_STATE_DIR = tmpDir;
+	// The fixture starts with the PR head AHEAD of the commit run 777 ran on (see the mock's
+	// headRefOid). An empty `gh pr checks` answer may then only be resolved by a run whose commit
+	// matches the head, so "All CI passed" is structurally impossible until T4 removes this marker -
+	// a negative case that cannot race the poll, and cannot pass vacuously.
+	fs.writeFileSync(path.join(tmpDir, "head_pushed"), "1");
 
 	const mockGhScript = `#!/usr/bin/env bash
 echo "$(date +%s%3N) $*" >> "$GH_STATE_DIR/gh-calls.log"
 offline() { [ -f "$GH_STATE_DIR/offline" ]; }
+# The commit run 777 belongs to, and a newer head the test can push while it is observed.
+RUN_SHA=1111111111111111111111111111111111111111
+PUSHED_SHA=2222222222222222222222222222222222222222
+if [ -f "$GH_STATE_DIR/head_pushed" ]; then HEAD_SHA=$PUSHED_SHA; else HEAD_SHA=$RUN_SHA; fi
+# Run 778 exists only after the push, and belongs to the pushed head - the case where completedRuns
+# holds two commits and the head's own green still has to be reported.
+if [ -f "$GH_STATE_DIR/second_run" ]; then
+  ROLLUP='[{"detailsUrl": "https://github.com/testowner/repo/actions/runs/777"},{"detailsUrl": "https://github.com/testowner/repo/actions/runs/778"}]'
+else
+  ROLLUP='[{"detailsUrl": "https://github.com/testowner/repo/actions/runs/777"}]'
+fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   target="$3"
   if offline; then
@@ -89,9 +105,9 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   fi
   if [ "$target" = "branch-alpha" ] || [ "$target" = "101" ]; then
     if [ -f "$GH_STATE_DIR/comments_changed" ]; then
-      echo '{"number": 101, "state": "OPEN", "isDraft": false, "comments": [{"id": "node1", "databaseId": 55, "url": "https://github.com/testowner/repo/pull/101#issuecomment-55", "updatedAt": "2026-10-19T12:00:01Z", "body": "updated"}], "statusCheckRollup": [{"detailsUrl": "https://github.com/testowner/repo/actions/runs/777"}]}'
+      echo '{"number": 101, "state": "OPEN", "isDraft": false, "headRefOid": "'"$HEAD_SHA"'", "comments": [{"id": "node1", "databaseId": 55, "url": "https://github.com/testowner/repo/pull/101#issuecomment-55", "updatedAt": "2026-10-19T12:00:01Z", "body": "updated"}], "statusCheckRollup": '$ROLLUP'}'
     else
-      echo '{"number": 101, "state": "OPEN", "isDraft": false, "comments": [{"id": "node1", "databaseId": 55, "url": "https://github.com/testowner/repo/pull/101#issuecomment-55", "updatedAt": "2026-10-19T12:00:00Z", "body": "hello"}], "statusCheckRollup": [{"detailsUrl": "https://github.com/testowner/repo/actions/runs/777"}]}'
+      echo '{"number": 101, "state": "OPEN", "isDraft": false, "headRefOid": "'"$HEAD_SHA"'", "comments": [{"id": "node1", "databaseId": 55, "url": "https://github.com/testowner/repo/pull/101#issuecomment-55", "updatedAt": "2026-10-19T12:00:00Z", "body": "hello"}], "statusCheckRollup": '$ROLLUP'}'
     fi
     exit 0
   elif [ "$target" = "202" ]; then
@@ -103,6 +119,9 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   fi
 fi
 if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+  # slow_checks widens the in-flight window: two callers (the interval poll and a run-completion
+  # callback) then overlap on the same answer, which is how a duplicate "All CI passed" appears.
+  if [ -f "$GH_STATE_DIR/slow_checks" ]; then sleep 1.5; fi
   if [ "$3" = "--watch" ]; then
     # (check offline/ci_fail every second: the test can flip state mid-watch)
     for i in 1 2 3 4 5; do
@@ -138,7 +157,11 @@ if [ "$1" = "run" ] && [ "$2" = "view" ]; then
     echo "gh: failed to connect: i/o timeout" >&2
     exit 1
   fi
-  echo '{"conclusion": "success"}'
+  case "$3" in
+    778) RSHA=$PUSHED_SHA ;;
+    *) RSHA=$RUN_SHA ;;
+  esac
+  echo '{"conclusion": "success", "headSha": "'"$RSHA"'"}'
   exit 0
 fi
 exit 0
@@ -262,12 +285,41 @@ exit 0
 			);
 			console.log("✓ T4: polling resumed after recovery (comment update delivered)");
 
+			// Run 777 has now completed while the head is still ahead of its commit. A point-in-time
+			// check here would be a race (and tested as nothing the first time it was written), so wait
+			// through several poll cycles instead: with the commit-blind rule, the pass followed the
+			// completion within about one 2 s poll, and with the commit check it can never arrive.
+			await waitFor(
+				() => ((globalThis as any).__PI_OBSERVED_PRS__?.get(101)?.completedRuns?.size ?? 0) >= 1,
+				25000,
+				"run 777 completed while the head was ahead",
+			);
+			await sleep(6000);
+			assert(
+				!sentMessages.some((m) => m.includes("All CI passed")),
+				"T4: CI was passed while the PR head was ahead of the commit the watched run belonged to",
+			);
+			console.log("✓ T4: an empty check list did not pass on a run recorded for an older commit");
+
+			// Now the push gets its own run: 778 belongs to the head commit while 777 (an older commit)
+			// stays in completedRuns. Requiring every completed run to share one commit - which is what
+			// this change did first - would stay silent here forever, because a PR that is pushed to
+			// accumulates runs. The head's own green has to be reported once and only once.
+			fs.writeFileSync(path.join(tmpDir, "second_run"), "1");
+			// The pass is announced from two independent drivers (the 2 s poll and the run-completion
+			// callback), each of which awaits `gh pr checks` before latching allPassedReported. Slow the
+			// answer so both can be in flight on the same empty result: without a per-PR in-flight guard
+			// the pass is announced twice and the assertion below fires.
+			fs.writeFileSync(path.join(tmpDir, "slow_checks"), "1");
+
 			await waitFor(
 				() => sentMessages.some((m) => m.includes("All CI passed for the PR 101")),
 				25000,
-				"All CI passed after run 777 re-watched to success",
+				"All CI passed after run 778 completed on the head commit",
 			);
-			console.log("✓ T4: run 777 re-watched after recovery and 'All CI passed' reported once");
+			console.log("✓ T4: the head commit's own run reported 'All CI passed', older commits ignored");
+
+			fs.rmSync(path.join(tmpDir, "slow_checks"));
 			assert(
 				sentMessages.filter((m) => m.includes("All CI passed for the PR 101")).length === 1,
 				"T4: 'All CI passed' must be reported exactly once",

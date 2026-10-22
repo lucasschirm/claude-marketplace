@@ -125,6 +125,9 @@ exit 1
 								seenRuns: [],
 								failedRuns: [],
 								completedRuns: ["111"],
+								// The commit run 111 belonged to, plus an entry a corrupt or hand-edited state
+								// file could contain: only strings may come back.
+								runShas: { "111": "sha111", corrupt: 42 },
 								knownComments: [{ id: "1", number: "1", updatedAt: "t1" }],
 								allPassedReported: true,
 								announced: true,
@@ -147,6 +150,13 @@ exit 1
 			);
 			assert(observed()?.has(7), "R1: observed PR must be re-registered");
 			assert(observed()?.get(7)?.knownComments?.size === 1, "R1: known comments must be restored");
+			// The run-to-commit map is what stops the empty-check-list fallback passing an older commit's
+			// green, so it has to survive a restart - and a non-string entry has to be dropped, not thrown.
+			assert(observed()?.get(7)?.runShas?.get("111") === "sha111", "R1: run commits must be restored");
+			assert(
+				observed()?.get(7)?.runShas?.size === 1,
+				`R1: non-string run commits must be dropped, got ${JSON.stringify(observed()?.get(7)?.runShas)}`,
+			);
 			assert(observed()?.get(7)?.pollTimer, "R1: poll timer must be running after restore");
 			assert(observed()?.get(7)?.checksProcess, "R1: checks process must be re-spawned after restore");
 			assert(appended.length === 0, `R1: restore must not append a state entry, got ${appended.length}`);
@@ -181,7 +191,8 @@ exit 1
 								activeRuns: [],
 								seenRuns: [],
 								failedRuns: [],
-								completedRuns: [],
+								completedRuns: ["777"],
+								runShas: { "777": "sha777" },
 								knownComments: [{ id: "1", number: "1", updatedAt: "t1" }],
 								allPassedReported: false,
 								announced: false,
@@ -200,6 +211,10 @@ exit 1
 			handlers.agent_start({ type: "agent_start" });
 			const persisted = lastState();
 			assert(persisted?.observed?.[0]?.announced === true, "R3: delivery must persist announced=true");
+			assert(
+				persisted?.observed?.[0]?.runShas?.["777"] === "sha777",
+				`R3: a restored run commit must survive the next persist, got ${JSON.stringify(persisted?.observed?.[0])}`,
+			);
 			console.log("✓ R3a Passed: pending notice delivered on resume and persisted.");
 
 			// A second resume with the persisted (now announced) state: no second notice.
