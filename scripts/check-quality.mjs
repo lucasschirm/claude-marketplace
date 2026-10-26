@@ -48,7 +48,6 @@ function listTs(dir) {
 }
 
 const extensionFiles = () => listTs(path.join(ROOT, "extensions"));
-const agyAcpFiles = () => listTs(path.join(ROOT, "agy-acp"));
 const agyAcpSrcFiles = () => listTs(path.join(ROOT, "agy-acp", "src"));
 /**
  * The trees the source-scanned invariants govern: extension sources plus the agy-acp server sources.
@@ -528,13 +527,13 @@ function countStdioWrites() {
 }
 
 // agy-acp's stdout is the protocol channel, not a console: only the transport may frame it, and
-// main.ts may answer --version/--help before serving. console.log is never legitimate anywhere in
-// the package - it is exactly how a stray debug line corrupts the stream.
+// main.ts may answer --version/--help before serving. console.log is never legitimate in server
+// sources - it is exactly how a stray debug line corrupts the stream.
 const AGY_STDOUT_ALLOWED = new Set(["agy-acp/src/jsonrpc.ts", "agy-acp/src/main.ts"]);
 
 function countAgyStdoutViolations() {
 	const hits = [];
-	for (const file of agyAcpFiles()) {
+	for (const file of agyAcpSrcFiles()) {
 		const allowed = AGY_STDOUT_ALLOWED.has(rel(file));
 		linesOf(file).forEach((line, i) => {
 			if (/\bconsole\s*\.\s*log\s*\(/.test(line)) hits.push(`${rel(file)}:${i + 1}`);
@@ -711,7 +710,9 @@ function checkWiredTests() {
 			if (!f.startsWith("test-") || !f.endsWith(".ts")) continue;
 			const relPath = `${prefix}/${f}`;
 			if (deliberate.has(relPath)) continue;
-			if (!haystacks.includes(f)) hits.push(`${relPath} is wired into no suite - add it to a suite in test/run.sh`);
+			// The full path must appear: a bare-name match would let a same-named file in the other
+			// test dir silently satisfy the wiring.
+			if (!haystacks.includes(relPath)) hits.push(`${relPath} is wired into no suite - add it to a suite in test/run.sh`);
 		}
 	}
 	return { count: hits.length, hits };
@@ -794,7 +795,7 @@ const INVARIANTS = [
 	},
 	{
 		name: "globalThisOwnership",
-		description: "no globalThis writes outside extensions/lib/cross-extension.ts",
+		description: "no globalThis writes outside extensions/lib/cross-extension.ts (scans extensions/ + agy-acp/src/)",
 		measure: countGlobalThisWrites,
 	},
 	{

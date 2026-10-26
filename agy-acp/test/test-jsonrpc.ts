@@ -254,6 +254,45 @@ test("a malformed error object still rejects the request", async () => {
 	await assert.rejects(waiting);
 });
 
+test("a handler result that cannot serialize becomes -32603, never silence", async () => {
+	const peer = makePeer();
+	peer.conn.registerMethod("bigint", () => 1n);
+	peer.conn.registerMethod("circular", () => {
+		const o: { self?: unknown } = {};
+		o.self = o;
+		return o;
+	});
+	peer.input.write(requestLine(1, "bigint"));
+	peer.input.write(requestLine(2, "circular"));
+	await settle();
+	const frames = peer.frames();
+	assert.strictEqual(frames.length, 2, "every request is answered even when the result cannot be framed");
+	for (const frame of frames) {
+		assert.strictEqual((frame.error as { code: number }).code, INTERNAL_ERROR);
+	}
+});
+
+test("unserializable error data is dropped, but the error is still sent", async () => {
+	const peer = makePeer();
+	const circular: { self?: unknown } = {};
+	circular.self = circular;
+	peer.conn.registerMethod("bad", () => {
+		throw new RpcError(INVALID_PARAMS, "still answered", circular);
+	});
+	peer.input.write(requestLine(1, "bad"));
+	await settle();
+	const frame = peer.frames()[0];
+	assert.deepStrictEqual(frame.error, { code: INVALID_PARAMS, message: "still answered" });
+});
+
+test("request() with unserializable params rejects instead of hanging", async () => {
+	const peer = makePeer();
+	const circular: { self?: unknown } = {};
+	circular.self = circular;
+	await assert.rejects(peer.conn.request("m", circular), /could not be serialized/);
+	assert.strictEqual(peer.raw(), "", "nothing is written for a request that never went out");
+});
+
 test("stdin EOF semantics: empty lines are skipped, not answered", async () => {
 	const peer = makePeer();
 	peer.input.write("\n\n   \n\n");

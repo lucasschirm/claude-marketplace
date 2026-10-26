@@ -10,27 +10,11 @@
 // (stderr, or the file named by AGY_ACP_LOG).
 
 import type { Readable, Writable } from "node:stream";
+import { INTERNAL_ERROR, PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, RpcError } from "./errors.ts";
 import { DEFAULT_MAX_FRAME_BYTES, FrameDecoder } from "./framing.ts";
 
 export { DEFAULT_MAX_FRAME_BYTES } from "./framing.ts";
-
-export const PARSE_ERROR = -32700;
-export const INVALID_REQUEST = -32600;
-export const METHOD_NOT_FOUND = -32601;
-export const INVALID_PARAMS = -32602;
-export const INTERNAL_ERROR = -32603;
-
-/** A JSON-RPC error a method handler can throw to choose the response code. */
-export class RpcError extends Error {
-	readonly code: number;
-	readonly data?: unknown;
-	constructor(code: number, message: string, data?: unknown) {
-		super(message);
-		this.name = "RpcError";
-		this.code = code;
-		this.data = data;
-	}
-}
+export * from "./errors.ts";
 
 type RequestHandler = (params: unknown) => unknown | Promise<unknown>;
 type NotificationHandler = (method: string, params: unknown) => void;
@@ -78,7 +62,14 @@ export class JsonRpcConnection {
 	constructor(options: ConnectionOptions) {
 		this.input = options.input;
 		this.output = options.output;
-		this.log = options.log ?? (() => {});
+		const rawLog = options.log ?? (() => {});
+		this.log = (line) => {
+			try {
+				rawLog(line);
+			} catch {
+				// a logger that throws must not take the transport down with it
+			}
+		};
 		this.decoder = new FrameDecoder(
 			options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES,
 			(line) => this.handleLine(line),
@@ -129,12 +120,20 @@ export class JsonRpcConnection {
 				timer.unref();
 			}
 			this.pending.set(id, { resolve, reject, timer });
-			this.send({ jsonrpc: "2.0", id, method, params });
+			if (!this.send({ jsonrpc: "2.0", id, method, params })) {
+				this.pending.delete(id);
+				if (timer) clearTimeout(timer);
+				reject(
+					this.closed ? new Error("connection is closed") : new RpcError(INTERNAL_ERROR, `request "${method}" could not be serialized`),
+				);
+			}
 		});
 	}
 
 	notify(method: string, params?: unknown): void {
-		this.send({ jsonrpc: "2.0", method, params });
+		if (!this.send({ jsonrpc: "2.0", method, params }) && !this.closed) {
+			this.log(`notification "${method}" dropped: params are not JSON-serializable`);
+		}
 	}
 
 	close(reason: string): void {
@@ -177,23 +176,39 @@ export class JsonRpcConnection {
 		}
 	}
 
-	private send(msg: Record<string, unknown>): void {
-		if (this.closed) return;
+	/** Returns false when nothing was written: closed connection, or the message cannot serialize. */
+	private send(msg: Record<string, unknown>): boolean {
+		if (this.closed) return false;
+		let frame: string;
 		try {
-			this.output.write(`${JSON.stringify(msg)}\n`);
+			frame = `${JSON.stringify(msg)}\n`;
+		} catch {
+			return false;
+		}
+		try {
+			this.output.write(frame);
 		} catch (err) {
 			this.log(`write failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
+		return true;
 	}
 
 	private sendResult(id: unknown, result: unknown): void {
-		this.send({ jsonrpc: "2.0", id: id ?? null, result: result ?? null });
+		// A result that cannot serialize must not silence the request: fall back to an error response
+		// so the peer is never left waiting for an answer that cannot exist.
+		if (!this.send({ jsonrpc: "2.0", id: id ?? null, result: result ?? null }) && !this.closed) {
+			this.log(`result for id ${JSON.stringify(id)} is not JSON-serializable - answering with an internal error`);
+			this.sendError(id, INTERNAL_ERROR, "Internal error: result is not JSON-serializable");
+		}
 	}
 
 	private sendError(id: unknown, code: number, message: string, data?: unknown): void {
 		const error: Record<string, unknown> = { code, message };
 		if (data !== undefined) error.data = data;
-		this.send({ jsonrpc: "2.0", id: id ?? null, error });
+		// If `data` is what cannot serialize, the error still goes out - just without it.
+		if (!this.send({ jsonrpc: "2.0", id: id ?? null, error }) && data !== undefined && !this.closed) {
+			this.send({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
+		}
 	}
 
 	private handleLine(line: string): void {

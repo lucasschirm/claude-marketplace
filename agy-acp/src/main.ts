@@ -47,9 +47,9 @@ function createLogger(): (line: string) => void {
 
 function handleInitialize(params: unknown): unknown {
 	const requested = typeof params === "object" && params !== null ? (params as Record<string, unknown>).protocolVersion : undefined;
-	// Version negotiation is strict, on purpose: a client asking for anything but 1 gets a clean
-	// -32602 rather than a session we silently downgrade. Widening this is a future-issue decision.
-	if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1 || requested > PROTOCOL_VERSION) {
+	// ACP negotiation: a client asking for a newer version gets the latest we support (the spec's
+	// MUST - the client decides). A version we cannot honour at all is rejected with -32602.
+	if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
 		throw new RpcError(INVALID_PARAMS, `unsupported protocolVersion ${JSON.stringify(requested)} - agy-acp speaks ${PROTOCOL_VERSION}`);
 	}
 	return {

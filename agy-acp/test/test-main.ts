@@ -1,6 +1,7 @@
 // Run with: node --test agy-acp/test/test-main.ts
 import * as assert from "node:assert";
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AGY_ACP_VERSION } from "../src/main.ts";
@@ -14,9 +15,13 @@ interface RunResult {
 }
 
 /** Spawn `node src/main.ts`, feed it `input` on stdin, close stdin, and wait for exit. */
-function run(args: string[], input?: string): Promise<RunResult> {
+function run(args: string[], input?: string, env: NodeJS.ProcessEnv = {}): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [MAIN, ...args], { stdio: ["pipe", "pipe", "pipe"], timeout: 15000 });
+		const child = spawn(process.execPath, [MAIN, ...args], {
+			stdio: ["pipe", "pipe", "pipe"],
+			timeout: 15000,
+			env: { ...process.env, ...env },
+		});
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk: Buffer) => {
@@ -56,8 +61,15 @@ test("initialize over stdio is answered, and stdin EOF exits 0", async () => {
 	assert.deepStrictEqual(result.agentInfo, { name: "agy-acp", version: AGY_ACP_VERSION });
 });
 
-test("an unsupported protocol version is rejected cleanly", async () => {
-	for (const [i, version] of [99, 0, "latest", undefined].entries()) {
+test("a newer protocol version negotiates down to what we support (ACP spec)", async () => {
+	const res = await run([], initialize(1, 99));
+	assert.strictEqual(res.code, 0);
+	const frame = JSON.parse(res.stdout.trim()) as { result: { protocolVersion: number } };
+	assert.strictEqual(frame.result.protocolVersion, 1, "the agent answers with the latest version it supports");
+});
+
+test("a protocol version we cannot honour at all is rejected cleanly", async () => {
+	for (const [i, version] of [0, -1, "latest", undefined].entries()) {
 		const res = await run([], initialize(i + 1, version));
 		assert.strictEqual(res.code, 0);
 		const frame = JSON.parse(res.stdout.trim()) as { id: number; error: { code: number; message: string } };
@@ -90,4 +102,19 @@ test("an unknown argument exits non-zero without touching stdout", async () => {
 	const res = await run(["--bogus"]);
 	assert.strictEqual(res.code, 2);
 	assert.strictEqual(res.stdout, "", "an error path must not write the protocol channel");
+});
+
+test("AGY_ACP_LOG routes diagnostics to the file, keeping stdout protocol-only", async () => {
+	const logFile = fileURLToPath(new URL(`./agy-acp-test-${process.pid}.log`, import.meta.url));
+	try {
+		// A response for an unknown id is a diagnostic event: it must land in the log file.
+		const res = await run([], line({ jsonrpc: "2.0", id: 999, result: "stray" }), { AGY_ACP_LOG: logFile });
+		assert.strictEqual(res.code, 0);
+		const log = fs.readFileSync(logFile, "utf8");
+		assert.match(log, /unknown id 999/);
+		assert.strictEqual(res.stderr, "", "diagnostics went to the log file, not stderr");
+		assert.strictEqual(res.stdout, "", "and stdout still carries no protocol frames");
+	} finally {
+		fs.rmSync(logFile, { force: true });
+	}
 });

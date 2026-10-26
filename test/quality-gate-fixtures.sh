@@ -312,6 +312,26 @@ printf 'import { orphan } from "./lib/zz-orphan.ts";\nexport { orphan };\n' >>ag
 qa pass "and passes once an entry file reaches it" --only noUnusedLibs --full
 cp "$WORK/main.ts.orig" agy-acp/src/main.ts
 adrop
+# The shared detectors were widened to the second tree: each must bite there, not only in extensions/.
+aprobe src/zz-catch.ts 'export function f(x: () => void) {
+	try { x(); } catch {}
+}'
+qa fail "an empty catch in agy-acp/src fails emptyCatch" --only emptyCatch --full
+expect_line "naming the site" "agy-acp/src/zz-catch.ts:2"
+adrop
+aprobe src/zz-global.ts 'export function f() {
+	globalThis.__AGY_ZZ__ = 1;
+}'
+qa fail "a globalThis write in agy-acp/src fails globalThisOwnership" --only globalThisOwnership --full
+expect_line "naming the site" "agy-acp/src/zz-global.ts:2"
+adrop
+aprobe src/zz-mutate.ts 'import { execFileAsync } from "node:child_process";
+export async function f() {
+	await execFileAsync("git", ["push"], { timeout: 1000 });
+}'
+qa fail "an unchecked mutating call in agy-acp/src fails mutationResultChecked" --only mutationResultChecked --full
+expect_line "naming the site" "agy-acp/src/zz-mutate.ts:3"
+adrop
 
 echo
 echo "structural wiring"
