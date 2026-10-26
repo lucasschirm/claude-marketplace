@@ -65,6 +65,28 @@ cp /tmp/spike-typebox.ts ./spike-typebox.ts && pi -ne -e spike-typebox.ts -p hi 
 
 (It must run from the repo root so `node_modules` resolves - the same condition the extensions themselves rely on.)
 
+### Amendment, made while implementing PR A: the door validates with its own checker
+
+The spike is correct and it measured the wrong graph.
+
+`extensions/**` resolves packages from this repo's `node_modules`, so `typebox/value` is available to it. A
+`plugins/pr-observer/lib/**` file is a *copy* of extension code that an installed plugin runs with no
+`node_modules` of its own - an install copies the plugin directory and nothing else. The door is vendored into
+that plugin (it has to be: `github-review-threads.ts` imports it), so `import { Check } from "typebox/value"`
+in `lib/exec.ts` reproduces the exact crash #46 was opened for. What catches it now is
+`test/test-pr-observer-mcp.ts`, which walks the plugin's real import graph and fails on any non-`node:`
+specifier - it used to check a hard-coded list of names, which is why it did not catch this until CI did.
+
+So the door and `lib/exec-payload.ts` use `node:` builtins only, and D5 flips to the option it rejected:
+`extensions/lib/exec-payload.ts` carries `Schema` and `schemaErrors()` (~90 lines) instead of `Check`.
+What was really rejected was not "hand-written validators" but *a validator that cannot travel*.
+
+Honest cost: ~90 lines of our own code, exercised directly by `test/test-exec.ts` rather than inherited
+trust; unknown payload keys are accepted on purpose (a routine CLI field addition must not fail a call), and
+an unsupported schema keyword throws at construction instead of quietly validating nothing. Benefit: the door
+validates identically in the host and in an installed plugin, and a failure names a path
+(`/workers/0/id: must be a string`) rather than dumping the payload.
+
 ## Scope
 
 Seven steps, **two PRs**. Not seven, because review is the bottleneck and each PR re-runs the whole loop; not one,
@@ -278,7 +300,7 @@ the 37 s maximum is an order statistic from a modest tail, and the 90 s threshol
 | | Chosen | Rejected | Why |
 | --- | --- | --- | --- |
 | **D4** | Discriminated envelope `{ ok: true; data: T } \| { ok: false; code; message }` | reuse `OrcaEnvelope` (`ok`, `result?`, `error?`) | reading `data` on a failed call becomes a compile error instead of an `undefined` at runtime; the five causes (`ENOENT`, `EXIT`, `TIMEOUT`, `BAD_JSON`, `BAD_SCHEMA`) stop rendering identically in UI text. `mutationResultChecked` already gates unread envelopes at baseline 0, but it is a regex scanner with a known blind spot (`const s = cp.spawn; s(...)`); the type system has none. Reversing later is cheap one way (a)\u2192(b) and 40 call sites the other |
-| **D5** | `Check` from `typebox/value` | hand-written validators | the spike proves it resolves and discriminates under Pi's loader, and `typebox@^1.4.2` is already a runtime import for tool parameters, so nothing new is installed. Guard: the schema file imports nothing Pi-only, so `node --test` exercises it without booting Pi |
+| **D5** | *(amended during PR A)* the door carries its own `Schema` / `schemaErrors()` checker in `lib/exec-payload.ts` | `Check` from `typebox/value` - this row's original choice; and any validator reached through `node_modules` | the original row rested on a spike of `extensions/**`, where packages do resolve. The door is vendored into `plugins/pr-observer`, where an installed plugin has no `node_modules` at all: importing `typebox` there is the #46 crash again. `test/test-pr-observer-mcp.ts` enforces the graph, so this is a measured constraint and not a preference. Reasoning above |
 | **D6** | `DEVIN_COMMAND` env var | injectable constructor field | symmetric with `resolveOrcaCmd()`/`ORCA_CLI_COMMAND`; the existing lifecycle test prepends a directory to `process.env.PATH` (`test-devin-delegate-lifecycle.ts:57`), which re-points every binary lookup in the process and can leak across tests, and a PATH shim needs `.cmd` on Windows. Caveat kept visible: a command taken from the environment is a trust boundary, same class as `ORCA_CLI_COMMAND` and `PATH`, and `AGENTS.md` (C3) should state it |
 | **D7** | Tool-aware idle rule: 90 s with no tool open, 30 min while a `toolCallId` is open, notice-only as today. Requests: 60 s default, 120 s for mutations | a flat `timeout` on the spawn; this plan's original 30 s default | measured on 191 completed turns - real model silence maxes at 37 s, while 41/41 silences over 120 s had a tool running. A flat or naive rule kills healthy work; 30 s would newly break calls the tree already runs at 60 s. Evidence above |
 | **D8** | zero-drop `--reason` rule extended from `biome.*` to every invariant | Biome-only | `execLocation`/`execTimeout`/`jsonParseLocation` hit zero **because code moved into `lib/exec.ts`**, and would hit zero identically if a scanner regex stopped matching or `extensionFiles()` stopped seeing a directory. The two outcomes are the same number; a human signs the difference into `notes`. Cost: three reason lines and one fixture |
@@ -371,3 +393,47 @@ prediction exactly: the negative assertion still passes, and the positive one ti
 The first version of the negative assertion was a point-in-time check that **passed with the fix reverted** - a race
 masquerading as a test, the same failure mode `test/quality-gate-fixtures.sh` was de-hardcoded against. It is now a
 six-second window (three poll cycles) after the run has demonstrably completed.
+
+## PR A as landed so far (PR #48, through `3801bb3`), and what is deliberately left
+
+Four commits, each file-scoped so a regression names a file:
+
+| Commit | What moved | Debt it paid |
+| --- | --- | --- |
+| `8580a65` | `lib/exec.ts` + `lib/exec-payload.ts` exist; `orca-client.ts` is the first caller | door opens; `execTimeout` accepts `idleNoToolMs` on `spawn` only |
+| `e4e9592` | `lib/github-review-threads.ts`: 6 calls, 5 bare parses | `jsonParseLocation` 25 → 19, `emptyCatch` 52 → 50 |
+| `dc57c70` | plugin-closure test walks the import graph | closes the class of bug that broke CI on the previous commit |
+| `3c149dc` | `observe-pr.ts`: 12 calls, 6 parses | `execLocation` 24 → 12, `execTimeout` 25 → 21, `jsonParseLocation` 19 → 13, `noExplicitAny` 158 → 153 |
+| `3801bb3` | `devin-delegate.ts` provisioning + `pr-tasks.ts` | `execLocation` 12 → 2, `execTimeout` 21 → 12, `jsonParseLocation` 13 → 9, `emptyCatch` 50 → 47 |
+
+Where the counters stand on this branch: `execLocation` 2, `execTimeout` 12, `jsonParseLocation` 9,
+`emptyCatch` 47, `noConsole` 10, `noExplicitAny` 153, `globalThisOwnership` 33.
+
+**The two `execLocation` survivors are `spawn`s, and they stay direct for now on purpose**: `gh run watch`
+and `gh pr checks --watch` are children whose whole job is to outlive a request, so a deadline would be a
+bug. They belong with the session-lifetime work (the same policy `spawnLongLived` implements for Devin), not
+with the request migration, and converting them here would have meant shipping the idle policy half-tested.
+
+**The 12 `execTimeout` survivors** are the `orca-client.ts` git helpers (8), two `spawn`s in `observe-pr.ts`,
+the `orca` check spawn and `acp-client.ts`'s `spawn("devin")`. That is exactly the C2.3 remainder:
+
+1. `lib/git-repo.ts` - absorb the repeated `rev-parse`/`status`/`log` helpers behind TTL'd caches, giving the
+   git calls their timeouts in one place instead of eight.
+2. The long-lived children: `gh run watch`, `gh pr checks --watch`, and the Devin ACP session, all through
+   `spawnLongLived`'s tool-aware idle policy (notice-only, never a kill).
+3. `console.*` → `lib/extension-log.ts`, flipping `noConsole` to `error` in the same commit so the rule cannot
+   be re-loosened without a reason.
+4. D8: the zero-drop invariant plus fixtures for the three metrics that reach zero *because code moved into
+   the door* - the fall and the disappearance of a scanner are the same number, and a human signs which.
+5. PR B's remainder: `DEVIN_COMMAND` (D6), wiring `test/test-devin-delegate-lifecycle.ts` into CI, closeout.
+
+Two coverage caveats a reviewer should weigh rather than infer:
+
+- **Provisioning is not exercised by any CI suite.** `test-devin-delegate*.ts` need real Devin and are listed
+  "run deliberately" (`test/run.sh:8-11`); that gap is what PR B exists to close. `3801bb3` therefore rests on
+  typecheck and reading, with the behaviour it must preserve written out in the commit message.
+- **`branch-observer` is flaky on `main`, independently of this branch.** Measured at `4ca7ff0` in a clean
+  worktree: 3 of 5 consecutive local runs failed; on this branch, 2 of 5. Two modes, both races against the
+  fixed 1 s announcement timer the test itself comments on. Tracked as #62, not fixed inside #48: a suite that
+  needs a design change does not belong in a revert-boundary PR about subprocesses - but it does mean a green
+  CI run on this branch is partly luck, and a red one is not automatically this branch's fault.
