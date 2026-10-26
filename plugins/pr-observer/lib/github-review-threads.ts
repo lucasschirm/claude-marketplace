@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
-import { type ExecFailure, MUTATION_TIMEOUT_MS as DOOR_MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./exec.ts";
+import { failureText, MUTATION_TIMEOUT_MS as DOOR_MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./exec.ts";
 import { parseJsonSafe } from "./exec-payload.ts";
 
 // A hung gh call would otherwise block every sync and task action waiting on it. Mutations get
@@ -101,11 +101,6 @@ export async function getRepoCoordinates(cwd: string): Promise<RepoCoordinates> 
 		.filter((part): part is string => Boolean(part))
 		.join("; ");
 	throw new Error(`Unable to determine repository owner and name in ${cwd}${reasons ? ` (${reasons})` : ""}`);
-}
-
-/** The door's failure in the prose this module throws. */
-function failureText(res: ExecFailure): string {
-	return (res.stderr || res.message).trim() || res.code;
 }
 
 const THREAD_COMMENT_FRAGMENT = `
@@ -344,19 +339,26 @@ function ghErrorText(err: unknown): string {
 async function runMutation(args: string[], cwd: string): Promise<string> {
 	const res = await runText("gh", args, { cwd, timeoutMs: MUTATION_TIMEOUT_MS, trim: false });
 	if (res.ok) return res.data;
-	const messages = responseErrorMessages(parseJsonSafe(res.stdout));
-	const text =
-		[res.stderr, messages]
-			.filter((part) => part?.trim())
-			.join("\n")
-			.trim() || `${res.code}: ${res.message}`;
+	// `body`, not `stdout`: the excerpt is capped for display and a GraphQL error body longer than that
+	// would silently lose its messages - the one thing this mutation's caller reports to the user.
+	const messages = responseErrorMessages(parseJsonSafe(res.body ?? res.stdout));
+	// The door's reason leads, then what gh said, then any GraphQL messages: `failureText` already folds
+	// stderr in without duplicating it, and the reason must survive because it is the only thing naming a
+	// TIMEOUT as a TIMEOUT once this becomes a plain thrown Error several callers pattern-match.
+	const text = [failureText(res), messages]
+		.filter((part) => part?.trim())
+		.join("\n")
+		.trim();
 	const err = new Error(res.code === "TIMEOUT" ? `${text}; the change may already be on GitHub` : text) as Error & {
 		stdout?: string;
 		stderr?: string;
 		code?: string;
 		mayHaveApplied?: boolean;
 	};
-	if (res.stdout) err.stdout = res.stdout;
+	// `stdout` is the field `ghErrorText` reads for GraphQL messages, so it gets the same unexcerpted
+	// body rather than the display cap - a truncated error body is an error with no message.
+	const bodyForCaller = res.body ?? res.stdout;
+	if (bodyForCaller) err.stdout = bodyForCaller;
 	if (res.stderr) err.stderr = res.stderr;
 	err.code = res.code;
 	if (res.code === "TIMEOUT") err.mayHaveApplied = true;

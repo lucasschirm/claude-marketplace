@@ -4,10 +4,12 @@ import * as assert from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText, spawnLongLived } from "../extensions/lib/exec.ts";
+import { failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText, spawnLongLived } from "../extensions/lib/exec.ts";
 import { type Schema, schemaErrors } from "../extensions/lib/exec-payload.ts";
 
 const NODE = process.execPath;
+/** Keeps a child alive past any timeout in these tests without a literal that breaks type stripping. */
+const HANG = "setTimeout(() => {}, 30_000);";
 const created: string[] = [];
 
 after(() => {
@@ -342,4 +344,53 @@ test("touch() counts as life even when the child says nothing", async () => {
 	} finally {
 		handle.stop();
 	}
+});
+
+// Two review findings on PR #48, both about `acceptJsonOnFailure` reading more than it was owed. They are
+// kept because each is a class: an excerpt used as a payload, and a fragment used as a verdict.
+
+test("a failure envelope larger than the display excerpt still parses", async () => {
+	// `stdout` on a failure is excerpted for display, and a body cut at 2048 characters plus an ellipsis
+	// does not parse. So an Orca error envelope over 2 KB used to arrive as "the command exited with code
+	// 1" with the structured error - the code the caller branches on - silently gone.
+	const big = JSON.stringify({ ok: false, error: { code: "WORKER_BUSY", message: "x".repeat(4000) } });
+	const res = await runJson<{ ok: boolean; error: { code: string } }>(NODE, ["-e", echoScript(big, 1)], {
+		acceptJsonOnFailure: true,
+	});
+	assert.strictEqual(res.ok, true);
+	if (!res.ok) return;
+	assert.strictEqual(res.data.error.code, "WORKER_BUSY");
+	// The flag is what lets a caller distinguish "the CLI says it worked" from "the CLI was reached".
+	assert.strictEqual(res.fromFailureBody, true);
+});
+
+test("a child that wrote JSON and then hung is not a success", async () => {
+	// A killed call has not answered anything. Parsing the fragment it left behind turned a TIMEOUT into
+	// `{ ok: true }`, which is the one outcome a door must never produce.
+	const res = await runJson(NODE, ["-e", `process.stdout.write('{"ok":true,"result":1}'); ${HANG}`], {
+		timeoutMs: 200,
+		acceptJsonOnFailure: true,
+	});
+	assert.strictEqual(res.ok, false);
+	if (res.ok) return;
+	assert.strictEqual(res.code, "TIMEOUT");
+});
+
+test("failureText keeps the door's reason when the child also wrote to stderr", async () => {
+	const res = await runText(NODE, ["-e", `process.stderr.write('warning: half a sentence\\n'); ${HANG}`], { timeoutMs: 200 });
+	assert.strictEqual(res.ok, false);
+	if (res.ok) return;
+	const text = failureText(res);
+	// "exceeded its timeout" is not decoration: `gh-health` matches availability on that sentence, so a
+	// stderr-preferred rendering made a timed-out gh call unclassifiable - and a timed-out call is exactly
+	// the one a caller must not treat as a per-PR error.
+	assert.ok(text.includes("exceeded its timeout"), text);
+	assert.ok(text.includes("warning: half a sentence"), text);
+});
+
+test("failureText does not say the same thing twice for a plain exit", async () => {
+	const res = await runText(NODE, ["-e", "console.error('boom'); process.exit(3);"]);
+	assert.strictEqual(res.ok, false);
+	if (res.ok) return;
+	assert.strictEqual(failureText(res).split("boom").length - 1, 1, failureText(res));
 });

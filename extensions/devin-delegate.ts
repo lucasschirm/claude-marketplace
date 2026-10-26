@@ -6,8 +6,9 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { AcpClient } from "./lib/acp-client.ts";
-import { type ExecFailure, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
+import { failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
 import type { Schema } from "./lib/exec-payload.ts";
+import { isNoPullRequestFailure } from "./lib/gh-health.ts";
 import {
 	MODE_NAMES,
 	PERMISSION_DECISIONS,
@@ -58,10 +59,6 @@ interface OrcaWorktreeReply {
 	error?: string | { message?: string };
 }
 
-/** A door failure in the one sentence a log line or a thrown error carries. */
-function failureText(res: ExecFailure): string {
-	return (res.stderr || res.message).trim() || res.code;
-}
 const MODE_DESCRIPTION = `Permission mode: ${MODE_NAMES.join(", ")} (default: dangerous). dangerous (= bypass) approves every tool call; smart (alias auto) approves what Devin judges safe; in every mode but dangerous, Devin may ask permission, and the request is forwarded to you to answer with devin_permission.`;
 
 // Process exit hooks are registered once per process (not per factory invocation —
@@ -1052,7 +1049,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					{ cwd, timeoutMs: MUTATION_TIMEOUT_MS, acceptJsonOnFailure: true, schema: ORCA_WORKTREE_REPLY },
 				);
 				const reply = res.ok ? res.data : undefined;
-				if (reply && reply.ok !== false) {
+				// Only `ok: true` means "a worktree exists" once the process exited non-zero. On a zero exit an
+				// absent `ok` stays accepted, because that is how this call has always been read; on a non-zero
+				// exit it may not be, because before the door any non-zero exit threw and fell through to
+				// `git worktree add`. An envelope that says nothing (`{}`, `{"message":"daemon error"}`) is not a
+				// claim of success, and accepting it handed back a folder that was never created (review finding
+				// on `3801bb3`).
+				const fromFailureBody = res.ok === true && res.fromFailureBody === true;
+				if (reply && (fromFailureBody ? reply.ok === true : reply.ok !== false)) {
 					return {
 						worktreePath: reply.result?.worktree?.path || targetFolder,
 						worktreeBranch: targetBranch,
@@ -1062,10 +1066,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				}
 				// Surface what orca actually said - its own `error` when it answered, the door's reason when
 				// it did not - rather than a generic "Command failed", before falling back to git.
-				orcaFailure =
+				// `stripAnsi` on both halves: these strings reach tool output and the TUI, and the display bug
+				// `test/test-devin-tui-safety.ts` guards against arrives exactly this way - a CLI's coloured
+				// error passed through as "the message".
+				orcaFailure = stripAnsi(
 					(reply && (typeof reply.error === "string" ? reply.error : reply.error?.message)) ||
-					(!res.ok ? failureText(res) : "") ||
-					"orca worktree create failed";
+						(!res.ok ? failureText(res) : "") ||
+						"orca worktree create failed",
+				);
 				logWarn(`orca worktree create failed for ${targetBranch}, falling back to git: ${orcaFailure}`);
 			}
 
@@ -1078,7 +1086,8 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
 			});
 			if (!added.ok) {
-				throw new Error(orcaFailure ? `orca: ${orcaFailure}; git fallback: ${failureText(added)}` : failureText(added));
+				const gitFailure = stripAnsi(failureText(added));
+				throw new Error(orcaFailure ? `orca: ${orcaFailure}; git fallback: ${gitFailure}` : gitFailure);
 			}
 			return { worktreePath: targetFolder, worktreeBranch: targetBranch };
 		}
@@ -1109,7 +1118,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			// "no PR for this branch" and "gh could not answer" both move on to the next candidate, as they
 			// did before, but they are not the same thing: the second one is why a session looks for a PR in
 			// the wrong place, so it gets a line.
-			if (!res.ok) logWarn(`PR lookup for branch ${b} failed: ${failureText(res)}`);
+			if (!res.ok && !isNoPullRequestFailure(failureText(res))) logWarn(`PR lookup for branch ${b} failed: ${failureText(res)}`);
 			const number = res.ok ? res.data.number : undefined;
 			if (typeof number === "number" && number) return number;
 		}
@@ -1122,7 +1131,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		});
 		const fallbackNumber = current.ok ? current.data.number : undefined;
 		if (typeof fallbackNumber === "number" && fallbackNumber) return fallbackNumber;
-		if (!current.ok) logWarn(`PR lookup for ${cwd} failed: ${failureText(current)}`);
+		if (!current.ok && !isNoPullRequestFailure(failureText(current))) logWarn(`PR lookup for ${cwd} failed: ${failureText(current)}`);
 
 		return undefined;
 	}

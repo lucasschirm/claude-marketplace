@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
 UNIT_TESTS="test/test-compaction-fail-recovery.ts test/test-devin-bash-guard.ts test/test-devin-permissions.ts test/test-devin-tui-safety.ts test/test-pr-observer-mcp.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-exec.ts test/test-orca-status.ts test/test-nonblocking.ts"
 
-ALL_SUITES="typecheck lint format check quality-fixtures manifest unit compaction-recovery observe-pr observe-pr-gh-failure branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools devin-queue"
+ALL_SUITES="typecheck lint format check quality-fixtures manifest unit compaction-recovery observe-pr observe-pr-gh-failure observe-pr-branch-scan branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools devin-queue"
 
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
@@ -75,6 +75,9 @@ run_suite() {
       ;;
     observe-pr-gh-failure)
       pi -ne -e test/test-observe-pr-gh-failure.ts --offline -p "test"
+      ;;
+    observe-pr-branch-scan)
+      pi -ne -e test/test-observe-pr-branch-scan.ts --offline -p "test"
       ;;
     branch-observer)
       pi -ne -e test/test-branch-observer.ts --offline -p "test"

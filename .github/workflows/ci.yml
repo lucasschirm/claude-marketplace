@@ -90,6 +90,7 @@ jobs:
         suite:
           - observe-pr
           - observe-pr-gh-failure
+          - observe-pr-branch-scan
           - branch-observer
           - startup-notice
           - observe-pr-resume

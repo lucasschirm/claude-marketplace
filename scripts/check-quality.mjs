@@ -410,6 +410,11 @@ function execSites() {
 		for (const m of src.matchAll(EXEC_CALL_RE)) {
 			if (!isRealCode(src, m.index) || isDeclaration(src, m.index)) continue;
 			const call = callTextAt(src, m.index);
+			// Comments out of the call before it is read for a deadline: prose must not satisfy a gate, and
+			// `spawn("gh", … /* timeoutMs: 60000 */)` otherwise does. Bounded honestly - `codeOnly` works per
+			// line, so a `/* … \n … */` block spanning lines still leaks its continuation lines. A regex
+			// scanner's limits are documented in docs/p1-c2-plan.md rather than wished away.
+			const guarded = call.split("\n").map(codeOnly).join("\n");
 			all.push({
 				file: rel(file),
 				line: lineOf(src, m.index),
@@ -417,7 +422,7 @@ function execSites() {
 				// clock, so `spawnLongLived` guards it with a liveness policy instead and `idleNoToolMs` counts
 				// as the guard - for `spawn` only, because an execFile call claiming an idle policy would be
 				// a request with no deadline at all.
-				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(call) || (m[1] === "spawn" && /\bidleNoToolMs\s*:/.test(call)),
+				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(guarded) || (m[1] === "spawn" && /\bidleNoToolMs\s*:/.test(guarded)),
 				src,
 				nameIndex: m.index,
 				call,

@@ -2,9 +2,9 @@ import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@ea
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, type ChildProcess } from "node:child_process";
-import { type ExecFailure, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
+import { type ExecFailure, failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
 import type { Schema } from "./lib/exec-payload.ts";
-import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
+import { ghHealth, isGhAvailabilityError, isGhAuthError, isNoPullRequestFailure } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
 import { bookkeepingAtHead, CI_CHECK_ROWS, evaluateCiVerdict, type ObservedRun } from "./lib/ci-verdict.ts";
 import { logError } from "./lib/extension-log.ts";
@@ -58,13 +58,6 @@ interface RunViewPayload {
 	headSha?: string | null;
 }
 
-/**
- * `gh pr view <branch>` exits non-zero for a branch that simply has no pull request - the ordinary case
- * during a branch scan, and not worth a log line every cycle. Anything else it says is.
- */
-function looksLikeNoPr(text: string): boolean {
-	return /no pull requests|Could not resolve|not found/i.test(text);
-}
 // How long a background round may keep starting new gh calls. Boot is held to a tighter budget:
 // it must never be what makes `pi` feel frozen (see extensions/lib/nonblocking.ts).
 const POLL_BUDGET_MS = Number.parseInt(process.env.PI_OBSERVE_PR_POLL_BUDGET_MS ?? "", 10) || 90_000;
@@ -726,11 +719,6 @@ export default async function (pi: ExtensionAPI) {
 		// throwing over - but it is worth naming: "no summary available" and "gh timed out twice" are
 		// different things to read in a notification.
 		return view.ok ? "No failure summary available." : failureText(view) || "No failure summary available.";
-	}
-
-	/** The door's failure in the one sentence a log line or a tool result carries. */
-	function failureText(res: ExecFailure): string {
-		return (res.stderr || res.message).trim() || res.code;
 	}
 
 	async function checkAllCIPassed(prNumber: number, pr: ObservedPR) {
@@ -1414,8 +1402,24 @@ export default async function (pi: ExtensionAPI) {
 					// A branch with no PR is a normal answer (`gh pr view` says so and exits non-zero); anything
 					// else it said is worth one line, because otherwise "this branch has no PR" and "gh is
 					// broken" look identical forever and auto-tracking just quietly never happens.
-					if (!res.ok && !looksLikeNoPr(failureText(res))) logInternal(`Branch check failed for ${branch}`, failureText(res));
-					if (!res.ok) continue;
+					if (!res.ok) {
+						// A GitHub-availability failure stops the scan and counts as a failure, which is what the
+						// throwing version did and what the door made a choice again rather than a fall-through:
+						// the remaining branches would fail the same way, the log stays quiet, the shared backoff
+						// owns the retry. Reading it off `res.cause` is load-bearing, not tidiness - the `finally`
+						// records a *success* for any scan that saw no failure, so a silently-continued outage
+						// loop used to flip a degraded ghHealth back to healthy while gh was still unreachable
+						// (review finding on `3c149dc`).
+						if (isGhAvailabilityError(res.cause)) {
+							ghErr = res.cause;
+							break;
+						}
+						// A branch with no PR is a normal answer (`gh pr view` says so and exits non-zero);
+						// anything else it said gets one line, because otherwise "no PR here" and "gh is
+						// broken" are the same silence forever and auto-tracking quietly never happens.
+						if (!isNoPullRequestFailure(failureText(res))) logInternal(`Branch check failed for ${branch}`, failureText(res));
+						continue;
+					}
 					const data = res.data;
 					const prNumber = data.number;
 					const state = String(data.state || "").toUpperCase();
@@ -1639,7 +1643,11 @@ export default async function (pi: ExtensionAPI) {
 					schema: PR_VIEW_SCHEMA,
 				});
 				if (res.ok) data = res.data;
-				else ghErr = res;
+				// `cause`, not the envelope: `isGhAvailabilityError` matches Node error codes, and the door's
+				// category name is not one of them. Passing the envelope used to classify a missing gh as "not
+				// an availability problem", so a pending auto-start the user explicitly asked for was deleted
+				// instead of retried on the next slot (review finding on `3c149dc`).
+				else ghErr = res.cause ?? new Error(failureText(res));
 				if (ghErr === undefined && data !== undefined) {
 					ghHealth.recordSuccess();
 					const state = String(data.state || "").toUpperCase();

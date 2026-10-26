@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { commandExists } from "./nonblocking.ts";
-import { type ExecFailure, runJson, runText } from "./exec.ts";
+import { type ExecFailure, failureText, runJson, runText } from "./exec.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -219,7 +219,7 @@ function orcaExecFailure(res: ExecFailure): OrcaEnvelope {
 		ok: false,
 		error: {
 			code: "EXEC_ERROR",
-			message: (res.stderr || res.message || "unknown error").trim(),
+			message: failureText(res) || "unknown error",
 			details: { cause: res.code },
 		},
 	};

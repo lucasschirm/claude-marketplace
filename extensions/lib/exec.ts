@@ -63,6 +63,13 @@ export type ExecFailureCode =
 export interface ExecSuccess<T> {
 	ok: true;
 	data: T;
+	/**
+	 * Set when the process exited **non-zero** and the payload was accepted only because
+	 * `acceptJsonOnFailure` was set. It exists so a caller cannot confuse "the CLI told me what went
+	 * wrong" with "the CLI says it worked": on this path an absent `ok` is not a `true`, and the only
+	 * answer that means success is the envelope's own.
+	 */
+	fromFailureBody?: true;
 }
 
 export interface ExecFailure {
@@ -72,6 +79,13 @@ export interface ExecFailure {
 	message: string;
 	/** What the command wrote on stdout, excerpted. Present whenever there was any. */
 	stdout?: string;
+	/**
+	 * The **unexcerpted** stdout, kept for `EXIT` alone and only so `runJson({ acceptJsonOnFailure })` can
+	 * parse a CLI's own error envelope. `stdout` is capped at {@link EXCERPT_CHARS} because it goes into
+	 * tool results, and a truncated body does not parse - which used to throw away the structured error
+	 * for any Orca envelope over 2 KB. Not for display.
+	 */
+	body?: string;
 	stderr?: string;
 	exitCode?: number | null;
 	signal?: string | null;
@@ -169,8 +183,29 @@ function classify(err: unknown, maxBufferBytes: number): ExecFailure {
 		code: "EXIT",
 		message: capMessage(detail || `the command exited with code ${String(e.code ?? "unknown")}`),
 		exitCode: typeof e.code === "number" ? e.code : null,
+		// The only branch where stdout is a complete answer rather than a fragment: the process ran to
+		// completion and chose this text. A TIMEOUT body is a partial write and MAX_BUFFER threw its read
+		// away, so neither gets a `body` that a caller might parse into a verdict.
+		body: typeof e.stdout === "string" ? e.stdout : undefined,
 		...base,
 	};
+}
+
+/**
+ * A failure in the one sentence a log line, a thrown error or a tool result carries.
+ *
+ * The door's own `message` comes first and `stderr` is appended, never substituted. The order is the
+ * finding it prevents: for `EXIT` the message already quotes stderr (so nothing is added twice), but for
+ * `TIMEOUT` / `MAX_BUFFER` / `NOT_FOUND` the message is the *only* thing naming what stopped the call,
+ * and a child that wrote a warning before it hung would otherwise replace "exceeded its timeout and was
+ * killed" with that warning - which is not merely vaguer, it is unclassifiable, because
+ * `gh-health`'s availability patterns match the sentence and not the stderr.
+ */
+export function failureText(res: ExecFailure): string {
+	const reason = res.message.trim();
+	const said = (res.stderr ?? "").trim();
+	if (!said || reason.includes(said)) return reason || said || res.code;
+	return reason ? `${reason} - ${said}` : said;
 }
 
 /** `ok` is on the raw result too: without it `{ stdout } | ExecFailure` cannot be narrowed by a check. */
@@ -216,9 +251,15 @@ export async function runJson<T>(cmd: string, args: string[], options: JsonOptio
 		return parsed.ok ? { ok: true, data: parsed.data } : parsed.failure;
 	}
 	// An exit the CLI still gave a JSON answer to: the envelope's own `ok` is the verdict, not the code.
-	if (options.acceptJsonOnFailure && raw.stdout) {
-		const parsed = parseBody<T>(raw.stdout, options.schema);
-		if (parsed.ok) return { ok: true, data: parsed.data };
+	// Two bounds on that, both learned the hard way:
+	//  - `code === "EXIT"` only. A child that wrote a JSON object and then hung until the timeout killed
+	//    it has not answered anything, and parsing the fragment turned a killed call into `ok: true`.
+	//  - `body`, the unexcerpted stdout. `stdout` is capped for display, and a body cut at 2048
+	//    characters plus an ellipsis does not parse - which silently dropped the structured error from
+	//    any Orca envelope larger than 2 KB and left "exited with code 1".
+	if (options.acceptJsonOnFailure && raw.code === "EXIT" && raw.body) {
+		const parsed = parseBody<T>(raw.body, options.schema);
+		if (parsed.ok) return { ok: true, data: parsed.data, fromFailureBody: true };
 	}
 	return raw;
 }

@@ -1,7 +1,7 @@
 // Run with: node --test test/test-gh-health.ts
 import { test } from "node:test";
 import * as assert from "node:assert";
-import { GhHealth, isGhAvailabilityError, isGhAuthError } from "../extensions/lib/gh-health.ts";
+import { GhHealth, isGhAvailabilityError, isGhAuthError, isNoPullRequestFailure } from "../extensions/lib/gh-health.ts";
 
 function makeFakeClock() {
 	let nowMs = 0;
@@ -254,4 +254,22 @@ test("a failure supersedes a recovery tick that has not run yet", () => {
 	assert.deepStrictEqual(hooks, [], "only the outage timer may drive the hooks now");
 	clock.advance(30_000);
 	assert.deepStrictEqual(hooks, ["fired"], "the outage retry slot still fires exactly once");
+});
+
+// The subprocess door (lib/exec.ts) renamed failures. These two assertions are the seam: if gh-health
+// does not follow the rename, a missing gh binary stops being paced (and a pending auto-start the user
+// asked for is deleted instead of retried), and "this branch has no PR" goes back to looking like an
+// outage on every branch scan.
+
+test("the door's NOT_FOUND sentence is an availability failure", () => {
+	assert.strictEqual(
+		isGhAvailabilityError(new Error("the command could not be started (not on PATH, or the working directory is gone)")),
+		true,
+	);
+});
+
+test("a branch with no PR is distinguishable from gh being broken", () => {
+	assert.strictEqual(isNoPullRequestFailure('no pull requests found for branch "feature-x"'), true);
+	assert.strictEqual(isNoPullRequestFailure("Could not resolve to a PullRequest with the number 42."), true);
+	assert.strictEqual(isNoPullRequestFailure("gh: failed to connect: dial tcp 140.107.20.17:443: i/o timeout"), false);
 });
