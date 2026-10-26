@@ -1,12 +1,12 @@
 {
   "metrics": {
-    "execLocation": 12,
-    "execTimeout": 21,
+    "execLocation": 2,
+    "execTimeout": 12,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
-    "jsonParseLocation": 13,
+    "jsonParseLocation": 9,
     "noStdioWrites": 0,
-    "emptyCatch": 50,
+    "emptyCatch": 47,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
     "wiredTests": 0,
@@ -15,15 +15,15 @@
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
     "biome.suspicious/noExplicitAny": 153,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
-    "biome.suspicious/noGlobalIsNan": 8,
-    "biome.correctness/noUnusedFunctionParameters": 1,
-    "biome.correctness/noUnusedImports": 1
+    "biome.correctness/noUnusedImports": 1,
+    "biome.correctness/noUnusedFunctionParameters": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2650,
+    "extensions/devin-delegate.ts": 2676,
     "extensions/lib/acp-client.ts": 320,
     "extensions/lib/ci-verdict.ts": 142,
     "extensions/lib/devin-bash-guard.ts": 277,
@@ -41,7 +41,7 @@
     "extensions/lib/tool-result.ts": 60,
     "extensions/observe-pr.ts": 2130,
     "extensions/orca-orchestration.ts": 1734,
-    "extensions/pr-tasks.ts": 1505,
+    "extensions/pr-tasks.ts": 1510,
     "extensions/tools.ts": 627
   },
   "notes": [
@@ -158,8 +158,16 @@
         "extensions/lib/ci-verdict.ts: 142 lines > baseline 119 (files may only shrink)",
         "extensions/observe-pr.ts: 2130 lines > baseline 2058 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "devin-delegate.ts +26 and pr-tasks.ts +5 are payload schemas and the comments naming which swallowed failure is now logged, paid for moving both files onto the door",
+      "changes": [
+        "extensions/devin-delegate.ts: 2676 lines > baseline 2650 (files may only shrink)",
+        "extensions/pr-tasks.ts: 1510 lines > baseline 1505 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "dc57c70",
+  "generatedFrom": "3c149dc",
   "biomeConfigHash": "184447d011b421d7"
 }
