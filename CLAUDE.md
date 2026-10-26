@@ -21,6 +21,7 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
 .github/workflows/ci.yml            # CI: manifests, unit tests, Pi extension suites
 ```
 
+- `agy-acp/` is a standalone Node >= 23.6 package (an ACP server for Google's `agy` CLI), not a Pi extension and not a plugin: it has its own `package.json` (`bin: agy-acp -> src/main.ts`, zero runtime dependencies) and is typechecked, linted and invariant-gated like `extensions/`. Its tests live in `agy-acp/test/` and run as the `agy-acp` suite in `test/run.sh`.
 - `.claude-plugin/marketplace.json` is the root manifest. Each entry in its `plugins` array has `name`, `source` (relative path to the plugin directory), and `description`, and must match a real plugin under `plugins/`.
 - Each plugin is self-contained under `plugins/<plugin-name>/` with its own `.claude-plugin/plugin.json` manifest.
 - Pi (not Claude Code) resources live outside `plugins/`: `extensions/*.ts` are Pi extensions and `skills/<skill-name>/SKILL.md` are Pi skills, both declared in the `pi` manifest of the root `package.json`. Skills there may reference Pi-only tools (e.g. `devin_delegate`), so do not move them under `plugins/`.

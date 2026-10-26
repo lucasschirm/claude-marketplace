@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 mkdir -p "$WORK/repo"
 # biome.jsonc sets vcs.useIgnoreFile, so the copy needs the ignore files too or biome exits with a config error
-tar -cf - scripts extensions plugins skills test package.json biome.jsonc tsconfig.json .gitignore .git-blame-ignore-revs 2>/dev/null | (cd "$WORK/repo" && tar -xf -)
+tar -cf - scripts extensions agy-acp plugins skills test package.json biome.jsonc tsconfig.json .gitignore .git-blame-ignore-revs 2>/dev/null | (cd "$WORK/repo" && tar -xf -)
 cd "$WORK/repo" || exit 1
 export PI_QA_BIOME="$BIOME"
 # check-quality.mjs honours PI_QA_BIOME only when this is set, so a stray variable cannot swap biome out in
@@ -59,6 +59,9 @@ qa() {
 # probe <file> <content>  — write a throwaway source file into the copied tree
 probe() { printf '%s\n' "$2" >"extensions/lib/$1"; }
 dropprobes() { rm -f extensions/lib/zz-*.ts; }
+# aprobe writes under agy-acp/ (the second gated tree); adrop removes every agy-acp probe.
+aprobe() { mkdir -p "$(dirname "agy-acp/$1")" && printf '%s\n' "$2" >"agy-acp/$1"; }
+adrop() { rm -f agy-acp/src/zz-*.ts agy-acp/test/test-zz-*.ts; rm -rf agy-acp/src/lib; }
 
 # expect_line <label> <file:line> — the failure must name the offending site, not just fail
 expect_line() {
@@ -248,6 +251,67 @@ probe zz-o.ts 'export function f(msg: string) {
 }'
 qa fail "writing to stdout fails (stdout belongs to the TUI)" --only noStdioWrites --full
 dropprobes
+
+echo
+echo "agy-acp sits under the same gate"
+aprobe src/zz-exec.ts 'import { execFile } from "node:child_process";
+export function f() {
+	execFile("git", ["status"], () => {});
+}'
+qa fail "an unguarded exec in agy-acp/src fails the timeout rule" --only execTimeout --full
+expect_line "and names the site" "agy-acp/src/zz-exec.ts:3"
+qa fail "and an exec outside agy-acp/src/lib fails the location rule" --only execLocation --full
+expect_line "naming the site" "agy-acp/src/zz-exec.ts:3"
+rm -f agy-acp/src/zz-exec.ts
+aprobe src/lib/zz-exec.ts 'import { execFile } from "node:child_process";
+export function f() {
+	execFile("git", ["status"], { timeout: 100 }, () => {});
+}'
+qa pass "a guarded exec inside agy-acp/src/lib passes the location rule" --only execLocation --full
+qa pass "and the timeout rule" --only execTimeout --full
+adrop
+aprobe src/zz-parse.ts 'export function f(raw: string) {
+	return JSON.parse(raw);
+}'
+qa fail "JSON.parse outside agy-acp/src/jsonrpc.ts fails" --only jsonParseLocation --full
+expect_line "and names the site" "agy-acp/src/zz-parse.ts:2"
+expect_absent "the transport's own parse site stays exempt" "agy-acp/src/jsonrpc.ts"
+adrop
+aprobe src/zz-out.ts 'export function f(msg: string) {
+	process.stdout.write(msg);
+	console.log(msg);
+}'
+qa fail "a stdout write outside the transport fails agyStdoutFramesOnly" --only agyStdoutFramesOnly --full
+expect_line "the process.stdout.write is reported" "agy-acp/src/zz-out.ts:2"
+expect_line "the console.log is reported" "agy-acp/src/zz-out.ts:3"
+rm -f agy-acp/src/zz-out.ts
+cp agy-acp/src/main.ts "$WORK/main.ts.orig"
+printf 'process.stdout.write("agy-acp --version");\n' >>agy-acp/src/main.ts
+qa pass "but main.ts may write --version/--help on stdout" --only agyStdoutFramesOnly --full
+cp "$WORK/main.ts.orig" agy-acp/src/main.ts
+adrop
+# The orphan's name is assembled for the same reason as the test/ one below: checkWiredTests searches
+# every test/*.sh for each filename, and this script is one of them.
+AGY_ORPHAN=test-zz-agy-orphan
+aprobe "test/${AGY_ORPHAN}.ts" 'import { test } from "node:test";
+test("orphan", () => {});'
+qa fail "an agy-acp test no suite references fails wiredTests" --only wiredTests --full
+expect_line "naming the orphan" "agy-acp/test/${AGY_ORPHAN}.ts"
+printf 'AGY_ACP_TESTS="%s"\n' "agy-acp/test/${AGY_ORPHAN}.ts" >test/suite-zz.sh
+qa pass "and passes once a suite names it" --only wiredTests --full
+rm -f test/suite-zz.sh
+adrop
+node -e 'const fs=require("fs");fs.writeFileSync("agy-acp/src/zz-big.ts","// filler\n".repeat(400))'
+qa fail "a new agy-acp source over its 300-line default budget fails" --only fileLineBudget --full
+expect_text "and names the budget" "a new file's budget is 300"
+rm -f agy-acp/src/zz-big.ts
+aprobe src/lib/zz-orphan.ts 'export const orphan = 1;'
+qa fail "an agy-acp/src/lib file nothing imports fails noUnusedLibs" --only noUnusedLibs --full
+expect_line "naming the lib" "agy-acp/src/lib/zz-orphan.ts"
+printf 'import { orphan } from "./lib/zz-orphan.ts";\nexport { orphan };\n' >>agy-acp/src/main.ts
+qa pass "and passes once an entry file reaches it" --only noUnusedLibs --full
+cp "$WORK/main.ts.orig" agy-acp/src/main.ts
+adrop
 
 echo
 echo "structural wiring"
@@ -503,7 +567,7 @@ open(os.path.join(os.environ["WORK"], "offtree.sh"), "w").write(script)
 PYFIX
 chmod +x "$WORK/offtree.sh"
 PI_QA_BIOME=$WORK/offtree.sh qa fail "diagnostics outside the gated tree are not a measurement" --check
-expect_text "and says the wrong tree was measured" "none inside extensions/"
+expect_text "and says the wrong tree was measured" "none inside the gated trees"
 PI_QA_BIOME=$WORK/offtree.sh qa fail "--write will not lower every metric on them" --write
 printf '#!/bin/sh\necho "biome exploded" >&2\nexit 2\n' >"$WORK/exit2.sh"; chmod +x "$WORK/exit2.sh"
 PI_QA_BIOME=$WORK/exit2.sh qa fail "a biome run that exits non-zero is not a measurement" --check
