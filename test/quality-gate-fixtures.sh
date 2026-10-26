@@ -262,6 +262,15 @@ expect_line "plain form" "zz-j.ts:2"
 expect_line "bracket form" "zz-j.ts:3"
 expect_absent "a mention in a comment is not a call" "zz-j.ts:4"
 dropprobes
+# The door's exemption is granted to two named files. A rule written as `name.startsWith("exec")` would
+# pass this probe and quietly exempt anything renamed into the family.
+probe exec-adjacent.ts 'export function f(raw: string) {
+	return JSON.parse(raw);
+}'
+qa fail "a file named like the door does not inherit its exemption" --only jsonParseLocation --full
+expect_line "and names it" "exec-adjacent.ts:2"
+# not zz-*, so `dropprobes` would leave it behind and the final measurement of the copy would fail on it
+rm -f extensions/lib/exec-adjacent.ts
 probe zz-e.ts 'export function f(x: () => void) {
 	try { x(); } catch {}
 	try { x(); } catch { ; }

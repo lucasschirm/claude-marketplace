@@ -489,10 +489,17 @@ function countGlobalThisWrites() {
 	return { count: hits.length, hits };
 }
 
+/**
+ * Where parsing the output of an external command is allowed: the door, and the sibling that knows what
+ * its payloads look like. Two files, named exactly - a prefix match would let `exec-anything.ts` parse
+ * whatever it liked, which is the hole this invariant exists to keep shut.
+ */
+const OUTPUT_PARSE_ALLOWLIST = new Set(["extensions/lib/exec.ts", "extensions/lib/exec-payload.ts"]);
+
 function countJsonParseOutsideExecLib() {
 	const hits = [];
 	for (const file of extensionFiles()) {
-		if (rel(file) === "extensions/lib/exec.ts") continue;
+		if (OUTPUT_PARSE_ALLOWLIST.has(rel(file))) continue;
 		const lines = linesOf(file);
 		lines.forEach((line, i) => {
 			const trimmed = line.trim();
@@ -761,7 +768,7 @@ const INVARIANTS = [
 	},
 	{
 		name: "jsonParseLocation",
-		description: "only extensions/lib/exec.ts parses external command output",
+		description: "only the subprocess door parses external command output",
 		measure: countJsonParseOutsideExecLib,
 	},
 	{

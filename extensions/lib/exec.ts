@@ -17,10 +17,9 @@
  *   - a **session** (`devin acp`) must not be killed by the wall clock. Its liveness is "has it said
  *     anything lately", with a longer allowance while a tool call is open - see `spawnLongLived`.
  */
+import { capMessage, jsonErrorMessages, type Schema, schemaErrors } from "./exec-payload.ts";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import type { TSchema } from "typebox";
-import { Check, Errors } from "typebox/value";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,7 +98,7 @@ export interface JsonOptions extends ExecOptions {
 	 * Shape the payload must satisfy. A mismatch is `BAD_SCHEMA` naming the offending paths, which is
 	 * how a CLI rename turns into a report instead of a silent empty list.
 	 */
-	schema?: TSchema;
+	schema?: Schema;
 	/**
 	 * Some CLIs answer with a JSON envelope and exit non-zero (Orca does: `ok: false` plus exit 1).
 	 * With this set, a non-zero exit whose stdout parses is returned as success and the caller reads
@@ -160,10 +159,15 @@ function classify(err: unknown, maxBufferBytes: number): ExecFailure {
 			...base,
 		};
 	}
+	// A CLI that reports its failures as a JSON body has put the reason somewhere the exit code cannot
+	// point at - `gh api graphql` answers `{"errors":[...]}` on stdout with a non-zero exit, and the whole
+	// stale-thread detection in pr-tasks depends on that text surviving into the error. This is the last
+	// place the unexcerpted stdout exists, so the messages are lifted here.
+	const detail = [stderr, jsonErrorMessages(e.stdout)].filter(Boolean).join("\n");
 	return {
 		ok: false,
 		code: "EXIT",
-		message: stderr ?? `the command exited with code ${String(e.code ?? "unknown")}`,
+		message: capMessage(detail || `the command exited with code ${String(e.code ?? "unknown")}`),
 		exitCode: typeof e.code === "number" ? e.code : null,
 		...base,
 	};
@@ -219,7 +223,7 @@ export async function runJson<T>(cmd: string, args: string[], options: JsonOptio
 	return raw;
 }
 
-function parseBody<T>(stdout: string, schema?: TSchema): { ok: true; data: T } | { ok: false; failure: ExecFailure } {
+function parseBody<T>(stdout: string, schema?: Schema): { ok: true; data: T } | { ok: false; failure: ExecFailure } {
 	let value: unknown;
 	try {
 		value = JSON.parse(stdout);
@@ -238,22 +242,23 @@ function parseBody<T>(stdout: string, schema?: TSchema): { ok: true; data: T } |
 			},
 		};
 	}
-	if (schema && !Check(schema, value)) {
-		const lines: string[] = [];
-		let extra = 0;
-		for (const issue of Errors(schema, value)) {
-			if (lines.length < MAX_SCHEMA_ERRORS) lines.push(`${issue.instancePath || "/"}: ${issue.message}`);
-			else extra++;
-		}
-		return {
-			ok: false,
-			failure: {
+	if (schema) {
+		const issues = schemaErrors(schema, value);
+		if (issues.length > 0) {
+			const shown = issues.slice(0, MAX_SCHEMA_ERRORS);
+			const extra = issues.length - shown.length;
+			return {
 				ok: false,
-				code: "BAD_SCHEMA",
-				// Paths and messages only. The payload is deliberately absent: see the doc above.
-				message: `output does not match the expected shape (${lines.join("; ")}${extra ? `; and ${extra} more` : ""})`,
-			},
-		};
+				failure: {
+					ok: false,
+					code: "BAD_SCHEMA",
+					// Paths and messages only. The payload is deliberately absent: command output can carry
+					// a token, and this message reaches tool results and the transcript.
+					message: `output does not match the expected shape (${shown.join("; ")}${extra ? `; and ${extra} more` : ""})`,
+					stdout: excerpt(stdout),
+				},
+			};
+		}
 	}
 	return { ok: true, data: value as T };
 }

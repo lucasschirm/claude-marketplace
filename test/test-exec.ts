@@ -4,8 +4,8 @@ import * as assert from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Type } from "typebox";
 import { MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText, spawnLongLived } from "../extensions/lib/exec.ts";
+import { type Schema, schemaErrors } from "../extensions/lib/exec-payload.ts";
 
 const NODE = process.execPath;
 const created: string[] = [];
@@ -42,8 +42,14 @@ test("unparseable output is a failure, never an empty success", async () => {
 	assert.match(String(res.stdout), /backend unreachable/);
 });
 
+const WORKERS_SCHEMA: Schema = {
+	type: "object",
+	required: ["workers"],
+	properties: { workers: { type: "array", items: { type: "object", required: ["id"], properties: { id: { type: "string" } } } } },
+};
+
 test("a payload in the wrong shape names the path, not the payload", async () => {
-	const schema = Type.Object({ workers: Type.Array(Type.Object({ id: Type.String() })) });
+	const schema = WORKERS_SCHEMA;
 	const res = await runJson(NODE, ["-e", echoScript('{"workers":[{"id":null},{"id":"ok"},{"id":42}]}')], { schema });
 	assert.strictEqual(res.ok, false);
 	if (res.ok) return;
@@ -55,7 +61,7 @@ test("a payload in the wrong shape names the path, not the payload", async () =>
 });
 
 test("a payload that satisfies the schema is untouched data", async () => {
-	const schema = Type.Object({ workers: Type.Array(Type.Object({ id: Type.String() })) });
+	const schema = WORKERS_SCHEMA;
 	const res = await runJson<{ workers: Array<{ id: string }> }>(NODE, ["-e", echoScript('{"workers":[{"id":"a"}]}')], {
 		schema,
 	});
@@ -158,6 +164,60 @@ test("env and cwd reach the child", async () => {
 test("the measured defaults are the documented ones", () => {
 	assert.strictEqual(READ_TIMEOUT_MS, 60_000);
 	assert.strictEqual(MUTATION_TIMEOUT_MS, 120_000);
+});
+
+// ------------------------------------------------------------------ the shapes
+
+test("a field the schema never mentions is not a violation", () => {
+	// APIs add fields on a release schedule; a schema that failed on the day a CLI added `updatedAt`
+	// would be a false alarm shipped as a reliability fix.
+	const issues = schemaErrors(
+		{ type: "object", required: ["id"], properties: { id: { type: "string" } } },
+		{
+			id: "a",
+			updatedAt: "2026-01-01",
+			nested: { anything: [1, 2] },
+		},
+	);
+	assert.deepStrictEqual(issues, []);
+});
+
+test("a missing field is named by path", () => {
+	assert.deepStrictEqual(schemaErrors(WORKERS_SCHEMA, { workers: [{}, { id: "ok" }] }), ['/workers/0: missing required "id"']);
+	assert.deepStrictEqual(schemaErrors(WORKERS_SCHEMA, {}), ['/: missing required "workers"']);
+});
+
+test("an array of scalars reports the index", () => {
+	assert.deepStrictEqual(schemaErrors({ type: "array", items: { type: "number" } }, [1, "two", 3]), ["/1: must be a number, got string"]);
+});
+
+test("null is not a string, and an explicit null branch is the way to allow it", () => {
+	assert.match(schemaErrors({ type: "string" }, null)[0], /must be a string, got null/);
+	assert.deepStrictEqual(schemaErrors({ anyOf: [{ type: "string" }, { type: "null" }] }, null), []);
+});
+
+test("an enum names the value it rejected", () => {
+	const schema: Schema = { type: "string", enum: ["queued", "running"] };
+	assert.deepStrictEqual(schemaErrors(schema, "paused"), ['/: "paused" is not one of queued|running']);
+	assert.deepStrictEqual(schemaErrors(schema, "running"), []);
+});
+
+test("a keyword the validator does not implement throws instead of accepting everything", () => {
+	// The silent failure worth guarding: a hand-written schema with `additionalProperties` (or a typo)
+	// that validates every payload looks like a passing check and checks nothing.
+	const bogus = { type: "object", additionalProperties: false } as unknown as Schema;
+	assert.throws(() => schemaErrors(bogus, { any: "thing" }), /unsupported schema keyword/);
+});
+
+test("a JSON error body is lifted into the message of a failing exit", async () => {
+	// `gh api graphql` answers with {"errors":[...]} on stdout and a non-zero exit. The reason is in the
+	// body, and stdout is excerpted before a caller sees it - so the door lifts the messages now.
+	const body = JSON.stringify({ errors: [{ message: "Could not resolve to a node with the global id of 'PRRT_x'" }] });
+	const res = await runJson(NODE, ["-e", echoScript(body, 1)]);
+	assert.strictEqual(res.ok, false);
+	if (res.ok) return;
+	assert.strictEqual(res.code, "EXIT");
+	assert.match(res.message, /Could not resolve to a node/);
 });
 
 // ------------------------------------------------------------------ the session door
