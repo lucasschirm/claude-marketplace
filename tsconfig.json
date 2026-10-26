@@ -19,6 +19,7 @@
     "isolatedModules": true
   },
   // `test/**` is typechecked in P1: the Pi-runtime harnesses rely on ambient globals.
-  "include": ["extensions/**/*.ts"],
+  // agy-acp is a standalone Node package (not a Pi extension), typechecked by the same strict config.
+  "include": ["extensions/**/*.ts", "agy-acp/**/*.ts"],
   "exclude": ["node_modules", "plugins/**", "skills/**"]
 }

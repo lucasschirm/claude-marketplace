@@ -6,17 +6,18 @@
     "globalThisOwnership": 33,
     "jsonParseLocation": 27,
     "noStdioWrites": 0,
+    "agyStdoutFramesOnly": 0,
     "emptyCatch": 53,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.style/useTemplate": 7,
-    "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
-    "biome.style/noNonNullAssertion": 5,
-    "biome.suspicious/noExplicitAny": 160,
+    "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noExplicitAny": 160,
+    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
@@ -40,7 +41,11 @@
     "extensions/observe-pr.ts": 2058,
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1505,
-    "extensions/tools.ts": 627
+    "extensions/tools.ts": 627,
+    "agy-acp/src/errors.ts": 24,
+    "agy-acp/src/framing.ts": 81,
+    "agy-acp/src/jsonrpc.ts": 296,
+    "agy-acp/src/main.ts": 105
   },
   "notes": [
     {
@@ -134,8 +139,22 @@
         "extensions/lib/ci-verdict.ts: 119 lines > baseline 66 (files may only shrink)",
         "extensions/observe-pr.ts: 2058 lines > baseline 1992 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "agy-acp wired into the gates: biome.jsonc now covers agy-acp/** (hash moved), no diagnostic counts changed, and the new agyStdoutFramesOnly invariant starts at zero",
+      "changes": [
+        "biome.jsonc changed since these numbers were recorded (184447d011b421d7 -> 26e8dcbbf3b6c1b0): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "PR review round 2: serialization failures now answer -32603 instead of silence, EOF became a half-close, and errors.ts split off the error vocabulary - jsonrpc.ts grew 281->296 staying under its 300 budget",
+      "changes": [
+        "agy-acp/src/jsonrpc.ts: 296 lines > baseline 281 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "9eaa302",
-  "biomeConfigHash": "184447d011b421d7"
+  "generatedFrom": "ef4d68a",
+  "biomeConfigHash": "26e8dcbbf3b6c1b0"
 }

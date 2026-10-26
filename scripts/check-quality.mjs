@@ -48,6 +48,14 @@ function listTs(dir) {
 }
 
 const extensionFiles = () => listTs(path.join(ROOT, "extensions"));
+const agyAcpSrcFiles = () => listTs(path.join(ROOT, "agy-acp", "src"));
+/**
+ * The trees the source-scanned invariants govern: extension sources plus the agy-acp server sources.
+ * Test files stay out of these scans for the same reason test/** always has been: a test may spawn
+ * the binary it exercises and parse what it needs. The obligation on tests is checkWiredTests, not
+ * these metrics.
+ */
+const gatedSourceFiles = () => [...extensionFiles(), ...agyAcpSrcFiles()];
 const rel = (p) => path.relative(ROOT, p).split(path.sep).join("/");
 
 function linesOf(file) {
@@ -318,7 +326,7 @@ function readBiomeDiagnosticJson(res) {
 		const abs = path.isAbsolute(file) ? path.normalize(file) : path.resolve(ROOT, file);
 		// Only the gated tree counts. Counting files elsewhere reports debt going down while no extension was
 		// touched, which is the same quiet pass as a rule being switched off - just with extra steps.
-		if (!isUnderExtensions(abs)) {
+		if (!isUnderGatedTree(abs)) {
 			offTree++;
 			continue;
 		}
@@ -349,16 +357,19 @@ function readBiomeDiagnosticJson(res) {
 				? `${diagnostics.length} diagnostic(s) carried no lint category - the reporter shape is not the one we read`
 				: pathless > 0
 					? `${pathless} diagnostic(s) carried a rule but no readable file - the reporter shape is not the one we read`
-					: `${diagnostics.length} diagnostic(s) reported and none inside extensions/ (${offTree} outside it) - the run measured something other than the gated tree`;
+					: `${diagnostics.length} diagnostic(s) reported and none inside the gated trees (${offTree} outside them) - the run measured something other than the gated tree`;
 		return { runFailed: true, detail: why };
 	}
 	return { counts, shapeOk };
 }
 
-/** True when `abs` is a file inside the tree the biome metrics are supposed to describe. */
-function isUnderExtensions(abs) {
-	const rel = path.relative(path.join(ROOT, "extensions"), abs);
-	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+/** True when `abs` is a file inside a tree the biome metrics are supposed to describe. */
+function isUnderGatedTree(abs) {
+	for (const dir of ["extensions", "agy-acp"]) {
+		const rel = path.relative(path.join(ROOT, dir), abs);
+		if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) return true;
+	}
+	return false;
 }
 
 /** Per-rule diagnostic counts over extensions/, plus whether the reporter shape was recognised; null when biome cannot run. */
@@ -371,7 +382,7 @@ function biomeRuleCounts() {
 	const override = process.env.PI_QA_FIXTURES === "1" ? process.env.PI_QA_BIOME?.trim() || process.env.PI_QA_BIOME : undefined;
 	if (override) {
 		return readBiomeDiagnosticJson(
-			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", "extensions"], {
+			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"], {
 				cwd: ROOT,
 				encoding: "utf-8",
 				maxBuffer: 32 * 1024 * 1024,
@@ -383,8 +394,8 @@ function biomeRuleCounts() {
 	// --max-diagnostics=none: a capped report would understate debt, and undercounting is the failure direction
 	// this whole file is built to refuse.
 	const args = fs.existsSync(localBin)
-		? ["lint", "--reporter=json", "--max-diagnostics=none", "extensions"]
-		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", "extensions"];
+		? ["lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"]
+		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"];
 
 	const res = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf-8", maxBuffer: 32 * 1024 * 1024 });
 	return readBiomeDiagnosticJson(res);
@@ -405,7 +416,7 @@ const EXEC_CALL_RE = /(?<![.\w$])(execFileAsync|execFileSync|execFile|execSync|e
  */
 function execSites() {
 	const all = [];
-	for (const file of extensionFiles()) {
+	for (const file of gatedSourceFiles()) {
 		const src = fs.readFileSync(file, "utf-8");
 		for (const m of src.matchAll(EXEC_CALL_RE)) {
 			if (!isRealCode(src, m.index) || isDeclaration(src, m.index)) continue;
@@ -425,7 +436,7 @@ function execSites() {
 
 function countEmptyCatches() {
 	const hits = [];
-	for (const file of extensionFiles()) {
+	for (const file of gatedSourceFiles()) {
 		const src = fs.readFileSync(file, "utf-8");
 		for (const m of src.matchAll(/catch\s*(?:\([^)]*\))?\s*\{([^}]*)\}/g)) {
 			// A reason comment satisfies the rule — that is the rule. A lone `;` or comma is not a reason.
@@ -476,7 +487,7 @@ function isGlobalThisWrite(line) {
 
 function countGlobalThisWrites() {
 	const hits = [];
-	for (const file of extensionFiles()) {
+	for (const file of gatedSourceFiles()) {
 		if (rel(file) === "extensions/lib/cross-extension.ts") continue;
 		linesOf(file).forEach((line, i) => {
 			if (isGlobalThisWrite(line) || isGlobalThisAlias(line)) hits.push(`${rel(file)}:${i + 1}`);
@@ -485,10 +496,14 @@ function countGlobalThisWrites() {
 	return { count: hits.length, hits };
 }
 
+// Inbound text is parsed in one place per gated tree: exec output in extensions/lib/exec.ts, and
+// protocol frames in agy-acp/src/jsonrpc.ts.
+const JSON_PARSE_ALLOWED = new Set(["extensions/lib/exec.ts", "agy-acp/src/jsonrpc.ts"]);
+
 function countJsonParseOutsideExecLib() {
 	const hits = [];
-	for (const file of extensionFiles()) {
-		if (rel(file) === "extensions/lib/exec.ts") continue;
+	for (const file of gatedSourceFiles()) {
+		if (JSON_PARSE_ALLOWED.has(rel(file))) continue;
 		const lines = linesOf(file);
 		lines.forEach((line, i) => {
 			const trimmed = line.trim();
@@ -506,6 +521,23 @@ function countStdioWrites() {
 		const lines = linesOf(file);
 		lines.forEach((line, i) => {
 			if (/process\.(stdout|stderr)\.write\s*\(/.test(line)) hits.push(`${rel(file)}:${i + 1}`);
+		});
+	}
+	return { count: hits.length, hits };
+}
+
+// agy-acp's stdout is the protocol channel, not a console: only the transport may frame it, and
+// main.ts may answer --version/--help before serving. console.log is never legitimate in server
+// sources - it is exactly how a stray debug line corrupts the stream.
+const AGY_STDOUT_ALLOWED = new Set(["agy-acp/src/jsonrpc.ts", "agy-acp/src/main.ts"]);
+
+function countAgyStdoutViolations() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const allowed = AGY_STDOUT_ALLOWED.has(rel(file));
+		linesOf(file).forEach((line, i) => {
+			if (/\bconsole\s*\.\s*log\s*\(/.test(line)) hits.push(`${rel(file)}:${i + 1}`);
+			if (!allowed && /process\.stdout\.write\s*\(/.test(line)) hits.push(`${rel(file)}:${i + 1}`);
 		});
 	}
 	return { count: hits.length, hits };
@@ -577,7 +609,7 @@ function resultReachesCaller(before, after) {
 
 function countUncheckedMutations() {
 	const hits = [];
-	for (const file of extensionFiles()) {
+	for (const file of gatedSourceFiles()) {
 		const src = fs.readFileSync(file, "utf-8");
 		for (const m of src.matchAll(FUNNEL_CALL_RE)) {
 			if (!isRealCode(src, m.index) || isDeclaration(src, m.index)) continue;
@@ -593,7 +625,7 @@ function countUncheckedMutations() {
 
 function fileLineBudget() {
 	const map = {};
-	for (const file of extensionFiles()) {
+	for (const file of gatedSourceFiles()) {
 		map[rel(file)] = linesOf(file).length;
 	}
 	return map;
@@ -619,38 +651,42 @@ function checkPiExtensionsMatchDisk() {
 
 /** A lib no entry file imports is dead code - the same class of bug as an unrun test file. */
 function checkUnusedLibs() {
-	const libDir = path.join(ROOT, "extensions", "lib");
-	if (!fs.existsSync(libDir)) return { count: 0, hits: [] };
-	const read = (f) => fs.readFileSync(f, "utf-8");
-	const libFiles = fs.readdirSync(libDir).filter((f) => f.endsWith(".ts"));
-	// Reachability, not textual mention: a lib imported only by another live lib is used.
-	const reached = new Set();
-	const queue = fs
-		.readdirSync(path.join(ROOT, "extensions"))
-		.filter((f) => f.endsWith(".ts"))
-		.map((f) => path.join(ROOT, "extensions", f));
-	while (queue.length > 0) {
-		const file = queue.pop();
-		if (!fs.existsSync(file)) continue;
-		const src = read(file);
-		for (const m of src.matchAll(/from\s+["'][^"']*lib\/([\w.-]+\.ts)["']/g)) {
-			const name = m[1];
-			if (!libFiles.includes(name) || reached.has(name)) continue;
-			reached.add(name);
-			queue.push(path.join(libDir, name));
+	const trees = [
+		{ entries: path.join(ROOT, "extensions"), lib: path.join(ROOT, "extensions", "lib"), prefix: "extensions" },
+		{ entries: path.join(ROOT, "agy-acp", "src"), lib: path.join(ROOT, "agy-acp", "src", "lib"), prefix: "agy-acp/src" },
+	];
+	const hits = [];
+	for (const tree of trees) {
+		if (!fs.existsSync(tree.lib) || !fs.existsSync(tree.entries)) continue;
+		const read = (f) => fs.readFileSync(f, "utf-8");
+		const libFiles = fs.readdirSync(tree.lib).filter((f) => f.endsWith(".ts"));
+		// Reachability, not textual mention: a lib imported only by another live lib is used.
+		const reached = new Set();
+		const queue = fs
+			.readdirSync(tree.entries)
+			.filter((f) => f.endsWith(".ts"))
+			.map((f) => path.join(tree.entries, f));
+		while (queue.length > 0) {
+			const file = queue.pop();
+			if (!fs.existsSync(file)) continue;
+			const src = read(file);
+			for (const m of src.matchAll(/from\s+["'][^"']*lib\/([\w.-]+\.ts)["']/g)) {
+				const name = m[1];
+				if (!libFiles.includes(name) || reached.has(name)) continue;
+				reached.add(name);
+				queue.push(path.join(tree.lib, name));
+			}
 		}
+		hits.push(...libFiles.filter((f) => !reached.has(f)).map((f) => `${tree.prefix}/lib/${f} is reachable from no entry file`));
 	}
-	const hits = libFiles.filter((f) => !reached.has(f)).map((f) => `extensions/lib/${f} is reachable from no entry file`);
 	return { count: hits.length, hits };
 }
 
-/** Every test/test-*.ts must be reachable from run.sh or a suite runner, or it silently never runs. */
+/** Every test-*.ts in a test dir must be named by run.sh or a suite runner, or it silently never runs. */
 function checkWiredTests() {
 	const testDir = path.join(ROOT, "test");
 	const runner = path.join(testDir, "run.sh");
 	if (!fs.existsSync(runner) || !fs.existsSync(testDir)) return { count: 0, hits: [] };
-	// Named in run.sh's header: these start real Devin sessions, so they are run deliberately.
-	const deliberate = new Set(["test-devin-delegate.ts", "test-devin-delegate-lifecycle.ts"]);
 	const haystacks = [
 		runner,
 		...fs
@@ -661,12 +697,24 @@ function checkWiredTests() {
 		.filter((f) => fs.existsSync(f))
 		.map((f) => fs.readFileSync(f, "utf-8"))
 		.join("\n");
-	const hits = fs
-		.readdirSync(testDir)
-		.filter((f) => f.startsWith("test-") && f.endsWith(".ts"))
-		.filter((f) => !deliberate.has(f))
-		.filter((f) => !haystacks.includes(f))
-		.map((f) => `test/${f} is wired into no suite - add it to UNIT_TESTS or to a suite runner`);
+	// Named in run.sh's header: these start real Devin sessions, so they are run deliberately.
+	const deliberate = new Set(["test/test-devin-delegate.ts", "test/test-devin-delegate-lifecycle.ts"]);
+	const dirs = [
+		{ dir: testDir, prefix: "test" },
+		{ dir: path.join(ROOT, "agy-acp", "test"), prefix: "agy-acp/test" },
+	];
+	const hits = [];
+	for (const { dir, prefix } of dirs) {
+		if (!fs.existsSync(dir)) continue;
+		for (const f of fs.readdirSync(dir)) {
+			if (!f.startsWith("test-") || !f.endsWith(".ts")) continue;
+			const relPath = `${prefix}/${f}`;
+			if (deliberate.has(relPath)) continue;
+			// The full path must appear: a bare-name match would let a same-named file in the other
+			// test dir silently satisfy the wiring.
+			if (!haystacks.includes(relPath)) hits.push(`${relPath} is wired into no suite - add it to a suite in test/run.sh`);
+		}
+	}
 	return { count: hits.length, hits };
 }
 
@@ -715,16 +763,17 @@ function checkFrontmatter() {
 function defaultBudgetFor(file) {
 	if (file.startsWith("extensions/lib/")) return 500;
 	if (file.startsWith("extensions/")) return 300;
+	if (file.startsWith("agy-acp/src/")) return 300;
 	return Number.POSITIVE_INFINITY;
 }
 
 const INVARIANTS = [
 	{
 		name: "execLocation",
-		description: "no execFile/spawn outside extensions/lib/** (P1 migrates the call sites into lib/exec.ts)",
+		description: "no execFile/spawn outside extensions/lib/** or agy-acp/src/lib/** (exec goes through a vetted lib)",
 		measure: () => {
 			const hits = execSites()
-				.filter((s) => !s.file.startsWith("extensions/lib/"))
+				.filter((s) => !s.file.startsWith("extensions/lib/") && !s.file.startsWith("agy-acp/src/lib/"))
 				.map((s) => `${s.file}:${s.line}`);
 			return { count: hits.length, hits };
 		},
@@ -746,18 +795,23 @@ const INVARIANTS = [
 	},
 	{
 		name: "globalThisOwnership",
-		description: "no globalThis writes outside extensions/lib/cross-extension.ts",
+		description: "no globalThis writes outside extensions/lib/cross-extension.ts (scans extensions/ + agy-acp/src/)",
 		measure: countGlobalThisWrites,
 	},
 	{
 		name: "jsonParseLocation",
-		description: "only extensions/lib/exec.ts parses external command output",
+		description: "only extensions/lib/exec.ts and agy-acp/src/jsonrpc.ts parse inbound text",
 		measure: countJsonParseOutsideExecLib,
 	},
 	{
 		name: "noStdioWrites",
 		description: "no process.stdout/stderr.write in extensions/** (stdout is the TUI's)",
 		measure: countStdioWrites,
+	},
+	{
+		name: "agyStdoutFramesOnly",
+		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
+		measure: countAgyStdoutViolations,
 	},
 	{
 		name: "emptyCatch",
@@ -784,12 +838,12 @@ const INVARIANTS = [
 	},
 	{
 		name: "noUnusedLibs",
-		description: "every extensions/lib/*.ts is imported by at least one entry file",
+		description: "every extensions/lib/*.ts and agy-acp/src/lib/*.ts is reachable from an entry file",
 		measure: checkUnusedLibs,
 	},
 	{
 		name: "wiredTests",
-		description: "every test/test-*.ts is referenced by run.sh or a suite runner",
+		description: "every test-*.ts under test/ or agy-acp/test/ is named by run.sh or a suite runner",
 		measure: checkWiredTests,
 	},
 	{
@@ -848,7 +902,12 @@ function ruleEnabledInConfig(rule) {
 	for (const o of Array.isArray(cfg?.overrides) ? cfg.overrides : []) {
 		const includes = Array.isArray(o?.includes) ? o.includes : [];
 		const reachesExtensions = includes.some(
-			(pattern) => pattern === "**" || pattern.startsWith("**") || pattern.startsWith("extensions/") || pattern.includes("**."),
+			(pattern) =>
+				pattern === "**" ||
+				pattern.startsWith("**") ||
+				pattern.startsWith("extensions/") ||
+				pattern.startsWith("agy-acp/") ||
+				pattern.includes("**."),
 		);
 		if (!reachesExtensions) continue;
 		if (o?.linter?.rules === "off") return false;
