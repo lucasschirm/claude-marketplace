@@ -342,13 +342,12 @@ async function runMutation(args: string[], cwd: string): Promise<string> {
 	// `body`, not `stdout`: the excerpt is capped for display and a GraphQL error body longer than that
 	// would silently lose its messages - the one thing this mutation's caller reports to the user.
 	const messages = responseErrorMessages(parseJsonSafe(res.body ?? res.stdout));
-	// The door's reason leads, then what gh said, then any GraphQL messages: `failureText` already folds
-	// stderr in without duplicating it, and the reason must survive because it is the only thing naming a
-	// TIMEOUT as a TIMEOUT once this becomes a plain thrown Error several callers pattern-match.
-	const text = [failureText(res), messages]
-		.filter((part) => part?.trim())
-		.join("\n")
-		.trim();
+	// The door's reason leads and messages are appended only when not already inside it: `failureText`
+	// folds stderr in without duplicating it, `classify()` already lifts a CLI's JSON `errors[]` for `EXIT`
+	// (otherwise the user reads the same GraphQL line twice - review nit), and the reason must survive
+	// because it is the only thing naming a TIMEOUT as a TIMEOUT once this is a plain thrown Error.
+	const reason = failureText(res);
+	const text = (messages && !reason.includes(messages) ? `${reason}\n${messages}` : reason).trim();
 	const err = new Error(res.code === "TIMEOUT" ? `${text}; the change may already be on GitHub` : text) as Error & {
 		stdout?: string;
 		stderr?: string;

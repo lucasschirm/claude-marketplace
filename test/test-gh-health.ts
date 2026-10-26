@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert";
 import { GhHealth, isGhAvailabilityError, isGhAuthError, isNoPullRequestFailure } from "../extensions/lib/gh-health.ts";
+import { failureText, runText } from "../extensions/lib/exec.ts";
 
 function makeFakeClock() {
 	let nowMs = 0;
@@ -261,11 +262,17 @@ test("a failure supersedes a recovery tick that has not run yet", () => {
 // asked for is deleted instead of retried), and "this branch has no PR" goes back to looking like an
 // outage on every branch scan.
 
-test("the door's NOT_FOUND sentence is an availability failure", () => {
-	assert.strictEqual(
-		isGhAvailabilityError(new Error("the command could not be started (not on PATH, or the working directory is gone)")),
-		true,
-	);
+test("the door's NOT_FOUND sentence is an availability failure", async () => {
+	// Taken from the door rather than retyped: a test that quotes the wording passes even after the door
+	// rewords it, and the reword is precisely the drift that would silently stop pacing a missing `gh`.
+	const res = await runText("/definitely-not-a-binary-xyz", ["pr", "view"], { timeoutMs: 5_000 });
+	assert.strictEqual(res.ok, false);
+	if (res.ok) return;
+	assert.strictEqual(res.code, "NOT_FOUND");
+	// The path `github-review-threads.ts` throws down: a plain Error built from the door's prose.
+	assert.strictEqual(isGhAvailabilityError(new Error(failureText(res))), true);
+	// The path `observe-pr.ts` and `pr-tasks.ts` take: the raw cause, matched by Node's own code.
+	assert.strictEqual(isGhAvailabilityError(res.cause), true);
 });
 
 test("a branch with no PR is distinguishable from gh being broken", () => {
