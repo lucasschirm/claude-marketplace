@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpDir } from "./helpers/git-repo.ts";
-import { checkPluginLibs } from "../scripts/sync-plugin-libs.mjs";
+import { checkPluginLibs, VENDORING } from "../scripts/sync-plugin-libs.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN = path.join(REPO, "plugins", "pr-observer");
@@ -298,20 +298,77 @@ test("the vendored engine matches extensions/lib", () => {
 	assert.deepEqual(checkPluginLibs(REPO), []);
 });
 
+/** Line and block comments out, literals intact - prose is not an import. */
+function stripComments(source) {
+	return source
+		.split("\n")
+		.map((line) => {
+			let out = "";
+			let quote = "";
+			for (let i = 0; i < line.length; i++) {
+				const c = line[i];
+				if (quote) {
+					out += c;
+					if (c === "\\") {
+						out += line[++i] ?? "";
+						continue;
+					}
+					if (c === quote) quote = "";
+					continue;
+				}
+				if (c === '"' || c === "'" || c === "`") {
+					quote = c;
+					out += c;
+					continue;
+				}
+				if (c === "/" && (line[i + 1] === "/" || line[i + 1] === "*")) break;
+				out += c;
+			}
+			return out;
+		})
+		.join("\n");
+}
+
 test("the vendored engine is the whole dependency closure of the review tools", async () => {
-	// github-review-threads and pr-tasks-manager may only import each other and node: builtins,
-	// otherwise the plugin would need a file it does not carry.
-	const importLines: string[] = [];
-	for (const file of ["pr-tasks-manager.ts", "github-review-threads.ts", "ci-verdict.ts"]) {
-		const text = fs.readFileSync(path.join(PLUGIN, "lib", file), "utf8");
-		for (const match of text.matchAll(/from\s+["']([^"']+)["']/g)) importLines.push(match[1]);
+	// An installed plugin can only resolve node: builtins and files it carries itself, so every relative
+	// import in the vendored graph has to land on a file that is in the plugin. Walked from the vendored
+	// list rather than a hard-coded set of names: when lib/exec.ts joined the graph the old version of this
+	// test failed for the right reason, and the fix it wanted was "check the filesystem", not "add a name".
+	// Absolute from the repo root, not from `process.cwd()`: the queue is deduplicated by string, and
+	// seeding relatively while pushing absolutely made every transitively imported file visit twice - and
+	// made the whole test fail when it was run from anywhere but the repo root.
+	const queue = VENDORING.flatMap(({ plugin, files }) => files.map((file) => path.resolve(REPO, plugin, "lib", file)));
+	const unresolved: string[] = [];
+	const seen = new Set<string>();
+	while (queue.length > 0) {
+		const file = queue.pop() as string;
+		if (seen.has(file)) continue;
+		seen.add(file);
+		const dir = path.dirname(file);
+		if (!fs.existsSync(file)) {
+			unresolved.push(
+				`${path.relative(REPO, file)} is declared as vendored but is not on disk - run 'node scripts/sync-plugin-libs.mjs --write'`,
+			);
+			continue;
+		}
+		// Only real import/export statements. A bare `from "..."` search counted prose: a vendored comment
+		// reading `// parse the output from "gh pr view"` failed the test as an illegal package import, and
+		// a gate that fails on comments gets disabled rather than fixed.
+		for (const match of stripComments(fs.readFileSync(file, "utf8")).matchAll(
+			/(?:^|[;\n])\s*(?:import|export)[^;]*?\bfrom\s*["']([^"']+)["']/g,
+		)) {
+			const specifier = match[1];
+			if (specifier.startsWith("node:")) continue;
+			if (!specifier.startsWith("./")) {
+				unresolved.push(`${path.relative(REPO, file)} imports "${specifier}" - a package, which no install guarantees`);
+				continue;
+			}
+			const target = path.resolve(dir, specifier);
+			if (!fs.existsSync(target)) unresolved.push(`${path.relative(REPO, file)} imports "${specifier}", which the plugin does not carry`);
+			else if (!seen.has(target)) queue.push(target);
+		}
 	}
-	for (const specifier of importLines) {
-		assert.ok(
-			specifier.startsWith("node:") || specifier === "./github-review-threads.ts",
-			`${specifier} is not carried by the plugin (vendor it or drop it)`,
-		);
-	}
+	assert.deepEqual(unresolved, [], "the plugin cannot resolve its own import graph:\n" + unresolved.join("\n"));
 });
 
 // ------------------------------------------------------------------ the launcher

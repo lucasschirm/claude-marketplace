@@ -1,46 +1,48 @@
 {
   "metrics": {
-    "execLocation": 24,
-    "execTimeout": 25,
+    "execLocation": 2,
+    "execTimeout": 12,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
-    "jsonParseLocation": 27,
+    "jsonParseLocation": 9,
     "noStdioWrites": 0,
-    "agyStdoutFramesOnly": 0,
-    "emptyCatch": 53,
+    "emptyCatch": 47,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.style/useTemplate": 7,
-    "biome.complexity/useOptionalChain": 8,
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
+    "biome.complexity/useOptionalChain": 8,
+    "biome.suspicious/noExplicitAny": 153,
     "biome.suspicious/noGlobalIsNan": 8,
-    "biome.suspicious/noExplicitAny": 160,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
+    "biome.correctness/noUnusedFunctionParameters": 1,
     "biome.correctness/noUnusedImports": 1,
-    "biome.correctness/noUnusedFunctionParameters": 1
+    "agyStdoutFramesOnly": 0
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2650,
+    "extensions/devin-delegate.ts": 2685,
     "extensions/lib/acp-client.ts": 320,
-    "extensions/lib/ci-verdict.ts": 119,
+    "extensions/lib/ci-verdict.ts": 142,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
     "extensions/lib/devin-permissions.ts": 137,
     "extensions/lib/devin-slots.ts": 44,
+    "extensions/lib/exec-payload.ts": 165,
+    "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
-    "extensions/lib/gh-health.ts": 280,
-    "extensions/lib/github-review-threads.ts": 590,
+    "extensions/lib/gh-health.ts": 295,
+    "extensions/lib/github-review-threads.ts": 639,
     "extensions/lib/nonblocking.ts": 494,
-    "extensions/lib/orca-client.ts": 572,
+    "extensions/lib/orca-client.ts": 569,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 2058,
+    "extensions/observe-pr.ts": 2138,
     "extensions/orca-orchestration.ts": 1734,
-    "extensions/pr-tasks.ts": 1505,
+    "extensions/pr-tasks.ts": 1510,
     "extensions/tools.ts": 627,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/framing.ts": 81,
@@ -142,6 +144,47 @@
     },
     {
       "at": "2026-10-26",
+      "reason": "lib/exec.ts grew 405 to 410 on this branch: a CLI whose errors live in a JSON body needs them lifted before stdout is excerpted",
+      "changes": [
+        "extensions/lib/exec.ts: 410 lines > baseline 405 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "lib/github-review-threads.ts grew 590 to 637 by describing failures it used to swallow: three empty catches and five bare parses became coded causes",
+      "changes": [
+        "extensions/lib/github-review-threads.ts: 637 lines > baseline 590 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "observe-pr.ts grew 2058 to 2130 by typing what gh answers - PR and run payloads with their schemas - instead of reading them through any",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 142 lines > baseline 119 (files may only shrink)",
+        "extensions/observe-pr.ts: 2130 lines > baseline 2058 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "devin-delegate.ts +26 and pr-tasks.ts +5 are payload schemas and the comments naming which swallowed failure is now logged, paid for moving both files onto the door",
+      "changes": [
+        "extensions/devin-delegate.ts: 2676 lines > baseline 2650 (files may only shrink)",
+        "extensions/pr-tasks.ts: 1510 lines > baseline 1505 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "review fixes on this branch grew five files by 74 lines total: the door now carries an unexcerpted body, a fromFailureBody flag and failureText, and the comments name which misclassification each prevents",
+      "changes": [
+        "extensions/devin-delegate.ts: 2685 lines > baseline 2676 (files may only shrink)",
+        "extensions/lib/exec.ts: 451 lines > baseline 410 (files may only shrink)",
+        "extensions/lib/gh-health.ts: 295 lines > baseline 280 (files may only shrink)",
+        "extensions/lib/github-review-threads.ts: 639 lines > baseline 637 (files may only shrink)",
+        "extensions/observe-pr.ts: 2138 lines > baseline 2130 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
       "reason": "agy-acp wired into the gates: biome.jsonc now covers agy-acp/** (hash moved), no diagnostic counts changed, and the new agyStdoutFramesOnly invariant starts at zero",
       "changes": [
         "biome.jsonc changed since these numbers were recorded (184447d011b421d7 -> 26e8dcbbf3b6c1b0): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
@@ -155,6 +198,6 @@
       ]
     }
   ],
-  "generatedFrom": "ef4d68a",
+  "generatedFrom": "5ffc83c",
   "biomeConfigHash": "26e8dcbbf3b6c1b0"
 }

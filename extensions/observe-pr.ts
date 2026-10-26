@@ -1,18 +1,63 @@
 import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { promisify } from "node:util";
-import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
+import { spawn, type ChildProcess } from "node:child_process";
+import { type ExecFailure, failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
+import type { Schema } from "./lib/exec-payload.ts";
+import { ghHealth, isGhAvailabilityError, isGhAuthError, isNoPullRequestFailure } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
-import { bookkeepingAtHead, evaluateCiVerdict, type ObservedRun } from "./lib/ci-verdict.ts";
+import { bookkeepingAtHead, CI_CHECK_ROWS, evaluateCiVerdict, type ObservedRun } from "./lib/ci-verdict.ts";
 import { logError } from "./lib/extension-log.ts";
 import { commandExists, createTaskScope, mapLimited, reportBudgetViolation } from "./lib/nonblocking.ts";
 
-const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_OBSERVE_PR_EXTENSION_ACTIVE__";
-// A hung gh call (network) must not wedge a poll loop or the serialized branch check
-const GH_TIMEOUT_MS = 60_000;
+// A hung gh call (network) must not wedge a poll loop or the serialized branch check. The number is the
+// door's measured read timeout (lib/exec.ts, D7) rather than a value chosen per file.
+const GH_TIMEOUT_MS = READ_TIMEOUT_MS;
+
+/**
+ * What `gh pr view --json` has to look like for the observer to act on it. Deliberately shallow: what is
+ * caught is a payload that is not an object at all (an error page, `null`, a bare string), which used to
+ * arrive three assignments later as `undefined.state`. A schema demanding every field would turn a
+ * routine gh rename into a silent observer, which is the worse failure of the two.
+ */
+const PR_VIEW_SCHEMA: Schema = {
+	type: "object",
+	properties: {
+		number: { type: "number" },
+		state: { anyOf: [{ type: "string" }, { type: "null" }] },
+		isDraft: { anyOf: [{ type: "boolean" }, { type: "null" }] },
+	},
+};
+
+interface PrViewPayload {
+	number?: number;
+	state?: string | null;
+	isDraft?: boolean | null;
+	headRefOid?: string | null;
+	closed?: string | null;
+	mergedAt?: string | null;
+	comments?: unknown[];
+	/** The rollup rows are only read for `detailsUrl`, which is where the run id lives for a new run. */
+	statusCheckRollup?: Array<{ detailsUrl?: string | null; [key: string]: unknown }>;
+}
+
+/** One watched run's verdict, from `gh run view --json conclusion,status,headSha`. */
+const RUN_VIEW_SCHEMA: Schema = {
+	type: "object",
+	properties: {
+		conclusion: { anyOf: [{ type: "string" }, { type: "null" }] },
+		status: { anyOf: [{ type: "string" }, { type: "null" }] },
+		headSha: { anyOf: [{ type: "string" }, { type: "null" }] },
+	},
+};
+
+interface RunViewPayload {
+	conclusion?: string | null;
+	status?: string | null;
+	headSha?: string | null;
+}
+
 // How long a background round may keep starting new gh calls. Boot is held to a tighter budget:
 // it must never be what makes `pi` feel frozen (see extensions/lib/nonblocking.ts).
 const POLL_BUDGET_MS = Number.parseInt(process.env.PI_OBSERVE_PR_POLL_BUDGET_MS ?? "", 10) || 90_000;
@@ -656,36 +701,24 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	async function getRunErrorSummary(runId: string, cwd: string): Promise<string> {
-		try {
-			const { stdout, stderr } = await execFileAsync("gh", ["run", "view", runId, "--log-failed"], {
-				cwd,
-				maxBuffer: 2 * 1024 * 1024,
-				timeout: GH_TIMEOUT_MS,
-			});
-			const output = (stdout || stderr || "").trim();
-			if (output && !output.includes("log not found")) {
-				const lines = output.split("\n").filter((l) => l.trim().length > 0);
-				return lines.slice(-20).join("\n");
-			}
-		} catch {
-			// Fallback to standard run view if log-failed is not available
+		const failedLog = await runText("gh", ["run", "view", runId, "--log-failed"], {
+			cwd,
+			maxBuffer: 2 * 1024 * 1024,
+			timeoutMs: GH_TIMEOUT_MS,
+		});
+		// "log not found" is what gh says when a run's logs have expired: an answer, but not a summary.
+		if (failedLog.ok && failedLog.data && !failedLog.data.includes("log not found")) {
+			const lines = failedLog.data.split("\n").filter((l) => l.trim().length > 0);
+			return lines.slice(-20).join("\n");
 		}
 
-		try {
-			const { stdout, stderr } = await execFileAsync("gh", ["run", "view", runId], {
-				cwd,
-				maxBuffer: 1024 * 1024,
-				timeout: GH_TIMEOUT_MS,
-			});
-			const output = (stdout || stderr || "").trim();
-			if (output) {
-				return output;
-			}
-		} catch (err: any) {
-			return err.message || "Failed to retrieve CI run error summary";
-		}
-
-		return "No failure summary available.";
+		// Fallback to standard run view if log-failed is not available
+		const view = await runText("gh", ["run", "view", runId], { cwd, maxBuffer: 1024 * 1024, timeoutMs: GH_TIMEOUT_MS });
+		if (view.ok && view.data) return view.data;
+		// A summary is a courtesy on top of a failure already reported, so a failure here is not worth
+		// throwing over - but it is worth naming: "no summary available" and "gh timed out twice" are
+		// different things to read in a notification.
+		return view.ok ? "No failure summary available." : failureText(view) || "No failure summary available.";
 	}
 
 	async function checkAllCIPassed(prNumber: number, pr: ObservedPR) {
@@ -707,17 +740,23 @@ export default async function (pi: ExtensionAPI) {
 			// false green an agent can be handed. A non-pass verdict just waits for the next slot, and
 			// allPassedReported stays false until there is a real pass.
 			let checks: unknown;
-			let ghErr: unknown;
+			let failure: ExecFailure | undefined;
+			// Decided from the raw error the door kept: `ghHealth` matches Node error codes and stderr text,
+			// which the door's own category names are not.
+			let availability = false;
 			// `stale` is read only by the finally below: a stale call still releases the slot, but it
 			// must not touch ghHealth (it never saw the response) or announce anything.
 			let stale = false;
 			// acquireSlot() to release() must be exception-safe: the singleton counts a missed release
 			// as a permanently busy slot, so from then on no timer anywhere can claim a retry again.
-			// That includes JSON.parse, so it happens inside the guarded block.
+			// The parse and the shape check happen behind the door, so a payload that is not the rows asked
+			// for counts as a failed call rather than as an empty check list - which `evaluateCiVerdict`
+			// reads as "nothing is knowable", the only honest answer available.
 			try {
-				const res = await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
+				const res = await runJson<unknown>("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], {
 					cwd: pr.cwd,
-					timeout: GH_TIMEOUT_MS,
+					timeoutMs: GH_TIMEOUT_MS,
+					schema: CI_CHECK_ROWS,
 				});
 				// A stop or a resume-restore during the gh await must not let this stale call
 				// deliver "All CI passed" through the replacement entry's turn.
@@ -725,23 +764,25 @@ export default async function (pi: ExtensionAPI) {
 					stale = true;
 					return;
 				}
-				checks = JSON.parse(res.stdout);
-			} catch (err) {
-				ghErr = err;
+				if (res.ok) checks = res.data;
+				else {
+					failure = res;
+					availability = isGhAvailabilityError(res.cause);
+				}
 			} finally {
 				if (!stale) {
-					if (ghErr === undefined) ghHealth.recordSuccess();
-					else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+					if (failure === undefined) ghHealth.recordSuccess();
+					else if (availability) ghHealth.recordFailure();
 				}
 				ghHealth.release();
 			}
 
 			try {
-				if (ghErr !== undefined) {
+				if (failure !== undefined) {
 					// A failed call carries no verdict at all. GitHub-availability failures stay silent
 					// (the shared backoff re-checks); any other gh failure is logged, never reported as
 					// a pass, and malformed output is treated the same way.
-					if (!isGhAvailabilityError(ghErr)) logInternal(`Error checking CI status for PR ${prNumber}`, ghErr);
+					if (!availability) logInternal(`Error checking CI status for PR ${prNumber}`, failureText(failure));
 				} else if (
 					evaluateCiVerdict({
 						checks,
@@ -852,16 +893,20 @@ export default async function (pi: ExtensionAPI) {
 			let viewDone = false;
 			if (ghHealth.acquireSlot()) {
 				try {
-					const { stdout } = await execFileAsync("gh", ["run", "view", runId, "--json", "conclusion,status,headSha"], {
+					const res = await runJson<RunViewPayload>("gh", ["run", "view", runId, "--json", "conclusion,status,headSha"], {
 						cwd,
-						timeout: GH_TIMEOUT_MS,
+						timeoutMs: GH_TIMEOUT_MS,
+						schema: RUN_VIEW_SCHEMA,
 					});
-					const parsed = JSON.parse(stdout);
-					conclusion = String(parsed.conclusion || "").toLowerCase();
-					runSha = typeof parsed.headSha === "string" && parsed.headSha !== "" ? parsed.headSha : undefined;
-					viewDone = true;
-				} catch (err) {
-					viewError = err;
+					if (res.ok) {
+						conclusion = String(res.data.conclusion || "").toLowerCase();
+						runSha = typeof res.data.headSha === "string" && res.data.headSha !== "" ? res.data.headSha : undefined;
+						viewDone = true;
+					} else {
+						// `ghHealth` and the availability branch below read a gh error object, so hand them the
+						// one the door kept rather than a re-wrapped sentence.
+						viewError = res.cause ?? new Error(failureText(res));
+					}
 				} finally {
 					if (viewError === undefined) ghHealth.recordSuccess();
 					else if (isGhAvailabilityError(viewError)) ghHealth.recordFailure();
@@ -946,18 +991,11 @@ export default async function (pi: ExtensionAPI) {
 		if (!pr) return;
 		if (!ghHealth.acquireSlot()) return;
 
-		let data: any;
-		let ghErr: unknown;
-		try {
-			const { stdout } = await execFileAsync(
-				"gh",
-				["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup,headRefOid"],
-				{ cwd: pr.cwd, timeout: GH_TIMEOUT_MS },
-			);
-			data = JSON.parse(stdout);
-		} catch (err) {
-			ghErr = err;
-		}
+		const poll = await runJson<PrViewPayload>(
+			"gh",
+			["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup,headRefOid"],
+			{ cwd: pr.cwd, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
+		);
 		// A stop or a resume-restore during the gh await must not let this stale poll mutate
 		// the replacement entry (or persist into the new session's file).
 		if (observedPRs.get(prNumber) !== pr) {
@@ -965,12 +1003,13 @@ export default async function (pi: ExtensionAPI) {
 			return;
 		}
 		try {
-			if (ghErr !== undefined) {
+			if (!poll.ok) {
 				// A GitHub-availability failure is silent: no log, no agent message —
 				// the shared backoff retry re-polls on the next slot.
-				if (!isGhAvailabilityError(ghErr)) logInternal(`Error polling PR ${prNumber}`, ghErr);
+				if (!isGhAvailabilityError(poll.cause)) logInternal(`Error polling PR ${prNumber}`, failureText(poll));
 				return;
 			}
+			const data = poll.data;
 
 			const state = String(data.state || "").toUpperCase();
 			if (state === "MERGED" || state === "CLOSED") {
@@ -1048,8 +1087,8 @@ export default async function (pi: ExtensionAPI) {
 			// Verify if all runs and checks passed (gated on its own slot)
 			await checkAllCIPassed(prNumber, pr);
 		} finally {
-			if (ghErr === undefined) ghHealth.recordSuccess();
-			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			if (poll.ok) ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(poll.cause)) ghHealth.recordFailure();
 			ghHealth.release();
 		}
 	}
@@ -1178,7 +1217,7 @@ export default async function (pi: ExtensionAPI) {
 
 	function startObserving(
 		prNumber: number,
-		initialComments: any[],
+		initialComments: readonly unknown[],
 		cwd: string,
 		ui?: ExtensionUIContext,
 		options?: { explicit?: boolean },
@@ -1286,23 +1325,21 @@ export default async function (pi: ExtensionAPI) {
 	}
 
 	async function getRepoRoot(cwd: string): Promise<string | undefined> {
-		try {
-			const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd });
-			const root = stdout.trim();
-			return root || undefined;
-		} catch {
-			return undefined;
-		}
+		// This call had no timeout at all, so a git that hung - a locked index, a dying filesystem - held
+		// the branch-check chain open indefinitely.
+		const res = await runText("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: GH_TIMEOUT_MS });
+		return res.ok && res.data ? res.data : undefined;
 	}
 
 	async function recordCurrentBranch(cwd: string): Promise<{ repoRoot: string; branch: string } | undefined> {
 		try {
 			const repoRoot = (await getRepoRoot(cwd)) || cwd;
 			try {
-				const { stdout } = await execFileAsync("git", ["branch", "--show-current"], { cwd });
+				const res = await runText("git", ["branch", "--show-current"], { cwd, timeoutMs: GH_TIMEOUT_MS });
+				if (!res.ok) throw new Error(failureText(res));
 				// Read-only: the caller commits the branch to trackedBranchesByRepo only after its
 				// generation check, so a stale check cannot inject into a reset session.
-				return { repoRoot, branch: stdout.trim() };
+				return { repoRoot, branch: res.data };
 			} catch {
 				// The branch command can fail (transient git error) in a valid repo: keep the
 				// resolved repoRoot so the caller can proceed; an empty branch is not committed.
@@ -1355,14 +1392,35 @@ export default async function (pi: ExtensionAPI) {
 
 				try {
 					ghCallMade = true;
-					const { stdout } = await execFileAsync(
+					const res = await runJson<PrViewPayload>(
 						"gh",
 						["pr", "view", branch, "--json", "number,state,isDraft,comments,statusCheckRollup"],
-						{ cwd: repoRoot, timeout: GH_TIMEOUT_MS },
+						{ cwd: repoRoot, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
 					);
 					if (disposed) return;
 					if (gen !== stateGeneration) return;
-					const data = JSON.parse(stdout);
+					// A branch with no PR is a normal answer (`gh pr view` says so and exits non-zero); anything
+					// else it said is worth one line, because otherwise "this branch has no PR" and "gh is
+					// broken" look identical forever and auto-tracking just quietly never happens.
+					if (!res.ok) {
+						// A GitHub-availability failure stops the scan and counts as a failure, which is what the
+						// throwing version did and what the door made a choice again rather than a fall-through:
+						// the remaining branches would fail the same way, the log stays quiet, the shared backoff
+						// owns the retry. Reading it off `res.cause` is load-bearing, not tidiness - the `finally`
+						// records a *success* for any scan that saw no failure, so a silently-continued outage
+						// loop used to flip a degraded ghHealth back to healthy while gh was still unreachable
+						// (review finding on `3c149dc`).
+						if (isGhAvailabilityError(res.cause)) {
+							ghErr = res.cause;
+							break;
+						}
+						// A branch with no PR is a normal answer (`gh pr view` says so and exits non-zero);
+						// anything else it said gets one line, because otherwise "no PR here" and "gh is
+						// broken" are the same silence forever and auto-tracking quietly never happens.
+						if (!isNoPullRequestFailure(failureText(res))) logInternal(`Branch check failed for ${branch}`, failureText(res));
+						continue;
+					}
+					const data = res.data;
 					const prNumber = data.number;
 					const state = String(data.state || "").toUpperCase();
 					const isDraft = Boolean(data.isDraft);
@@ -1579,16 +1637,18 @@ export default async function (pi: ExtensionAPI) {
 			try {
 				let ghErr: unknown;
 				let data: any;
-				try {
-					const { stdout } = await execFileAsync("gh", ["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"], {
-						cwd: entry.cwd,
-						timeout: GH_TIMEOUT_MS,
-					});
-					data = JSON.parse(stdout);
-				} catch (err) {
-					ghErr = err;
-				}
-				if (ghErr === undefined) {
+				const res = await runJson<PrViewPayload>("gh", ["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments"], {
+					cwd: entry.cwd,
+					timeoutMs: GH_TIMEOUT_MS,
+					schema: PR_VIEW_SCHEMA,
+				});
+				if (res.ok) data = res.data;
+				// `cause`, not the envelope: `isGhAvailabilityError` matches Node error codes, and the door's
+				// category name is not one of them. Passing the envelope used to classify a missing gh as "not
+				// an availability problem", so a pending auto-start the user explicitly asked for was deleted
+				// instead of retried on the next slot (review finding on `3c149dc`).
+				else ghErr = res.cause ?? new Error(failureText(res));
+				if (ghErr === undefined && data !== undefined) {
 					ghHealth.recordSuccess();
 					const state = String(data.state || "").toUpperCase();
 					pendingAutoStart.delete(prNumber);
@@ -1799,21 +1859,25 @@ export default async function (pi: ExtensionAPI) {
 			}
 
 			// Check PR state and draft status using gh
-			let prData: any;
-			try {
-				const { stdout } = await execFileAsync(
-					"gh",
-					["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments,statusCheckRollup"],
-					{ cwd: ctx.cwd, timeout: GH_TIMEOUT_MS },
-				);
-				prData = JSON.parse(stdout);
-			} catch (err: any) {
+			const view = await runJson<PrViewPayload>(
+				"gh",
+				["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments,statusCheckRollup"],
+				{ cwd: ctx.cwd, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
+			);
+			let prData: PrViewPayload;
+			if (view.ok) {
+				prData = view.data;
+			} else {
+				// `stderr` is the half worth quoting back: the door keeps the command line - and with it any
+				// reply body - out of `message`, and each branch below shows the user what gh actually said.
+				const err = view.cause ?? new Error(failureText(view));
+				const stderr = failureText(view);
 				// An auth problem is not self-resolving: surface it (the shared backoff
 				// still paces the retry). No auto-start: a permanently failing
 				// auto-start would claim every backoff slot and starve the polling.
 				if (isGhAuthError(err)) {
 					ghHealth.recordFailure();
-					const authStderr = err?.stderr || err?.message || "";
+					const authStderr = stderr;
 					return ok(`Error inspecting PR ${prNumber}: ${authStderr}`, {
 						tool: "observe_pr",
 						prNumber,
@@ -1835,7 +1899,6 @@ export default async function (pi: ExtensionAPI) {
 						},
 					);
 				}
-				const stderr = err?.stderr || err?.message || "";
 				if (
 					stderr.includes("Could not resolve") ||
 					stderr.includes("not found") ||
@@ -1991,8 +2054,16 @@ export default async function (pi: ExtensionAPI) {
 					if (params?.new) {
 						args.push("-new");
 					}
-					const { stdout, stderr } = await execFileAsync("requestdb", args, { cwd: ctx.cwd });
-					const output = (stdout || stderr || "").trim();
+					const res = await runText("requestdb", args, { cwd: ctx.cwd, timeoutMs: MUTATION_TIMEOUT_MS });
+					if (!res.ok) {
+						const detail = [(res.stdout ?? "").trim(), (res.stderr ?? "").trim() || res.message].filter(Boolean).join("\n").trim();
+						return err(`Error running requestdb:\n${detail}`, "REQUESTDB_FAILED", {
+							tool: "requestdb",
+							cause: res.code,
+							fresh: Boolean(params?.new),
+						});
+					}
+					const output = res.data;
 					// The text carries DB_PASSWORD, so it stays out of details (details reach the session file and the UI).
 					return ok(output || "Database credentials generated successfully.", {
 						tool: "requestdb",
@@ -2036,8 +2107,17 @@ export default async function (pi: ExtensionAPI) {
 					} else if (params?.folder) {
 						args.push(params.folder);
 					}
-					const { stdout, stderr } = await execFileAsync("destroydb", args, { cwd: ctx.cwd });
-					const output = (stdout || stderr || "").trim();
+					const res = await runText("destroydb", args, { cwd: ctx.cwd, timeoutMs: MUTATION_TIMEOUT_MS });
+					if (!res.ok) {
+						const detail = [(res.stdout ?? "").trim(), (res.stderr ?? "").trim() || res.message].filter(Boolean).join("\n").trim();
+						return err(`Error running destroydb:\n${detail}`, "DESTROYDB_FAILED", {
+							tool: "destroydb",
+							cause: res.code,
+							scope: params?.all ? "all" : "folder",
+							folder: params?.folder ?? ctx.cwd,
+						});
+					}
+					const output = res.data;
 					return ok(output || "Database destroyed successfully.", {
 						tool: "destroydb",
 						scope: params?.all ? "all" : "folder",

@@ -26,8 +26,15 @@ export const VENDORING = [
 		plugin: "plugins/pr-observer",
 		source: "extensions/lib",
 		// github-review-threads (gh calls) + pr-tasks-manager (task reconciliation) are the review
-		// conversation engine; ci-verdict answers "did CI pass?" from `gh pr checks` rows.
-		files: ["github-review-threads.ts", "pr-tasks-manager.ts", "ci-verdict.ts"],
+		// conversation engine; ci-verdict answers "did CI pass?" from `gh pr checks` rows; exec and
+		// exec-payload are their door to subprocesses, pulled in by the first.
+		//
+		// The whole graph must stay importable from node builtins alone: an installed plugin is copied
+		// into a host's own cache, so a package import resolves only by luck. That is not hypothetical -
+		// this list exists because pr-observer once imported a path outside its own directory and died on
+		// import before answering the handshake (#46). Adding a package dependency to any file here needs
+		// the same care.
+		files: ["github-review-threads.ts", "pr-tasks-manager.ts", "ci-verdict.ts", "exec.ts", "exec-payload.ts"],
 	},
 ];
 

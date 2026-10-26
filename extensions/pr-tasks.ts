@@ -1,10 +1,9 @@
 import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { execFile } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
-import { promisify } from "node:util";
+import { type ExecFailure, runJson } from "./lib/exec.ts";
 import {
 	fetchReviewThreads,
 	getRepoCoordinates,
@@ -35,7 +34,6 @@ import {
 	type PRTask,
 } from "./lib/pr-tasks-manager.ts";
 
-const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_PR_TASKS_EXTENSION_ACTIVE__";
 // Identical settle nudges (same unresolved tasks, no new replies) delivered before the extension
 // stops blocking the agent from settling
@@ -300,17 +298,24 @@ export default function (pi: ExtensionAPI) {
 
 	async function detectCurrentBranchPR(cwd: string): Promise<number | undefined> {
 		if (!ghHealth.acquireSlot()) return undefined;
-		let ghErr: unknown;
+		let failure: ExecFailure | undefined;
 		let number: number | undefined;
 		try {
-			const { stdout } = await execFileAsync("gh", ["pr", "view", "--json", "number"], { cwd, timeout: FETCH_TIMEOUT_MS });
-			const parsed = JSON.parse(stdout);
-			if (parsed?.number) number = parsed.number;
-		} catch (err) {
-			ghErr = err;
+			const res = await runJson<{ number?: number | null }>("gh", ["pr", "view", "--json", "number"], {
+				cwd,
+				timeoutMs: FETCH_TIMEOUT_MS,
+				// Only that it is an object with a number in it: a payload that is not that is a failed call
+				// about as far as this lookup is concerned, and there is nothing downstream to salvage.
+				schema: { type: "object", properties: { number: { anyOf: [{ type: "number" }, { type: "null" }] } } },
+			});
+			if (res.ok) number = res.data.number ?? undefined;
+			else failure = res;
 		} finally {
-			if (ghErr === undefined) ghHealth.recordSuccess();
-			else if (isGhAvailabilityError(ghErr)) ghHealth.recordFailure();
+			// Health is classified from the raw error the door kept, because `ghHealth` matches Node error
+			// codes and stderr text and the door's category names are not those. A payload that was not the
+			// promised object is left out of the health picture: it says nothing about reachability.
+			if (failure === undefined) ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(failure.cause)) ghHealth.recordFailure();
 			ghHealth.release();
 		}
 		return number;

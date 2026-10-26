@@ -4,7 +4,30 @@
  * announce "All CI passed" when the checks call had failed, which is the most expensive false green
  * an agent can be given).
  */
+import type { Schema } from "./exec-payload.ts";
+
 export type CiVerdict = "passed" | "failed" | "unknown";
+
+/**
+ * The rows `gh pr checks --json bucket,state` answers with, as the subprocess door can check them.
+ *
+ * Loose on purpose: `field()` below reads a missing or null value as `""` and still draws an honest
+ * verdict from it, so what is insisted on is "an array of objects", not the values. That catches the
+ * change worth catching - a payload that is a bare string, an object where an array was expected - without
+ * turning a null state into a week of the observer saying nothing.
+ */
+export const CI_CHECK_ROWS: Schema = {
+	type: "array",
+	items: {
+		type: "object",
+		properties: {
+			bucket: { anyOf: [{ type: "string" }, { type: "null" }] },
+			state: { anyOf: [{ type: "string" }, { type: "null" }] },
+			status: { anyOf: [{ type: "string" }, { type: "null" }] },
+			conclusion: { anyOf: [{ type: "string" }, { type: "null" }] },
+		},
+	},
+};
 
 const PENDING_STATES = ["PENDING", "IN_PROGRESS", "QUEUED"];
 const FAILED_BUCKETS = ["fail", "cancel"];

@@ -234,8 +234,12 @@ const AVAILABILITY_CODES = new Set([
 // surface on explicit calls and skip the auto-start)
 const RATE_LIMIT_PATTERNS = /rate limit|too many requests|429\b/i;
 
+// "not on PATH" is the subprocess door's own sentence for a missing binary (lib/exec.ts, NOT_FOUND).
+// Without it, a call that never started arrives as a per-PR error: pacing is skipped and a pending
+// auto-start is deleted, which is exactly what the ENOENT entry above exists to prevent - the door
+// renamed the failure and this matcher has to follow it, or the rename is a behaviour change.
 const AVAILABILITY_PATTERNS =
-	/\b(timed? ?out|failed to connect|connection (reset|refused|aborted|closed)|dial tcp|tls handshake|no route to host|network is unreachable|unexpected eof|enoent|context deadline exceeded|unauthorized|authentication failed|token expired|bad credentials|auth login|rate limit|too many requests|http\s?502|http\s?503|http\s?500|http 429)\b/i;
+	/\b(timed? ?out|failed to connect|connection (reset|refused|aborted|closed)|dial tcp|tls handshake|no route to host|network is unreachable|unexpected eof|enoent|context deadline exceeded|not on PATH|unauthorized|authentication failed|token expired|bad credentials|auth login|rate limit|too many requests|http\s?502|http\s?503|http\s?500|http 429)\b/i;
 
 const AUTH_PATTERNS = /(unauthorized|authentication failed|token expired|bad credentials|auth login|\b401\b|\b403\b)/i;
 
@@ -276,4 +280,15 @@ export function isGhAvailabilityError(err: unknown): boolean {
 	if (typeof e.code === "string" && AVAILABILITY_CODES.has(e.code)) return true;
 	const text = [e.stderr, e.stdout, e.message].filter((v): v is string => typeof v === "string" && v.length > 0).join("\n");
 	return AVAILABILITY_PATTERNS.test(text);
+}
+
+/**
+ * Whether a failed `gh pr view` is the ordinary "this branch has no pull request" rather than gh being
+ * broken. Exposed because two callers need to stay quiet for exactly this case and no other - a branch
+ * scan and a Devin turn run it constantly, and a warning per un-PR'd branch is noise that buries the
+ * failure it is trying to surface - so the pattern lives with the other gh-error matching instead of
+ * being re-typed, and re-loosened, per file.
+ */
+export function isNoPullRequestFailure(text: string): boolean {
+	return /no pull requests|Could not resolve|not found/i.test(text);
 }

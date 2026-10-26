@@ -1,13 +1,14 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { AcpClient } from "./lib/acp-client.ts";
+import { failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
+import type { Schema } from "./lib/exec-payload.ts";
+import { isNoPullRequestFailure } from "./lib/gh-health.ts";
 import {
 	MODE_NAMES,
 	PERMISSION_DECISIONS,
@@ -28,8 +29,36 @@ import { capList, type ToolDetails } from "./lib/tool-result.ts";
 import { logError as fileLogError, logWarn as fileLogWarn } from "./lib/extension-log.ts";
 import { WriteQueue, commandExists, createTaskScope, reportBudgetViolation } from "./lib/nonblocking.ts";
 
-const execFileAsync = promisify(execFile);
 const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
+
+// Subprocess ceilings come from the shared door (lib/exec.ts). `git worktree add` is the one call here
+// that is heavier than a request: checking out a large repository legitimately takes minutes, so it is
+// given a stated budget of its own instead of pretending to be a read. Before that, none of these calls
+// had a timeout at all - a git blocked on a locked index held provisioning open forever.
+const WORKTREE_ADD_TIMEOUT_MS = 10 * 60_000;
+
+/** `gh pr view --json number`: the only field either lookup here reads. */
+const PR_NUMBER_SCHEMA: Schema = {
+	type: "object",
+	properties: { number: { anyOf: [{ type: "number" }, { type: "null" }] } },
+};
+
+/** orca answers every `worktree create` with `{ok, result?, error?}` on stdout - including when it failed. */
+const ORCA_WORKTREE_REPLY: Schema = {
+	type: "object",
+	properties: {
+		ok: { type: "boolean" },
+		result: { anyOf: [{ type: "null" }, { type: "object" }] },
+		error: { anyOf: [{ type: "null" }, { type: "string" }, { type: "object" }] },
+	},
+};
+
+interface OrcaWorktreeReply {
+	ok?: boolean;
+	result?: { worktree?: { path?: string; id?: string; parentWorktreeId?: string } };
+	error?: string | { message?: string };
+}
+
 const MODE_DESCRIPTION = `Permission mode: ${MODE_NAMES.join(", ")} (default: dangerous). dangerous (= bypass) approves every tool call; smart (alias auto) approves what Devin judges safe; in every mode but dangerous, Devin may ask permission, and the request is forwarded to you to answer with devin_permission.`;
 
 // Process exit hooks are registered once per process (not per factory invocation —
@@ -954,18 +983,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	// --- Worktree Management ---
 
 	async function getGitBranch(cwd: string): Promise<string> {
-		try {
-			const { stdout } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
-			return stdout.trim() || "main";
-		} catch {
-			return "main";
-		}
+		const res = await runText("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, timeoutMs: READ_TIMEOUT_MS });
+		return res.ok && res.data ? res.data : "main";
 	}
 
 	async function findNextWorktreeIndex(cwd: string, baseBranch: string): Promise<number> {
-		try {
-			const { stdout } = await execFileAsync("git", ["branch", "--list", `${baseBranch}-dt*`], { cwd });
-			const lines = stdout.split("\n").map((l) => l.trim().replace(/^[*+]\s*/, ""));
+		const listed = await runText("git", ["branch", "--list", `${baseBranch}-dt*`], { cwd, timeoutMs: READ_TIMEOUT_MS });
+		if (listed.ok) {
+			const lines = listed.data.split("\n").map((l) => l.trim().replace(/^[*+]\s*/, ""));
 			const indices: number[] = [];
 			const escapedBase = baseBranch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			const reg = new RegExp(`^${escapedBase}-dt(\\d+)$`);
@@ -977,25 +1002,23 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				}
 			}
 			return indices.length > 0 ? Math.max(...indices) + 1 : 1;
-		} catch {
-			return 1;
 		}
+		// "I cannot see the branches" is answered as "start at 1", which is what it always was. Worth
+		// knowing it is a guess, because two provisionings that both guess 1 collide on the branch name.
+		logWarn(`Could not list ${baseBranch}-dt* branches (${failureText(listed)}); guessing worktree index 1`);
+		return 1;
 	}
 
 	async function getRootRepoName(cwd: string): Promise<string> {
-		try {
-			const { stdout } = await execFileAsync("git", ["rev-parse", "--git-common-dir"], { cwd });
-			const commonDir = stdout.trim();
-			const gitDir = path.isAbsolute(commonDir) ? commonDir : path.resolve(cwd, commonDir);
+		const commonDir = await runText("git", ["rev-parse", "--git-common-dir"], { cwd, timeoutMs: READ_TIMEOUT_MS });
+		if (commonDir.ok && commonDir.data) {
+			const dir = commonDir.data;
+			const gitDir = path.isAbsolute(dir) ? dir : path.resolve(cwd, dir);
 			return path.basename(path.dirname(gitDir));
-		} catch {
-			try {
-				const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd });
-				return path.basename(stdout.trim());
-			} catch {
-				return path.basename(cwd);
-			}
 		}
+		const toplevel = await runText("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: READ_TIMEOUT_MS });
+		if (toplevel.ok && toplevel.data) return path.basename(toplevel.data);
+		return path.basename(cwd);
 	}
 
 	async function createWorktree(
@@ -1018,42 +1041,52 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 			let orcaFailure: string | undefined;
 			if (orcaAvailable) {
-				try {
-					const { stdout } = await execFileAsync(
-						"orca",
-						["worktree", "create", "--name", targetBranch, "--base-branch", baseBranch, "--json"],
-						{ cwd },
-					);
-					const parsed = JSON.parse(stdout);
-					// orca exiting 0 with an `ok: false` payload is still a failure.
-					if (parsed && parsed.ok === false) {
-						const m = typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
-						throw new Error(m ?? "orca worktree create failed");
-					}
-					const createdPath = parsed.result?.worktree?.path || targetFolder;
-					const worktreeId = parsed.result?.worktree?.id;
-					const parentWorktreeId = parsed.result?.worktree?.parentWorktreeId;
+				// orca reports a failure as `ok: false` JSON on stdout *and* a non-zero exit, so the payload has
+				// to be read even when the call failed - which is what `acceptJsonOnFailure` says out loud.
+				const res = await runJson<OrcaWorktreeReply>(
+					"orca",
+					["worktree", "create", "--name", targetBranch, "--base-branch", baseBranch, "--json"],
+					{ cwd, timeoutMs: MUTATION_TIMEOUT_MS, acceptJsonOnFailure: true, schema: ORCA_WORKTREE_REPLY },
+				);
+				const reply = res.ok ? res.data : undefined;
+				// Only `ok: true` means "a worktree exists" once the process exited non-zero. On a zero exit an
+				// absent `ok` stays accepted, because that is how this call has always been read; on a non-zero
+				// exit it may not be, because before the door any non-zero exit threw and fell through to
+				// `git worktree add`. An envelope that says nothing (`{}`, `{"message":"daemon error"}`) is not a
+				// claim of success, and accepting it handed back a folder that was never created (review finding
+				// on `3801bb3`).
+				const fromFailureBody = res.ok === true && res.fromFailureBody === true;
+				if (reply && (fromFailureBody ? reply.ok === true : reply.ok !== false)) {
 					return {
-						worktreePath: createdPath,
+						worktreePath: reply.result?.worktree?.path || targetFolder,
 						worktreeBranch: targetBranch,
-						worktreeId,
-						parentWorktreeId,
+						worktreeId: reply.result?.worktree?.id,
+						parentWorktreeId: reply.result?.worktree?.parentWorktreeId,
 					};
-				} catch (orcaErr) {
-					// orca reports failures as `ok: false` JSON on stdout and exits
-					// non-zero; surface the real error instead of a generic
-					// "Command failed" before falling back to git.
-					orcaFailure = extractCliError(orcaErr) || "unknown orca failure";
-					logWarn(`orca worktree create failed for ${targetBranch}, falling back to git: ${orcaFailure}`);
 				}
+				// Surface what orca actually said - its own `error` when it answered, the door's reason when
+				// it did not - rather than a generic "Command failed", before falling back to git.
+				// `stripAnsi` on both halves: these strings reach tool output and the TUI, and the display bug
+				// `test/test-devin-tui-safety.ts` guards against arrives exactly this way - a CLI's coloured
+				// error passed through as "the message".
+				orcaFailure = stripAnsi(
+					(reply && (typeof reply.error === "string" ? reply.error : reply.error?.message)) ||
+						(!res.ok ? failureText(res) : "") ||
+						"orca worktree create failed",
+				);
+				logWarn(`orca worktree create failed for ${targetBranch}, falling back to git: ${orcaFailure}`);
 			}
 
-			// Fallback: Git worktree
-			try {
-				fs.mkdirSync(path.dirname(targetFolder), { recursive: true });
-				await execFileAsync("git", ["worktree", "add", "-b", targetBranch, targetFolder, baseBranch], { cwd });
-			} catch (gitErr) {
-				const gitFailure = extractCliError(gitErr) || String(gitErr);
+			// Fallback: Git worktree. A timeout here can leave a half-written folder and a taken branch name;
+			// the loop above skips an existing folder, so the next attempt moves to the next index rather than
+			// retrying into the same half-state.
+			fs.mkdirSync(path.dirname(targetFolder), { recursive: true });
+			const added = await runText("git", ["worktree", "add", "-b", targetBranch, targetFolder, baseBranch], {
+				cwd,
+				timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
+			});
+			if (!added.ok) {
+				const gitFailure = stripAnsi(failureText(added));
 				throw new Error(orcaFailure ? `orca: ${orcaFailure}; git fallback: ${gitFailure}` : gitFailure);
 			}
 			return { worktreePath: targetFolder, worktreeBranch: targetBranch };
@@ -1067,36 +1100,38 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		// 1. Determine candidate branches: actual checked out branch in cwd, followed by provisioned worktree branch
 		const candidateBranches: string[] = [];
-		try {
-			const { stdout } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd });
-			const currentBranch = stdout.trim();
-			if (currentBranch && currentBranch !== "HEAD") {
-				candidateBranches.push(currentBranch);
-			}
-		} catch {}
+		const head = await runText("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, timeoutMs: READ_TIMEOUT_MS });
+		if (head.ok && head.data && head.data !== "HEAD") {
+			candidateBranches.push(head.data);
+		}
 
 		if (branch && !candidateBranches.includes(branch)) {
 			candidateBranches.push(branch);
 		}
 
 		for (const b of candidateBranches) {
-			try {
-				const { stdout } = await execFileAsync("gh", ["pr", "view", b, "--json", "number"], { cwd });
-				const parsed = JSON.parse(stdout);
-				if (parsed.number && typeof parsed.number === "number") {
-					return parsed.number;
-				}
-			} catch {}
+			const res = await runJson<{ number?: number | null }>("gh", ["pr", "view", b, "--json", "number"], {
+				cwd,
+				timeoutMs: READ_TIMEOUT_MS,
+				schema: PR_NUMBER_SCHEMA,
+			});
+			// "no PR for this branch" and "gh could not answer" both move on to the next candidate, as they
+			// did before, but they are not the same thing: the second one is why a session looks for a PR in
+			// the wrong place, so it gets a line.
+			if (!res.ok && !isNoPullRequestFailure(failureText(res))) logWarn(`PR lookup for branch ${b} failed: ${failureText(res)}`);
+			const number = res.ok ? res.data.number : undefined;
+			if (typeof number === "number" && number) return number;
 		}
 
 		// Fallback: gh pr view from worktree directory without branch selector
-		try {
-			const { stdout } = await execFileAsync("gh", ["pr", "view", "--json", "number"], { cwd });
-			const parsed = JSON.parse(stdout);
-			if (parsed.number && typeof parsed.number === "number") {
-				return parsed.number;
-			}
-		} catch {}
+		const current = await runJson<{ number?: number | null }>("gh", ["pr", "view", "--json", "number"], {
+			cwd,
+			timeoutMs: READ_TIMEOUT_MS,
+			schema: PR_NUMBER_SCHEMA,
+		});
+		const fallbackNumber = current.ok ? current.data.number : undefined;
+		if (typeof fallbackNumber === "number" && fallbackNumber) return fallbackNumber;
+		if (!current.ok && !isNoPullRequestFailure(failureText(current))) logWarn(`PR lookup for ${cwd} failed: ${failureText(current)}`);
 
 		return undefined;
 	}

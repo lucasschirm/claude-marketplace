@@ -421,10 +421,19 @@ function execSites() {
 		for (const m of src.matchAll(EXEC_CALL_RE)) {
 			if (!isRealCode(src, m.index) || isDeclaration(src, m.index)) continue;
 			const call = callTextAt(src, m.index);
+			// Comments out of the call before it is read for a deadline: prose must not satisfy a gate, and
+			// `spawn("gh", … /* timeoutMs: 60000 */)` otherwise does. Bounded honestly - `codeOnly` works per
+			// line, so a `/* … \n … */` block spanning lines still leaks its continuation lines. A regex
+			// scanner's limits are documented in docs/p1-c2-plan.md rather than wished away.
+			const guarded = call.split("\n").map(codeOnly).join("\n");
 			all.push({
 				file: rel(file),
 				line: lineOf(src, m.index),
-				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(call),
+				// A deadline guards a request. A *session* child (`devin acp`) must not be killed by the wall
+				// clock, so `spawnLongLived` guards it with a liveness policy instead and `idleNoToolMs` counts
+				// as the guard - for `spawn` only, because an execFile call claiming an idle policy would be
+				// a request with no deadline at all.
+				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(guarded) || (m[1] === "spawn" && /\bidleNoToolMs\s*:/.test(guarded)),
 				src,
 				nameIndex: m.index,
 				call,
@@ -496,14 +505,17 @@ function countGlobalThisWrites() {
 	return { count: hits.length, hits };
 }
 
-// Inbound text is parsed in one place per gated tree: exec output in extensions/lib/exec.ts, and
-// protocol frames in agy-acp/src/jsonrpc.ts.
-const JSON_PARSE_ALLOWED = new Set(["extensions/lib/exec.ts", "agy-acp/src/jsonrpc.ts"]);
+/**
+ * Where parsing inbound text is allowed, named exactly: the subprocess door and the sibling that knows
+ * what its payloads look like (extensions), and the ACP frame reader (agy-acp). A prefix match would let
+ * `exec-anything.ts` parse whatever it liked, which is the hole this invariant exists to keep shut.
+ */
+const INBOUND_PARSE_ALLOWLIST = new Set(["extensions/lib/exec.ts", "extensions/lib/exec-payload.ts", "agy-acp/src/jsonrpc.ts"]);
 
 function countJsonParseOutsideExecLib() {
 	const hits = [];
 	for (const file of gatedSourceFiles()) {
-		if (JSON_PARSE_ALLOWED.has(rel(file))) continue;
+		if (INBOUND_PARSE_ALLOWLIST.has(rel(file))) continue;
 		const lines = linesOf(file);
 		lines.forEach((line, i) => {
 			const trimmed = line.trim();
@@ -670,11 +682,17 @@ function checkUnusedLibs() {
 			const file = queue.pop();
 			if (!fs.existsSync(file)) continue;
 			const src = read(file);
-			for (const m of src.matchAll(/from\s+["'][^"']*lib\/([\w.-]+\.ts)["']/g)) {
-				const name = m[1];
+			for (const m of src.matchAll(/from\s+["']([^"']+\.ts)["']/g)) {
+				// Resolve the specifier the way the runtime does instead of looking for one that spells "lib/".
+				// Inside a lib directory the normal spelling is "./sibling.ts", so the text-only match called a
+				// lib reached solely through its sibling unreachable - a false accusation against exactly the
+				// factored-out helpers this repo is trying to grow, and a rule that cries wolf gets widened.
+				const target = path.resolve(path.dirname(file), m[1]);
+				const name = path.relative(tree.lib, target);
+				if (!name || name.startsWith("..") || path.isAbsolute(name)) continue;
 				if (!libFiles.includes(name) || reached.has(name)) continue;
 				reached.add(name);
-				queue.push(path.join(tree.lib, name));
+				queue.push(target);
 			}
 		}
 		hits.push(...libFiles.filter((f) => !reached.has(f)).map((f) => `${tree.prefix}/lib/${f} is reachable from no entry file`));
@@ -800,7 +818,7 @@ const INVARIANTS = [
 	},
 	{
 		name: "jsonParseLocation",
-		description: "only extensions/lib/exec.ts and agy-acp/src/jsonrpc.ts parse inbound text",
+		description: "only the subprocess door, its payload sibling, and the ACP frame reader parse inbound text",
 		measure: countJsonParseOutsideExecLib,
 	},
 	{

@@ -1,15 +1,18 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
-
-const execFileAsync = promisify(execFile);
+import { failureText, MUTATION_TIMEOUT_MS as DOOR_MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./exec.ts";
+import { parseJsonSafe } from "./exec-payload.ts";
 
 // A hung gh call would otherwise block every sync and task action waiting on it. Mutations get
-// longer, since a timed-out one may still have been applied.
-export const FETCH_TIMEOUT_MS = 60_000; // (also for other read-only gh/git calls)
-const MUTATION_TIMEOUT_MS = 120_000;
+// longer, since a timed-out one may still have been applied. Both numbers are the door's, measured
+// in lib/exec.ts rather than chosen here.
+export const FETCH_TIMEOUT_MS = READ_TIMEOUT_MS; // (also for other read-only gh/git calls)
+const MUTATION_TIMEOUT_MS = DOOR_MUTATION_TIMEOUT_MS;
+
+// A page of 100 review threads with long comments is megabytes; execFile's 1 MB default truncated it
+// into what looked like a GraphQL outage.
+const MAX_GRAPHQL_OUTPUT_BYTES = 32 * 1024 * 1024;
 
 export interface GitHubCommentNode {
 	id: string;
@@ -52,31 +55,52 @@ export async function getRepoCoordinates(cwd: string): Promise<RepoCoordinates> 
 	const cached = repoCache.get(cwd);
 	if (cached) return cached;
 
-	try {
-		const { stdout } = await execFileAsync("gh", ["repo", "view", "--json", "owner,name"], { cwd, timeout: FETCH_TIMEOUT_MS });
-		const data = JSON.parse(stdout);
+	// `gh` reports the owner as an object on some versions and a bare string on others; the schema says so,
+	// and a shape it does not recognise falls through to `git remote` instead of producing coordinates
+	// built out of `undefined`.
+	const viaGh = await runJson<{ name: string; owner: { login: string } | string }>("gh", ["repo", "view", "--json", "owner,name"], {
+		cwd,
+		timeoutMs: FETCH_TIMEOUT_MS,
+		schema: {
+			type: "object",
+			required: ["name", "owner"],
+			properties: {
+				name: { type: "string" },
+				owner: {
+					anyOf: [{ type: "object", required: ["login"], properties: { login: { type: "string" } } }, { type: "string" }],
+				},
+			},
+		},
+	});
+	const ghReason = viaGh.ok ? undefined : failureText(viaGh);
+	if (viaGh.ok) {
 		const coords: RepoCoordinates = {
-			owner: data.owner?.login || data.owner,
-			repo: data.name,
+			owner: typeof viaGh.data.owner === "string" ? viaGh.data.owner : viaGh.data.owner.login,
+			repo: viaGh.data.name,
 		};
 		if (coords.owner && coords.repo) {
 			repoCache.set(cwd, coords);
 			return coords;
 		}
-	} catch {}
+	}
 
-	try {
-		const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: FETCH_TIMEOUT_MS });
-		const url = stdout.trim();
-		const match = url.match(/[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
+	const viaGit = await runText("git", ["remote", "get-url", "origin"], { cwd, timeoutMs: FETCH_TIMEOUT_MS });
+	const gitReason = viaGit.ok ? undefined : failureText(viaGit);
+	if (viaGit.ok) {
+		const match = viaGit.data.match(/[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
 		if (match) {
 			const coords: RepoCoordinates = { owner: match[1], repo: match[2] };
 			repoCache.set(cwd, coords);
 			return coords;
 		}
-	} catch {}
+	}
 
-	throw new Error(`Unable to determine repository owner and name in ${cwd}`);
+	// Both fallbacks failing used to say only "unable", with two swallowed causes; the reason is what a
+	// user can act on (gh not installed and a repository without an origin are different fixes).
+	const reasons = [ghReason && `gh: ${ghReason}`, gitReason && `git: ${gitReason}`, viaGit.ok && "no origin remote matches owner/repo"]
+		.filter((part): part is string => Boolean(part))
+		.join("; ");
+	throw new Error(`Unable to determine repository owner and name in ${cwd}${reasons ? ` (${reasons})` : ""}`);
 }
 
 const THREAD_COMMENT_FRAGMENT = `
@@ -155,14 +179,13 @@ export async function fetchReviewThreads(prNumber: number, cwd: string): Promise
 		}
 
 		// A page of 100 threads with long comments easily exceeds execFile's 1 MB default
-		const { stdout } = await execFileAsync("gh", args, { cwd, maxBuffer: 32 * 1024 * 1024, timeout: FETCH_TIMEOUT_MS });
-		const res = JSON.parse(stdout);
-		const prData = res?.data?.repository?.pullRequest;
-		if (res?.errors?.length || !prData?.reviewThreads) {
+		const res = await runJson<unknown>("gh", args, { cwd, maxBuffer: MAX_GRAPHQL_OUTPUT_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
+		const body = res.ok ? res.data : undefined;
+		const prData = (body as { data?: { repository?: { pullRequest?: any } } })?.data?.repository?.pullRequest;
+		if (res.ok === false || responseErrorMessages(body) || !prData?.reviewThreads) {
 			// (only the error messages: stdout may hold a whole page of thread data)
-			throw new Error(
-				`Failed to fetch review threads for PR #${prNumber}: ${responseErrorMessages(res) || "no review threads in the response"}`,
-			);
+			const why = responseErrorMessages(body) ?? (res.ok === false ? failureText(res) : "no review threads in the response");
+			throw new Error(`Failed to fetch review threads for PR #${prNumber}: ${why || "no review threads in the response"}`);
 		}
 
 		const pageNodes: GitHubReviewThreadNode[] = prData.reviewThreads?.nodes || [];
@@ -209,13 +232,12 @@ ${THREAD_COMMENT_FRAGMENT}`;
 
 async function fetchLatestComments(threadId: string, cwd: string): Promise<GitHubCommentNode[]> {
 	const args = ["api", "graphql", "-f", `threadId=${threadId}`, "-f", `query=${LATEST_COMMENTS_QUERY}`];
-	const { stdout } = await execFileAsync("gh", args, { cwd, maxBuffer: 32 * 1024 * 1024, timeout: FETCH_TIMEOUT_MS });
-	const res = JSON.parse(stdout);
-	const comments = res?.data?.node?.comments?.nodes;
-	if (res?.errors?.length || !Array.isArray(comments)) {
-		throw new Error(
-			`Failed to fetch the latest comments of review thread ${threadId}: ${responseErrorMessages(res) || "no comments in the response"}`,
-		);
+	const res = await runJson<unknown>("gh", args, { cwd, maxBuffer: MAX_GRAPHQL_OUTPUT_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
+	const body = res.ok ? res.data : undefined;
+	const comments = (body as { data?: { node?: { comments?: { nodes?: unknown } } } })?.data?.node?.comments?.nodes;
+	if (res.ok === false || responseErrorMessages(body) || !Array.isArray(comments)) {
+		const why = responseErrorMessages(body) ?? (res.ok === false ? failureText(res) : "no comments in the response");
+		throw new Error(`Failed to fetch the latest comments of review thread ${threadId}: ${why || "no comments in the response"}`);
 	}
 	return comments;
 }
@@ -226,9 +248,9 @@ async function repoRoot(cwd: string): Promise<string> {
 	const cached = repoRootCache.get(cwd);
 	if (cached) return cached;
 	// (no fallback to cwd: below the root, the same relative path can name another file)
-	const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: FETCH_TIMEOUT_MS });
-	const root = stdout.trim();
-	if (!root) throw new Error(`could not determine the repository root of ${cwd}`);
+	const res = await runText("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: FETCH_TIMEOUT_MS });
+	const root = res.ok ? res.data : "";
+	if (!root) throw new Error(`could not determine the repository root of ${cwd}${res.ok ? "" : ` (${failureText(res)})`}`);
 	repoRootCache.set(cwd, root);
 	return root;
 }
@@ -266,20 +288,23 @@ export function describeGhError(err: unknown): string {
 }
 
 function graphqlErrorMessages(stdout: string | undefined): string | undefined {
-	try {
-		return responseErrorMessages(JSON.parse(stdout || ""));
-	} catch {
-		return undefined;
-	}
+	// The parse lives behind the door: this text arrives on someone else's error object, but it is still
+	// the output of a command, and `jsonParseLocation` keeps it out of this file on purpose.
+	return responseErrorMessages(parseJsonSafe(stdout));
 }
 
 /**
  * The error messages of a parsed GraphQL response, if it has errors.
  */
-function responseErrorMessages(res: any): string | undefined {
-	const errors = res?.errors;
+function responseErrorMessages(res: unknown): string | undefined {
+	const errors = (res as { errors?: unknown } | undefined)?.errors;
 	if (!Array.isArray(errors) || errors.length === 0) return undefined;
-	return errors.map((e: { message?: string; type?: string }) => e?.message || e?.type || "unknown error").join("; ");
+	return errors
+		.map((entry) => {
+			const e = entry as { message?: string; type?: string };
+			return e?.message || e?.type || "unknown error";
+		})
+		.join("; ");
 }
 
 function ghErrorText(err: unknown): string {
@@ -303,17 +328,40 @@ function ghErrorText(err: unknown): string {
 }
 
 /**
- * Runs a gh mutation. One stopped midway (e.g. by its timeout) is flagged, since GitHub may have
- * applied it anyway (see describeGhError).
+ * Runs a gh mutation and hands back its stdout. One stopped midway (e.g. by its timeout) is flagged,
+ * since GitHub may have applied it anyway (see describeGhError).
+ *
+ * A failing exit still throws rather than returning, because that is how callers have always learned
+ * about it: the GraphQL error body rides on the error as `stdout`, where `ghErrorText` picks its messages
+ * out. The thrown error mirrors that shape from the door's coded failure, and deliberately carries no
+ * `cause` - a failed execFile's message embeds the whole command line, including the reply body.
  */
-async function runMutation(args: string[], cwd: string): Promise<{ stdout: string }> {
-	try {
-		return await execFileAsync("gh", args, { cwd, timeout: MUTATION_TIMEOUT_MS });
-	} catch (err) {
-		const e = err as { killed?: boolean; signal?: string; mayHaveApplied?: boolean };
-		if (e?.killed || e?.signal) e.mayHaveApplied = true;
-		throw err;
-	}
+async function runMutation(args: string[], cwd: string): Promise<string> {
+	const res = await runText("gh", args, { cwd, timeoutMs: MUTATION_TIMEOUT_MS, trim: false });
+	if (res.ok) return res.data;
+	// `body`, not `stdout`: the excerpt is capped for display and a GraphQL error body longer than that
+	// would silently lose its messages - the one thing this mutation's caller reports to the user.
+	const messages = responseErrorMessages(parseJsonSafe(res.body ?? res.stdout));
+	// The door's reason leads and messages are appended only when not already inside it: `failureText`
+	// folds stderr in without duplicating it, `classify()` already lifts a CLI's JSON `errors[]` for `EXIT`
+	// (otherwise the user reads the same GraphQL line twice - review nit), and the reason must survive
+	// because it is the only thing naming a TIMEOUT as a TIMEOUT once this is a plain thrown Error.
+	const reason = failureText(res);
+	const text = (messages && !reason.includes(messages) ? `${reason}\n${messages}` : reason).trim();
+	const err = new Error(res.code === "TIMEOUT" ? `${text}; the change may already be on GitHub` : text) as Error & {
+		stdout?: string;
+		stderr?: string;
+		code?: string;
+		mayHaveApplied?: boolean;
+	};
+	// `stdout` is the field `ghErrorText` reads for GraphQL messages, so it gets the same unexcerpted
+	// body rather than the display cap - a truncated error body is an error with no message.
+	const bodyForCaller = res.body ?? res.stdout;
+	if (bodyForCaller) err.stdout = bodyForCaller;
+	if (res.stderr) err.stderr = res.stderr;
+	err.code = res.code;
+	if (res.code === "TIMEOUT") err.mayHaveApplied = true;
+	throw err;
 }
 
 const REPLY_THREAD_MUTATION = `
@@ -342,9 +390,9 @@ export async function replyToReviewThread(threadId: string, body: string, cwd: s
 		`query=${REPLY_THREAD_MUTATION}`,
 	];
 
-	const { stdout } = await runMutation(args, cwd);
-	const res = JSON.parse(stdout);
-	const comment = res?.data?.addPullRequestReviewThreadReply?.comment;
+	const stdout = await runMutation(args, cwd);
+	const comment = (parseJsonSafe(stdout) as { data?: { addPullRequestReviewThreadReply?: { comment?: GitHubCommentNode } } })?.data
+		?.addPullRequestReviewThreadReply?.comment;
 	if (!comment) {
 		throw new Error(`Failed to add reply to review thread: ${stdout || "Unknown error"}`);
 	}
@@ -368,9 +416,9 @@ mutation($threadId: ID!) {
 export async function resolveReviewThread(threadId: string, cwd: string): Promise<boolean> {
 	const args = ["api", "graphql", "-f", `threadId=${threadId}`, "-f", `query=${RESOLVE_THREAD_MUTATION}`];
 
-	const { stdout } = await runMutation(args, cwd);
-	const res = JSON.parse(stdout);
-	const resolved = res?.data?.resolveReviewThread?.thread?.isResolved;
+	const stdout = await runMutation(args, cwd);
+	const resolved = (parseJsonSafe(stdout) as { data?: { resolveReviewThread?: { thread?: { isResolved?: unknown } } } })?.data
+		?.resolveReviewThread?.thread?.isResolved;
 	return Boolean(resolved);
 }
 
