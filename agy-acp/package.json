@@ -1,0 +1,13 @@
+{
+	"name": "agy-acp",
+	"version": "0.1.0",
+	"description": "Agent Client Protocol (ACP) server that drives Google's agy CLI through its headless stream-json mode",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"agy-acp": "src/main.ts"
+	},
+	"engines": {
+		"node": ">=23.6"
+	}
+}

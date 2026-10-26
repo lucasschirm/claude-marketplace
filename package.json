@@ -7,9 +7,9 @@
   ],
   "scripts": {
     "test": "bash test/run.sh",
-    "test:unit": "bash test/run.sh unit",
+    "test:unit": "bash test/run.sh unit agy-acp",
     "typecheck": "tsc --noEmit",
-    "lint": "biome lint extensions",
+    "lint": "biome lint extensions agy-acp",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "node scripts/check-quality.mjs --check",

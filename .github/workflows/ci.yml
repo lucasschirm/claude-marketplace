@@ -75,6 +75,25 @@ jobs:
       - name: Run unit tests
         run: npm run test:unit
 
+  # The agy-acp package's suites: plain `node --test` over Node built-ins - no Pi, no model calls.
+  agy-acp:
+    name: agy-acp tests
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run agy-acp suite
+        run: bash test/run.sh agy-acp
+
   # Extension suites that run inside the Pi runtime. They use mock `gh`/Pi APIs
   # and `--offline`, so no model credentials are needed.
   # Excluded on purpose: test-devin-delegate(.ts|-lifecycle.ts) start real Devin
