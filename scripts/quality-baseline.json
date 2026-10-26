@@ -1,10 +1,10 @@
 {
   "metrics": {
-    "execLocation": 24,
-    "execTimeout": 25,
+    "execLocation": 12,
+    "execTimeout": 21,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
-    "jsonParseLocation": 19,
+    "jsonParseLocation": 13,
     "noStdioWrites": 0,
     "emptyCatch": 50,
     "piExtensionsMatchDisk": 0,
@@ -14,18 +14,18 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
-    "biome.suspicious/noExplicitAny": 158,
-    "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noExplicitAny": 153,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
-    "biome.correctness/noUnusedImports": 1,
-    "biome.correctness/noUnusedFunctionParameters": 1
+    "biome.suspicious/noGlobalIsNan": 8,
+    "biome.correctness/noUnusedFunctionParameters": 1,
+    "biome.correctness/noUnusedImports": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
     "extensions/devin-delegate.ts": 2650,
     "extensions/lib/acp-client.ts": 320,
-    "extensions/lib/ci-verdict.ts": 119,
+    "extensions/lib/ci-verdict.ts": 142,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
     "extensions/lib/devin-permissions.ts": 137,
@@ -39,7 +39,7 @@
     "extensions/lib/orca-client.ts": 569,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 2058,
+    "extensions/observe-pr.ts": 2130,
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1505,
     "extensions/tools.ts": 627
@@ -150,8 +150,16 @@
       "changes": [
         "extensions/lib/github-review-threads.ts: 637 lines > baseline 590 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "observe-pr.ts grew 2058 to 2130 by typing what gh answers - PR and run payloads with their schemas - instead of reading them through any",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 142 lines > baseline 119 (files may only shrink)",
+        "extensions/observe-pr.ts: 2130 lines > baseline 2058 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "8580a65",
+  "generatedFrom": "dc57c70",
   "biomeConfigHash": "184447d011b421d7"
 }
