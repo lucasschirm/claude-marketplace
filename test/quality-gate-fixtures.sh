@@ -35,6 +35,13 @@ export PI_QA_BIOME="$BIOME"
 export PI_QA_FIXTURES=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
+# Put the copy at its own baseline before anything asserts on it. A fixture that expects "one violation more
+# than baseline fails" is only true when the tree sits exactly at baseline, and metrics fall as debt is paid:
+# jsonParseLocation dropped by three when lib/exec.ts took parsing away from orca-client, and three fixtures
+# in this file then passed for the wrong reason - the violation was absorbed by headroom. Writing the
+# baseline here only ever touches the copy.
+node scripts/check-quality.mjs --write >/dev/null 2>&1 || true
+
 PASS=0
 FAIL=0
 
@@ -130,6 +137,28 @@ qa fail "an exec outside extensions/lib fails the location rule" --only execLoca
 expect_line "and names the entry file" "extensions/zz-entry.ts:3"
 qa fail "and the same file must be declared in package.json" --only piExtensionsMatchDisk --full
 rm -f extensions/zz-entry.ts
+echo
+echo "a session child is guarded by a liveness policy, not by a deadline"
+probe zz-a.ts 'import { spawn } from "node:child_process";
+export function f() {
+	return spawn("devin", ["acp"], { idleNoToolMs: 90000 });
+}'
+qa pass "an idle policy on spawn counts as the guard" --only execTimeout --full
+dropprobes
+probe zz-a.ts 'import { spawn } from "node:child_process";
+export function f() {
+	return spawn("devin", ["acp"], { cwd: "/tmp" });
+}'
+qa fail "a session child with neither deadline nor idle policy still fails" --only execTimeout --full
+expect_line "and names it" "zz-a.ts:3"
+dropprobes
+probe zz-a.ts 'import { execFileAsync } from "node:child_process";
+export async function f() {
+	return execFileAsync("gh", ["pr", "view"], { idleNoToolMs: 90000 });
+}'
+qa fail "a request cannot borrow the session exemption" --only execTimeout --full
+expect_line "and names the call" "zz-a.ts:3"
+dropprobes
 
 echo
 echo "mutating calls must have their result read"
@@ -253,8 +282,11 @@ echo
 echo "structural wiring"
 probe zz-u.ts 'export const unused = 1;'
 qa fail "a lib nothing imports fails" --only noUnusedLibs --full
-printf 'import { unused } from "./lib/zz-u.ts";\nexport const used = unused;\n' >extensions/lib/zz-v.ts
+# "./zz-u.ts" is how a sibling in extensions/lib/ really imports another. Spelling it "./lib/zz-u.ts" here
+# would have described a path that does not exist and still satisfied the old text-matching detector.
+printf 'import { unused } from "./zz-u.ts";\nexport const used = unused;\n' >extensions/lib/zz-v.ts
 qa fail "a lib imported only by another dead lib still fails" --only noUnusedLibs --full
+expect_text "and the leaf is named through the sibling edge" "extensions/lib/zz-u.ts is reachable from no entry file"
 cp extensions/tools.ts "$WORK/tools.ts.orig"
 printf 'import { used } from "./lib/zz-v.ts";\nexport const entry = used;\n' >>extensions/tools.ts
 qa pass "but a lib reachable through another lib is used" --only noUnusedLibs --full

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { commandExists } from "./nonblocking.ts";
+import { type ExecFailure, runJson, runText } from "./exec.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -180,52 +181,48 @@ export async function execOrca<T = any>(args: string[], options: OrcaCommandOpti
 	if (!fullArgs.includes("--json")) {
 		fullArgs.push("--json");
 	}
+	const call = { cwd: options.cwd || process.cwd(), timeoutMs: options.timeoutMs || 30000, env: options.env };
 
-	try {
-		const { stdout } = await execFileAsync(cmd, fullArgs, {
-			cwd: options.cwd || process.cwd(),
-			timeout: options.timeoutMs || 30000,
-			maxBuffer: 10 * 1024 * 1024,
-			env: {
-				...process.env,
-				...options.env,
-			},
-		});
+	// `worker-read` answers with terminal text, so for it alone unparseable output is a success. For
+	// every other command, treating unparseable output as ok:true is how a failed CLI call used to look
+	// like an empty worker list or "no messages".
+	if (options.expectText) {
+		const res = await runText(cmd, fullArgs, call);
+		return res.ok ? { ok: true, result: res.data as unknown as T } : orcaExecFailure(res);
+	}
 
-		try {
-			return JSON.parse(stdout) as OrcaEnvelope<T>;
-		} catch (parseErr: any) {
-			// Reporting unparseable output as ok:true is how a failed CLI call used to look like an
-			// empty worker list or "no messages". `expectText` commands are the deliberate exception.
-			if (options.expectText) {
-				return { ok: true, result: stdout.trim() as unknown as T };
-			}
-			return {
-				ok: false,
-				error: {
-					code: "BAD_JSON",
-					message: `Orca CLI returned output that is not JSON: ${parseErr?.message || String(parseErr)}`,
-					details: { raw: stdout.trim().slice(0, 2048) },
-				},
-			};
-		}
-	} catch (err: any) {
-		const stdout = err?.stdout || "";
-		if (stdout) {
-			try {
-				const parsed = JSON.parse(stdout);
-				return parsed as OrcaEnvelope<T>;
-			} catch {}
-		}
-		const stderr = err?.stderr || err?.message || String(err);
+	// Orca reports its own failures as an envelope plus a non-zero exit, so the exit code is not the
+	// verdict: a parsed envelope from a failing exit is still the answer (#36 semantics).
+	const res = await runJson<OrcaEnvelope<T>>(cmd, fullArgs, { ...call, acceptJsonOnFailure: true });
+	if (res.ok) return res.data;
+	if (res.code === "BAD_JSON") {
 		return {
 			ok: false,
 			error: {
-				code: "EXEC_ERROR",
-				message: stderr.trim(),
+				code: "BAD_JSON",
+				message: `Orca CLI returned output that is not JSON: ${res.message}`,
+				details: { raw: res.stdout ?? "" },
 			},
 		};
 	}
+	return orcaExecFailure(res);
+}
+
+/**
+ * A subprocess failure that never reached an envelope, in the shape #36 established: the CLI's own
+ * stderr when it had any, under EXEC_ERROR. The door's finer category is kept in `details.cause`
+ * rather than lost - TIMEOUT and EXIT are different claims about whether the command had its effect -
+ * but not in `error.code`, which callers have matched against since before this file existed.
+ */
+function orcaExecFailure(res: ExecFailure): OrcaEnvelope {
+	return {
+		ok: false,
+		error: {
+			code: "EXEC_ERROR",
+			message: (res.stderr || res.message || "unknown error").trim(),
+			details: { cause: res.code },
+		},
+	};
 }
 
 /**

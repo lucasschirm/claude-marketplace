@@ -413,7 +413,11 @@ function execSites() {
 			all.push({
 				file: rel(file),
 				line: lineOf(src, m.index),
-				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(call),
+				// A deadline guards a request. A *session* child (`devin acp`) must not be killed by the wall
+				// clock, so `spawnLongLived` guards it with a liveness policy instead and `idleNoToolMs` counts
+				// as the guard - for `spawn` only, because an execFile call claiming an idle policy would be
+				// a request with no deadline at all.
+				hasTimeout: /\b(timeout|timeoutMs)\s*:/.test(call) || (m[1] === "spawn" && /\bidleNoToolMs\s*:/.test(call)),
 				src,
 				nameIndex: m.index,
 				call,
@@ -633,11 +637,17 @@ function checkUnusedLibs() {
 		const file = queue.pop();
 		if (!fs.existsSync(file)) continue;
 		const src = read(file);
-		for (const m of src.matchAll(/from\s+["'][^"']*lib\/([\w.-]+\.ts)["']/g)) {
-			const name = m[1];
+		for (const m of src.matchAll(/from\s+["']([^"']+\.ts)["']/g)) {
+			// Resolve the specifier the way the runtime does instead of looking for one that spells "lib/".
+			// Inside extensions/lib/ the normal spelling is "./sibling.ts", so the text-only match called a
+			// lib reached solely through its sibling unreachable - a false accusation against exactly the
+			// factored-out helpers this repo is trying to grow, and a rule that cries wolf gets widened.
+			const target = path.resolve(path.dirname(file), m[1]);
+			const name = path.relative(libDir, target);
+			if (!name || name.startsWith("..") || path.isAbsolute(name)) continue;
 			if (!libFiles.includes(name) || reached.has(name)) continue;
 			reached.add(name);
-			queue.push(path.join(libDir, name));
+			queue.push(target);
 		}
 	}
 	const hits = libFiles.filter((f) => !reached.has(f)).map((f) => `extensions/lib/${f} is reachable from no entry file`);
