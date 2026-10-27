@@ -8,7 +8,7 @@ import * as os from "node:os";
 import { AcpClient } from "./lib/acp-client.ts";
 import { failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
 import type { Schema } from "./lib/exec-payload.ts";
-import { isNoPullRequestFailure } from "./lib/gh-health.ts";
+import { branchNames, headRef, prForBranch, prForCurrentBranch, repoName } from "./lib/git-repo.ts";
 import {
 	MODE_NAMES,
 	PERMISSION_DECISIONS,
@@ -38,11 +38,6 @@ const GLOBAL_GUARD_KEY = "__PI_DEVIN_DELEGATE_EXTENSION_ACTIVE__";
 const WORKTREE_ADD_TIMEOUT_MS = 10 * 60_000;
 
 /** `gh pr view --json number`: the only field either lookup here reads. */
-const PR_NUMBER_SCHEMA: Schema = {
-	type: "object",
-	properties: { number: { anyOf: [{ type: "number" }, { type: "null" }] } },
-};
-
 /** orca answers every `worktree create` with `{ok, result?, error?}` on stdout - including when it failed. */
 const ORCA_WORKTREE_REPLY: Schema = {
 	type: "object",
@@ -982,20 +977,27 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 	// --- Worktree Management ---
 
+	/**
+	 * The branch a new worktree forks its name from.
+	 *
+	 * `lib/git-repo.ts` normalises git's detached-HEAD sentinel, which changes behaviour here on purpose:
+	 * this used to receive the literal string `"HEAD"` when detached and provisioned worktrees named
+	 * `HEAD-dt1`, `HEAD-dt2`, forever after. Falling back to `main` is a guess, and it is the same guess
+	 * the failure path already made - the difference is that a detached folder no longer invents a lineage.
+	 */
 	async function getGitBranch(cwd: string): Promise<string> {
-		const res = await runText("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, timeoutMs: READ_TIMEOUT_MS });
-		return res.ok && res.data ? res.data : "main";
+		const res = await headRef(cwd, { timeoutMs: READ_TIMEOUT_MS });
+		return (res.ok && res.value) || "main";
 	}
 
 	async function findNextWorktreeIndex(cwd: string, baseBranch: string): Promise<number> {
-		const listed = await runText("git", ["branch", "--list", `${baseBranch}-dt*`], { cwd, timeoutMs: READ_TIMEOUT_MS });
+		const listed = await branchNames(cwd, `${baseBranch}-dt*`, { timeoutMs: READ_TIMEOUT_MS });
 		if (listed.ok) {
-			const lines = listed.data.split("\n").map((l) => l.trim().replace(/^[*+]\s*/, ""));
 			const indices: number[] = [];
 			const escapedBase = baseBranch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			const reg = new RegExp(`^${escapedBase}-dt(\\d+)$`);
 
-			for (const line of lines) {
+			for (const line of listed.value) {
 				const match = line.match(reg);
 				if (match) {
 					indices.push(parseInt(match[1], 10));
@@ -1004,21 +1006,14 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			return indices.length > 0 ? Math.max(...indices) + 1 : 1;
 		}
 		// "I cannot see the branches" is answered as "start at 1", which is what it always was. Worth
-		// knowing it is a guess, because two provisionings that both guess 1 collide on the branch name.
-		logWarn(`Could not list ${baseBranch}-dt* branches (${failureText(listed)}); guessing worktree index 1`);
+		// knowing it is a guess, because two provisionings that both guess 1 collide on the branch name -
+		// hence a listing that reports a reason instead of an empty list, which would look identical here.
+		logWarn(`Could not list ${baseBranch}-dt* branches (${failureText(listed.failure)}); guessing worktree index 1`);
 		return 1;
 	}
 
 	async function getRootRepoName(cwd: string): Promise<string> {
-		const commonDir = await runText("git", ["rev-parse", "--git-common-dir"], { cwd, timeoutMs: READ_TIMEOUT_MS });
-		if (commonDir.ok && commonDir.data) {
-			const dir = commonDir.data;
-			const gitDir = path.isAbsolute(dir) ? dir : path.resolve(cwd, dir);
-			return path.basename(path.dirname(gitDir));
-		}
-		const toplevel = await runText("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: READ_TIMEOUT_MS });
-		if (toplevel.ok && toplevel.data) return path.basename(toplevel.data);
-		return path.basename(cwd);
+		return repoName(cwd, { timeoutMs: READ_TIMEOUT_MS });
 	}
 
 	async function createWorktree(
@@ -1100,38 +1095,28 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 
 		// 1. Determine candidate branches: actual checked out branch in cwd, followed by provisioned worktree branch
 		const candidateBranches: string[] = [];
-		const head = await runText("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, timeoutMs: READ_TIMEOUT_MS });
-		if (head.ok && head.data && head.data !== "HEAD") {
-			candidateBranches.push(head.data);
+		const head = await headRef(cwd, { timeoutMs: READ_TIMEOUT_MS });
+		if (head.ok && head.value) {
+			candidateBranches.push(head.value);
 		}
 
 		if (branch && !candidateBranches.includes(branch)) {
 			candidateBranches.push(branch);
 		}
 
+		// Three answers, not two, and this is where the difference pays: "no PR for this branch" is an
+		// ordinary Tuesday that moves quietly to the next candidate, while "gh could not answer" is the
+		// reason a session ends up looking for a PR in the wrong folder - so that one gets a line.
 		for (const b of candidateBranches) {
-			const res = await runJson<{ number?: number | null }>("gh", ["pr", "view", b, "--json", "number"], {
-				cwd,
-				timeoutMs: READ_TIMEOUT_MS,
-				schema: PR_NUMBER_SCHEMA,
-			});
-			// "no PR for this branch" and "gh could not answer" both move on to the next candidate, as they
-			// did before, but they are not the same thing: the second one is why a session looks for a PR in
-			// the wrong place, so it gets a line.
-			if (!res.ok && !isNoPullRequestFailure(failureText(res))) logWarn(`PR lookup for branch ${b} failed: ${failureText(res)}`);
-			const number = res.ok ? res.data.number : undefined;
-			if (typeof number === "number" && number) return number;
+			const res = await prForBranch(b, cwd, { timeoutMs: READ_TIMEOUT_MS });
+			if (res.found) return res.pr.number;
+			if (res.reason === "error") logWarn(`PR lookup for branch ${b} failed: ${failureText(res.failure)}`);
 		}
 
 		// Fallback: gh pr view from worktree directory without branch selector
-		const current = await runJson<{ number?: number | null }>("gh", ["pr", "view", "--json", "number"], {
-			cwd,
-			timeoutMs: READ_TIMEOUT_MS,
-			schema: PR_NUMBER_SCHEMA,
-		});
-		const fallbackNumber = current.ok ? current.data.number : undefined;
-		if (typeof fallbackNumber === "number" && fallbackNumber) return fallbackNumber;
-		if (!current.ok && !isNoPullRequestFailure(failureText(current))) logWarn(`PR lookup for ${cwd} failed: ${failureText(current)}`);
+		const current = await prForCurrentBranch(cwd, { timeoutMs: READ_TIMEOUT_MS });
+		if (current.found) return current.pr.number;
+		if (current.reason === "error") logWarn(`PR lookup for ${cwd} failed: ${failureText(current.failure)}`);
 
 		return undefined;
 	}

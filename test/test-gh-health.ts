@@ -278,5 +278,10 @@ test("the door's NOT_FOUND sentence is an availability failure", async () => {
 test("a branch with no PR is distinguishable from gh being broken", () => {
 	assert.strictEqual(isNoPullRequestFailure('no pull requests found for branch "feature-x"'), true);
 	assert.strictEqual(isNoPullRequestFailure("Could not resolve to a PullRequest with the number 42."), true);
+	// Narrowed on purpose: gh says "could not resolve" about repositories too, and a lookup that cannot
+	// see the repository is a broken lookup, not an empty one. Silence here is what hid broken gh calls.
+	assert.strictEqual(isNoPullRequestFailure("could not resolve to a Repository with the name 'o/r'"), false);
+	assert.strictEqual(isNoPullRequestFailure("HTTP 404: Not Found"), false);
+	assert.strictEqual(isNoPullRequestFailure("repository not found"), false);
 	assert.strictEqual(isNoPullRequestFailure("gh: failed to connect: dial tcp 140.107.20.17:443: i/o timeout"), false);
 });

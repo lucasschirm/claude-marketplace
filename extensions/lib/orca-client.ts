@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { commandExists } from "./nonblocking.ts";
 import { type ExecFailure, failureText, runJson, runText } from "./exec.ts";
+import { headRef, prForBranch } from "./git-repo.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -368,32 +369,40 @@ export async function checkWorktreeSafety(
 
 	let targetBranch = branch;
 	if (!targetBranch) {
-		try {
-			const { stdout } = await execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: worktreePath });
-			targetBranch = stdout.trim();
-		} catch (err: any) {
+		const head = await headRef(worktreePath);
+		if (!head.ok) {
 			return {
 				safe: false,
-				reason: `Failed to detect git branch: ${err?.message || String(err)}`,
+				reason: `Failed to detect git branch: ${failureText(head.failure)}`,
 				worktreePath,
 			};
 		}
+		// A detached worktree has no branch to ask about: same "nothing to look up" the old empty string
+		// meant, and the literal "HEAD" is no longer sent to gh as though it were a branch name.
+		targetBranch = head.value ?? "";
 	}
 
 	// 2. Check associated GitHub PR status
 	let prNum: number | undefined;
 	let prState: string = "NONE";
 	if (targetBranch) {
-		try {
-			const { stdout } = await execFileAsync("gh", ["pr", "view", targetBranch, "--json", "number,state"], {
-				cwd: worktreePath,
-			});
-			const parsed = JSON.parse(stdout);
-			if (parsed.number && typeof parsed.number === "number") {
-				prNum = parsed.number;
-				prState = String(parsed.state || "").toUpperCase();
-			}
-		} catch {}
+		const res = await prForBranch(targetBranch, worktreePath);
+		if (res.found) {
+			prNum = res.pr.number;
+			prState = res.pr.state ?? "OPEN";
+		} else if (res.reason === "error") {
+			// Fail closed, which is what this function's own doc comment promises and what it did not do:
+			// `catch {}` made a gh that could not answer indistinguishable from "this branch has no PR", so
+			// the verdict fell through to `safe: true` - a worktree deleted on the strength of a lookup
+			// that never ran. Not knowing is its own answer here, because the folder may hold the only copy
+			// of unmerged work whose PR gh simply could not read.
+			return {
+				safe: false,
+				reason: `Could not check the PR for ${targetBranch}: ${failureText(res.failure)}`,
+				worktreePath,
+				branch: targetBranch,
+			};
+		}
 	}
 
 	if (prState === "MERGED" || prState === "CLOSED") {
