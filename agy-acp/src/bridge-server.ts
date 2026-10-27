@@ -52,6 +52,8 @@ export interface BridgeServerOptions {
 	handle: (req: BridgeRequest) => Promise<BridgeReply>;
 	/** The hook went away (connection lost) before its request was answered. */
 	onConnectionLost: (key: string) => void;
+	/** The chmod implementation (a test injects a failure to exercise the partial-start cleanup). */
+	chmod?: (p: string, mode: number) => Promise<void>;
 }
 
 export class BridgeServer {
@@ -74,13 +76,14 @@ export class BridgeServer {
 			hookFile: this.opts.hookFile ?? defaultHookFile(),
 			hookTimeoutSec: this.opts.hookTimeoutSec,
 		});
+		const chmod = this.opts.chmod ?? ((p: string, mode: number) => fs.promises.chmod(p, mode));
 		({ dir: this.dir, socketPath: this.socketPath, hookName: this.hookName } = layout);
 		try {
 			// 0700 for the parent too: a sibling user must not be able to drop a hooks.json into it.
 			await fs.promises.mkdir(path.dirname(layout.dir), { recursive: true, mode: 0o700 });
 			for (const d of [layout.dir, path.join(layout.dir, ".agents")]) await fs.promises.mkdir(d, { mode: 0o700 });
 			await fs.promises.writeFile(path.join(layout.dir, ".agents", "hooks.json"), layout.hooksJson, { mode: 0o600 });
-			await fs.promises.chmod(layout.dir, 0o700);
+			await chmod(layout.dir, 0o700);
 			const server = createNetServer((conn) => {
 				this.connections.add(conn);
 				conn.on("close", () => this.connections.delete(conn));
@@ -95,7 +98,7 @@ export class BridgeServer {
 					resolve();
 				});
 			});
-			await fs.promises.chmod(this.socketPath, 0o600);
+			await chmod(this.socketPath, 0o600);
 		} catch (err) {
 			// A partial start (the listener is up but e.g. the socket chmod failed) must not leak a
 			// live listener or a half-written dir: close it, then propagate.

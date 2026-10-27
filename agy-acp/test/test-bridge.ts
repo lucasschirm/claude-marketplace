@@ -69,6 +69,16 @@ const askSocket = (sockPath: string, req: Record<string, unknown>): Promise<{ li
 		setTimeout(() => finish(false), 3000);
 	});
 
+/** A bounded wait: resolves when pred() is true or throws after ms (an unbounded spin is a suite hang). */
+const waitUntil = async (pred: () => boolean, ms: number, what: string): Promise<void> => {
+	const deadline = Date.now() + ms;
+	for (;;) {
+		if (pred()) return;
+		if (Date.now() > deadline) throw new Error(`timed out waiting for: ${what}`);
+		await new Promise((r) => setTimeout(r, 5));
+	}
+};
+
 /** Run the hook with a payload; its whole exit behaviour is one JSON line + exit 0. */
 function runHook(env: Record<string, string>, stdin: string, signalAfterMs?: number): Promise<{ code: number; stdout: string }> {
 	return new Promise((resolve) => {
@@ -281,7 +291,7 @@ test("an unauthenticated or early-dropped connection does not abort a legitimate
 			stepIdx: 5,
 			toolCall: { name: "run_command", args: {} },
 		});
-		// A connection that is dropped immediately (no data at all).
+		// A connection that is dropped immediately after a malformed line (no recognised fields).
 		const early = askSocket(server.socketPath, {});
 		await Promise.all([badTok, early]);
 		await new Promise((r) => setTimeout(r, 100)); // let the close handlers run
@@ -316,6 +326,28 @@ test("a null conversation id (before the probe) closes the connection with no re
 	} finally {
 		await server.stop();
 	}
+});
+
+test("a failed partial start (the socket chmod) removes the dir and closes the listener", async () => {
+	const server = new BridgeServer({
+		log: () => {},
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK,
+		hookTimeoutSec: 60,
+		maxHoldMs: 5000,
+		conversationId: () => null,
+		handle: async () => ({ decision: "allow" }),
+		onConnectionLost: () => {},
+		chmod: async (p: string, mode: number) => {
+			if (p.endsWith("socket")) throw new Error("chmod failed (injected)");
+			await fs.promises.chmod(p, mode);
+		},
+	});
+	await assert.rejects(server.start(), /chmod failed/);
+	assert.ok(!fs.existsSync(server.dir), "the half-written dir was removed");
+	assert.ok(!fs.existsSync(server.socketPath), "the socket file was removed");
+	await server.stop(); // idempotent after a failed start
 });
 
 test("a malformed request line closes the connection with no reply", async () => {
@@ -863,18 +895,12 @@ test("the gate: a subagent's pending ask (same step index, sub conversation) is 
 		subConn.write(
 			`${JSON.stringify({ token: "tok-1", conversationId: "conv-1-sub", stepIdx: 5, toolCall: { name: "run_command", args: { CommandLine: "ls" } } })}\n`,
 		);
-		for (;;) {
-			if (asks.length >= 2) break;
-			await new Promise((r) => setTimeout(r, 5));
-		}
+		await waitUntil(() => asks.length >= 2, 5000, "two client asks (main + sub) in flight");
 		assert.strictEqual(asks.length, 2, "two client asks are in flight (main + sub)");
 		// Drop the subagent's hook connection: only the sub's ask aborts.
 		subConn.destroy();
 		await subClosed;
-		for (;;) {
-			if (h.logs.some((l) => l.includes("hook connection lost"))) break;
-			await new Promise((r) => setTimeout(r, 5));
-		}
+		await waitUntil(() => h.logs.some((l) => l.includes("hook connection lost")), 5000, "the hook connection lost log");
 		assert.ok(
 			h.logs.some((l) => /hook connection lost \(conv-1-sub:5\)/.test(l)),
 			"the sub key's loss was logged",
@@ -886,6 +912,39 @@ test("the gate: a subagent's pending ask (same step index, sub conversation) is 
 		asks[0].resolve({ outcome: { outcome: "selected", optionId: "allow_once" } });
 		const main = await mainP;
 		assert.strictEqual(main?.decision, "allow", "the main ask answered after the sub abort");
+		await h.gate.dispose();
+	} finally {
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+test("the gate: a subagent's auto-allowed call (a colliding step index) does not touch a main-conversation tool call", async () => {
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-sub-")));
+	try {
+		const h = await startGateHarness({ cwd: workspace });
+		// The main conversation's step 3 went ACTIVE (the stream recorded its parameters)...
+		h.gate.onStreamActive(3, "run_command", { CommandLine: "ls" });
+		// ...and a subagent's in-workspace read_file (auto-allowed) lands on the same step index.
+		const r = await h.ask(3, "read_file", { Path: path.join(workspace, "a.txt") }, "conv-1-sub");
+		assert.strictEqual(r.decision, "allow", "the subagent's in-workspace read is auto-allowed");
+		assert.strictEqual(h.updates.length, 0, "no tool_call_update for the main step (no bogus in_progress / argsRewritten)");
+		assert.ok(!h.logs.some((l) => l.includes("args rewritten")), "no bogus rewrite log");
+		await h.gate.dispose();
+	} finally {
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+test("the gate: onTurnEnd forgets the recorded stream steps (a next-turn index collision is not a rewrite)", async () => {
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-turn-")));
+	try {
+		const h = await startGateHarness({ cwd: workspace });
+		h.gate.onStreamActive(2, "run_command", { CommandLine: "ls" });
+		h.gate.onTurnEnd();
+		const r = await h.ask(2, "run_command", { CommandLine: "pwd" });
+		assert.strictEqual(r.decision, "allow", "the turn's ask is answered normally");
+		assert.strictEqual(h.requests.length, 1, "one client ask");
+		assert.strictEqual(h.updates.length, 0, "no update from a stale record (no bogus argsRewritten)");
 		await h.gate.dispose();
 	} finally {
 		fs.rmSync(workspace, { recursive: true, force: true });

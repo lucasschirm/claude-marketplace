@@ -1,8 +1,8 @@
-// One ACP session: owns the agy child process for one conversation and the permission gate,
-// maps the stream to session/update notifications, and settles each session/prompt with a
-// stopReason or a JSON-RPC error (an error is never end_turn - see turn.ts). A child exit
-// without a `result` marks needsRespawn (the next prompt relaunches agy with `--conversation
-// <id>`); a headless auto-deny is an end_turn whose denied actions ride in _meta.deniedActions.
+// One ACP session: owns the agy child and the permission gate, maps the stream to
+// session/update notifications, and settles each prompt with a stopReason or a JSON-RPC
+// error (an error is never end_turn - see turn.ts). A child exit without a `result` marks
+// needsRespawn (the next prompt relaunches agy with `--conversation <id>`); a headless
+// auto-deny is an end_turn with _meta.deniedActions.
 import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { TURN_IN_PROGRESS, type AcpPromptResult, type AcpSessionUpdate } from "./acp.ts";
 import { flattenPrompt } from "./prompt.ts";
@@ -133,8 +133,8 @@ export class AgySession {
 		await this.gate.dispose(); // denies any pending permission request and removes the bridge dir
 	}
 
-	/** The live child, respawning when needed: a needsRespawn session relaunches agy with
-	 * `--conversation <id>` and the last reported cumulative counters, so usage deltas and the step numbering continue. */
+	/** The live child, respawning when needed: relaunches agy with `--conversation <id>` and the
+	 * last cumulative counters, so usage deltas and the step numbering continue. */
 	async ensureDriver(): Promise<AgyProcess> {
 		const current = this.driver;
 		if (current && this.live && !this.needsRespawn) return current;
@@ -213,6 +213,7 @@ export class AgySession {
 		// result: the turn's terminal event; the raw cumulative state is kept for a respawn.
 		this.cumulative = e.result.cumulative;
 		settleTurn(this, e, driver);
+		this.gate.onTurnEnd();
 	}
 
 	private onExit(driver: AgyProcess, info: AgyExitInfo): void {
@@ -221,6 +222,7 @@ export class AgySession {
 			this.live = false;
 			this.needsRespawnValue = true;
 			this.gate.abortPending("the agy process exited"); // the hook died with the group
+			this.gate.onTurnEnd();
 			this.config.log(
 				`session ${this.id}: agy exited (code=${info.code ?? "none"} signal=${info.signal ?? "none"}) - the next prompt respawns`,
 			);
@@ -262,9 +264,8 @@ export class AgySession {
 		this.activeTools.add(id);
 		const name = s.tool_name ?? s.tool_info?.name ?? "tool";
 		const parameters = s.tool_info?.parameters;
-		// The stream's ACTIVE precedes the PreToolUse hook: the tool call is created from the
-		// stream's parameters, and the gate follows with an in_progress update when the hook's
-		// args differ (the rewritten-args detection) or a client ask is pending.
+		// The stream's ACTIVE precedes the PreToolUse hook: the call is created from the stream's
+		// parameters; the gate follows with an in_progress update on a rewrite or a pending ask.
 		this.gate.onStreamActive(s.step_index, name, parameters);
 		const title = toolTitleOf(name, parameters ?? {});
 		this.emit(toolCallStarted(id, title, toolKindOf(name), parameters, parameters ? toolLocationsOf(parameters) : undefined));

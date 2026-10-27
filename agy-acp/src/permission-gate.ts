@@ -141,12 +141,9 @@ export class PermissionGate {
 			this.reportHookArgs(req, false);
 			return { decision: "allow" };
 		}
-		// Ask the client. A call from a subagent conversation is gated too, but its tool call
-		// is not created here: the subagent's stream is sub-issue 59's.
-		const conversationId = this.opts.conversationId();
-		if (conversationId !== null && req.conversationId === conversationId) {
-			this.reportHookArgs(req, true); // in_progress update: the hook's args + the pending metadata
-		}
+		// Ask the client (subagent calls too: the per-session token is the boundary). reportHookArgs
+		// is conversation-guarded - our stream records describe main-conversation steps only.
+		this.reportHookArgs(req, true); // in_progress update: the hook's args + the pending metadata
 		const outcome = await this.askClient(req.stepIdx, name, args, req.conversationId);
 		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() }; // a disposed session is not a user reject
 		switch (outcome) {
@@ -214,6 +211,11 @@ export class PermissionGate {
 		}
 	}
 
+	/** A turn ended (result, or a mid-turn child exit): the recorded stream steps were for it. */
+	onTurnEnd(): void {
+		if (this.streamCalls.size > 0) this.streamCalls.clear();
+	}
+
 	/** The stream's ACTIVE for a tool step: record its parameters - the hook that follows runs
 	 * on them, so a difference between the two is a rewrite (reported when the hook arrives). */
 	onStreamActive(stepIdx: number, name: string, parameters: Record<string, unknown> | undefined): void {
@@ -223,9 +225,15 @@ export class PermissionGate {
 	/** One hook request vs the recorded stream parameters: a difference is a rewrite (the tool
 	 * runs with the hook's args). For an ask the in_progress update also carries the pending
 	 * permission metadata; the client sees the hook's args in its request. */
-	private reportHookArgs(req: { stepIdx: number; toolCall: { name: string; args: Record<string, unknown> } }, asking: boolean): void {
+	private reportHookArgs(
+		req: { stepIdx: number; conversationId: string; toolCall: { name: string; args: Record<string, unknown> } },
+		asking: boolean,
+	): void {
+		// A subagent step (a different conversation id): its tool call is not in our stream, and its
+		// low-restarting step index would otherwise collide with a recorded main step (spurious update).
+		if (req.conversationId !== (this.opts.conversationId() ?? "")) return;
 		const rec = this.streamCalls.get(req.stepIdx);
-		if (!rec) return; // a step that never went ACTIVE in our stream (e.g. a subagent step)
+		if (!rec) return; // a step that never went ACTIVE in our stream
 		const id = toolCallIdOf(this.opts.conversationId() ?? "", req.stepIdx);
 		const rewritten = argsDifferFrom(rec.parameters, req.toolCall.args);
 		if (!asking && !rewritten) return;

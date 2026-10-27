@@ -40,8 +40,9 @@ export async function cleanupStaleBridges(log: (line: string) => void, nowMs: nu
 					await fs.promises.rm(p, { recursive: true, force: true });
 					log(`bridge cleanup: removed stale ${p}`);
 				}
-			} catch {
-				// the dir vanished between readdir and stat - nothing to clean
+			} catch (err) {
+				// a vanished dir (a race) is expected; a real failure (e.g. EPERM) is logged, not swallowed
+				log(`bridge cleanup: stat/rm failed for ${p}: ${(err as Error).message}`);
 			}
 		}
 	}
