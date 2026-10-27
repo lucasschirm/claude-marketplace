@@ -136,3 +136,47 @@ test("commits that exist only on this branch are never safe", async () => {
 	assert.match(res.reason, new RegExp(`ahead of ${base}|unpushed`, "i"));
 	assert.equal(res.unpushed, true);
 });
+
+/**
+ * A `git` on PATH whose behaviour is scripted, so a hang and a "that comparison is unavailable" error
+ * can be produced on purpose. Prepends to the *current* PATH: these tests script `git` and `gh`
+ * together, and resetting to the original PATH would silently restore the real gh.
+ */
+function fakeGit(script: string): void {
+	const bin = tmpDir("safety-git-");
+	fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+	process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+}
+
+test("a comparison that times out fails closed; it is not read as 'nothing ahead'", async () => {
+	const repo = cleanRepo();
+	fakeGh("", 1, "no pull requests found");
+	// status answers "clean", then the upstream comparison hangs.
+	fakeGit(['if [ "$1" = "status" ]; then exit 0; fi', 'if [ "$1" = "log" ]; then sleep 5; exit 0; fi', "exit 1"].join("\n"));
+
+	const res = await checkWorktreeSafety(repo, "work", undefined, { timeoutMs: 250 });
+	assert.equal(res.safe, false);
+	// The old code read a failed comparison as empty output, i.e. "nothing ahead", and fell through to a
+	// safe verdict: a check that never completed manufactured evidence of absence.
+	assert.match(res.reason, /could not compare against upstream/i);
+});
+
+test("git's 'no upstream' is a missing comparison, and the last resort still fails closed", async () => {
+	const repo = cleanRepo();
+	fakeGh("", 1, "no pull requests found");
+	// Clean tree; every comparison answers "that revision does not exist here", including the bases.
+	fakeGit(
+		[
+			'if [ "$1" = "status" ]; then exit 0; fi',
+			'if [ "$1" = "log" ]; then echo "fatal: no upstream configured for branch" >&2; exit 128; fi',
+			'if [ "$1" = "rev-parse" ]; then exit 1; fi',
+			"exit 1",
+		].join("\n"),
+	);
+
+	const res = await checkWorktreeSafety(repo, "work");
+	// Not the same as a timeout: these are "unavailable", so the search runs to the end and the verdict
+	// is the documented last-resort refusal rather than a comparison-specific one.
+	assert.equal(res.safe, false);
+	assert.match(res.reason, /could not verify .*unpushed/i);
+});

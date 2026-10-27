@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { commandExists } from "./nonblocking.ts";
-import { type ExecFailure, failureText, runJson, runText } from "./exec.ts";
+import { type ExecFailure, failureText, READ_TIMEOUT_MS, runJson, runText } from "./exec.ts";
 import { headRef, prForBranch } from "./git-repo.ts";
 
 const execFileAsync = promisify(execFile);
@@ -328,14 +328,29 @@ export async function listWorktrees(options: { repo?: string; cwd?: string } = {
 }
 
 /**
+ * git's own words for "this revision range does not exist here": no upstream configured, no
+ * `origin/<branch>`, no candidate base. Those mean "this comparison is unavailable, try the next one".
+ *
+ * Anything else - a timeout, a locked index, a corrupt object - is not absence of evidence. Treating a
+ * comparison that never ran as "nothing ahead" is how a deletion verdict gets manufactured, so those
+ * fail closed instead.
+ */
+const UNCOMPARABLE_GIT_ERROR = /no upstream|unknown revision|ambiguous argument|bad revision|does not have any commits yet/i;
+
+/**
  * Evaluates whether an Orca worktree is safe to delete. Fails closed on any ambiguity or execution failure.
  */
 export async function checkWorktreeSafety(
 	worktreeSelectorOrPath: string,
 	branch?: string,
 	cwd?: string,
+	options?: { timeoutMs?: number },
 ): Promise<OrcaWorktreeSafetyResult> {
 	const worktreePath = normalizeWorktreePath(worktreeSelectorOrPath, cwd);
+	// Every git call below gates a deletion, so each one is bounded. An unbounded `git status` on a
+	// locked index parks the tool call forever, which is at least honest; what must not happen is a
+	// failed comparison being read as "nothing unpushed" - see `UNCOMPARABLE_GIT_ERROR`.
+	const timeoutMs = options?.timeoutMs ?? READ_TIMEOUT_MS;
 
 	if (!fs.existsSync(worktreePath)) {
 		return {
@@ -347,23 +362,22 @@ export async function checkWorktreeSafety(
 	}
 
 	// 1. Check uncommitted changes (fail closed on git error)
-	try {
-		const { stdout } = await execFileAsync("git", ["status", "--porcelain"], { cwd: worktreePath });
-		if (stdout.trim().length > 0) {
-			return {
-				safe: false,
-				reason: "Worktree has uncommitted git changes",
-				worktreePath,
-				branch,
-				uncommitted: true,
-			};
-		}
-	} catch (err: any) {
+	const status = await runText("git", ["status", "--porcelain"], { cwd: worktreePath, timeoutMs });
+	if (!status.ok) {
 		return {
 			safe: false,
-			reason: `Failed to verify git status: ${err?.message || String(err)}`,
+			reason: `Failed to verify git status: ${failureText(status)}`,
 			worktreePath,
 			branch,
+		};
+	}
+	if (status.data) {
+		return {
+			safe: false,
+			reason: "Worktree has uncommitted git changes",
+			worktreePath,
+			branch,
+			uncommitted: true,
 		};
 	}
 
@@ -431,13 +445,14 @@ export async function checkWorktreeSafety(
 	if (targetBranch) {
 		let unpushedChecked = false;
 
+		/** Commits on HEAD that `spec` does not have; empty output means genuinely nothing ahead. */
+		const aheadOf = (spec: string) => runText("git", ["log", spec, "--oneline"], { cwd: worktreePath, timeoutMs });
+
 		// 3a. Check against tracking upstream if set
-		try {
-			const { stdout: diffOut } = await execFileAsync("git", ["log", "@{u}..HEAD", "--oneline"], {
-				cwd: worktreePath,
-			});
+		const upstream = await aheadOf("@{u}..HEAD");
+		if (upstream.ok) {
 			unpushedChecked = true;
-			if (diffOut.trim().length > 0) {
+			if (upstream.data) {
 				return {
 					safe: false,
 					reason: "Worktree branch has unpushed commits ahead of upstream",
@@ -447,18 +462,25 @@ export async function checkWorktreeSafety(
 					prState,
 				};
 			}
-		} catch {
-			// No upstream configured for branch @{u}
+		} else if (!UNCOMPARABLE_GIT_ERROR.test(failureText(upstream))) {
+			// A timeout or a locked index is not "no upstream". The old `catch {}` made them the same
+			// thing, and the difference is whether the next step concludes "nothing ahead".
+			return {
+				safe: false,
+				reason: `Could not compare against upstream: ${failureText(upstream)}`,
+				worktreePath,
+				branch: targetBranch,
+				unpushed: true,
+				prState,
+			};
 		}
 
 		// 3b. Check against origin remote branch if origin/<branch> exists
 		if (!unpushedChecked) {
-			try {
-				const { stdout: remoteBranchOut } = await execFileAsync("git", ["log", `origin/${targetBranch}..HEAD`, "--oneline"], {
-					cwd: worktreePath,
-				});
+			const remote = await aheadOf(`origin/${targetBranch}..HEAD`);
+			if (remote.ok) {
 				unpushedChecked = true;
-				if (remoteBranchOut.trim().length > 0) {
+				if (remote.data) {
 					return {
 						safe: false,
 						reason: `Worktree branch has unpushed commits ahead of origin/${targetBranch}`,
@@ -468,8 +490,15 @@ export async function checkWorktreeSafety(
 						prState,
 					};
 				}
-			} catch {
-				// origin/<branch> not present
+			} else if (!UNCOMPARABLE_GIT_ERROR.test(failureText(remote))) {
+				return {
+					safe: false,
+					reason: `Could not compare against origin/${targetBranch}: ${failureText(remote)}`,
+					worktreePath,
+					branch: targetBranch,
+					unpushed: true,
+					prState,
+				};
 			}
 		}
 
@@ -478,25 +507,33 @@ export async function checkWorktreeSafety(
 			const candidateBases = ["origin/main", "origin/master", "main", "master"];
 			let foundBase = false;
 			for (const base of candidateBases) {
-				try {
-					await execFileAsync("git", ["rev-parse", "--verify", base], { cwd: worktreePath });
-					const { stdout: baseDiff } = await execFileAsync("git", ["log", `${base}..HEAD`, "--oneline"], {
-						cwd: worktreePath,
-					});
-					foundBase = true;
-					unpushedChecked = true;
-					if (baseDiff.trim().length > 0) {
-						return {
-							safe: false,
-							reason: `Worktree branch has unpushed commits ahead of ${base}`,
-							worktreePath,
-							branch: targetBranch,
-							unpushed: true,
-							prState,
-						};
-					}
-					break;
-				} catch {}
+				const verified = await runText("git", ["rev-parse", "--verify", base], { cwd: worktreePath, timeoutMs });
+				if (!verified.ok) continue; // that base does not exist here; try the next candidate
+				const baseDiff = await aheadOf(`${base}..HEAD`);
+				if (!baseDiff.ok) {
+					if (UNCOMPARABLE_GIT_ERROR.test(failureText(baseDiff))) continue;
+					return {
+						safe: false,
+						reason: `Could not compare against ${base}: ${failureText(baseDiff)}`,
+						worktreePath,
+						branch: targetBranch,
+						unpushed: true,
+						prState,
+					};
+				}
+				foundBase = true;
+				unpushedChecked = true;
+				if (baseDiff.data) {
+					return {
+						safe: false,
+						reason: `Worktree branch has unpushed commits ahead of ${base}`,
+						worktreePath,
+						branch: targetBranch,
+						unpushed: true,
+						prState,
+					};
+				}
+				break;
 			}
 
 			if (!foundBase) {
