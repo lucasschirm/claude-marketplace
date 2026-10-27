@@ -1,0 +1,38 @@
+{
+	"sourceRun": "t11-failure-modes",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t11-failure-modes/agy.log --dangerously-skip-permissions -p=",
+	"inputLines": [
+		"{\"event\":\"user\",\"message\":{\"content\":\"Make five separate run_command tool calls, one at a time, and continue even if one fails: touch fA.txt ; touch fB.txt ; touch fC.txt ; touch fD.txt ; touch fE.txt . Then reply with one line per command: name and the exact error text if any.\"}}"
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t11-failure-modes/agy.log --dangerously-skip-permissions -p=",
+		"cwd: <SPIKE>/repos/r11",
+		"0.00 >> {\"event\":\"user\",\"message\":{\"content\":\"Make five separate run_command tool calls, one at a time, and continue even if one fails: touch fA.txt ; touch fB.txt ; touch fC.txt ; touch fD.txt ; touch fE.txt . Then reply with one line per command: name and the exact error text if any.\"}}",
+		"2.43 init",
+		"2.49 step_update user_input/DONE",
+		"8.83 step_update agent_response/DONE",
+		"8.83 step_update tool/ACTIVE run_command",
+		"12.83 step_update tool/ERROR run_command",
+		"17.59 step_update agent_response/DONE",
+		"17.59 step_update tool/ACTIVE run_command",
+		"17.61 step_update tool/ERROR run_command",
+		"20.16 step_update agent_response/DONE",
+		"20.16 step_update tool/ACTIVE run_command",
+		"20.18 step_update tool/ERROR run_command",
+		"21.95 step_update agent_response/DONE",
+		"21.95 step_update tool/ACTIVE run_command",
+		"21.97 step_update tool/ERROR run_command",
+		"23.88 step_update agent_response/DONE",
+		"23.88 step_update tool/ACTIVE run_command",
+		"23.93 step_update tool/DONE run_command",
+		"27.14 step_update agent_response/DONE \"\\n\"",
+		"27.14 result {\"conversation_id\":\"e99e8907-31d9-47c4-84de-f56870af1b83\",\"status\":\"SUCCESS\",\"response\":\"touch fA.txt: Encountered error in tool execution: JSON hook \\\"jsonhook__spike-r11_PreToolUse_0_0\\\" failed: command failed: signal: killed, stderr: \\ntouch fB.txt: Encountered error in tool execution: JSON hook ",
+		"27.35 close stdin",
+		"27.60 exit code=0 sig=null",
+		""
+	]
+}

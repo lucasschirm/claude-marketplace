@@ -1,0 +1,24 @@
+{
+	"sourceRun": "t8-skipperm-fakehome",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t8-skipperm-fakehome/agy.log --dangerously-skip-permissions -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: touch t8.txt  then reply OK.\"}}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t8-skipperm-fakehome/agy.log --dangerously-skip-permissions -p=",
+		"cwd: <SPIKE>/repos/r8",
+		"0.00 >> {\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: touch t8.txt  then reply OK.\"}}",
+		"9.12 init",
+		"9.17 step_update user_input/DONE",
+		"11.47 step_update agent_response/DONE",
+		"11.47 step_update tool/ACTIVE run_command",
+		"11.54 step_update tool/DONE run_command",
+		"13.86 step_update agent_response/DONE \"\\n\"",
+		"13.88 result {\"conversation_id\":\"c57d23e0-6b35-4a3c-9c74-ff5149a1916b\",\"status\":\"SUCCESS\",\"response\":\"OK\\n\",\"duration_seconds\":4.73511634,\"num_turns\":1,\"usage\":{\"input_tokens\":15151,\"output_tokens\":43,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":15194}}",
+		"14.09 close stdin",
+		"14.27 exit code=0 sig=null",
+		""
+	]
+}

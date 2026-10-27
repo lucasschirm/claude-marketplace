@@ -1,0 +1,23 @@
+{
+	"sourceRun": "f3-sigint-during-tool",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f3-sigint-during-tool/agy.log --dangerously-skip-permissions -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: sleep 45  and wait for it, then reply DONE.\"}}"],
+	"exitCode": "1",
+	"signal": "null",
+	"stderr": "error: interrupted\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f3-sigint-during-tool/agy.log --dangerously-skip-permissions -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.00 >> {\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: sleep 45  and wait for it, then reply DONE.\"}}",
+		"8.98 init",
+		"9.01 step_update user_input/DONE",
+		"11.38 step_update agent_response/DONE",
+		"11.38 step_update tool/ACTIVE run_command",
+		"14.01 SIGINT",
+		"14.02 result {\"conversation_id\":\"f9570c61-4a3e-42d0-aab0-c7046bff5554\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"interrupted\",\"duration_seconds\":5.027963975,\"num_turns\":1,\"usage\":{\"input_tokens\":7514,\"output_tokens\":47,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":7561}}",
+		"14.18 exit code=1 sig=null",
+		"14.22 close stdin",
+		""
+	]
+}

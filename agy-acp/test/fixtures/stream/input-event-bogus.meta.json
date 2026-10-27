@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i07-event-bogus",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i07-event-bogus/agy.log -p=",
+	"inputLines": ["{\"event\":\"bogus\"}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"bogus\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i07-event-bogus/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"bogus\"}",
+		"2.59 init",
+		"12.02 closeAfterMs: close stdin",
+		"12.10 exit code=0 sig=null",
+		""
+	]
+}

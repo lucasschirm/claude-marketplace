@@ -1,0 +1,24 @@
+{
+	"sourceRun": "f4-resume-conversation",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f4-resume-conversation/agy.log --conversation 082c098f-2c40-438a-a000-6e0f83f234da -p=",
+	"inputLines": [
+		"{\"event\":\"user\",\"message\":{\"content\":\"What word did I ask you to remember earlier? Reply with just the word.\"}}"
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f4-resume-conversation/agy.log --conversation 082c098f-2c40-438a-a000-6e0f83f234da -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"What word did I ask you to remember earlier? Reply with just the word.\"}}",
+		"2.54 init",
+		"2.60 step_update user_input/DONE",
+		"2.62 step_update system_message/DONE",
+		"4.44 step_update agent_response/DONE \"\\n\"",
+		"4.46 result {\"conversation_id\":\"082c098f-2c40-438a-a000-6e0f83f234da\",\"status\":\"SUCCESS\",\"response\":\"ZEBRA\\n\",\"duration_seconds\":28.491377337,\"num_turns\":4,\"usage\":{\"input_tokens\":29560,\"output_tokens\":7,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":29567}}",
+		"4.66 close stdin",
+		"5.35 exit code=0 sig=null",
+		""
+	]
+}

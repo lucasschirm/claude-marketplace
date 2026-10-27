@@ -1,0 +1,18 @@
+{
+	"sourceRun": "f5-bad-model",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-nonexistent-xyz --log-file <SPIKE>/runs/f5-bad-model/agy.log -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"Reply with exactly: PONG\"}}"],
+	"exitCode": "1",
+	"signal": "null",
+	"stderr": "error: invalid model selection (--model \"gemini-nonexistent-xyz\" --effort \"\"): model gemini-nonexistent-xyz is not recognized as a known model or custom model in settings\nAvailable models:\n  Gemini 4 Argon (Medium)\n  Gemini 4 Argon (High)\n  Gemini 4 Argon (Low)\n  Gemini 3.8 Flash (High)\n  Gemini 3.8 Flash (Medium)\n  Gemini 3.8 Flash (Low)\n  Claude Opus 5.5 (Low)\n  Claude Opus 5.5 (Medium)\n  Claude Opus 5.5 (High)\n  Claude Sonnet 5.5 (Low)\n  Claude Sonnet 5.5 (Medium)\n  Claude Sonnet 5.5 (High)\n  GPT-OSS 120B (Medium)\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-nonexistent-xyz --log-file <SPIKE>/runs/f5-bad-model/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"Reply with exactly: PONG\"}}",
+		"8.37 result {\"conversation_id\":\"\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"invalid model selection (--model \\\"gemini-nonexistent-xyz\\\" --effort \\\"\\\"): model gemini-nonexistent-xyz is not recognized as a known model or custom model in settings\\nAvailable models:\\n  Gemini 4 Argon (Medium)\\n  Gemini 4 Argon (High)",
+		"8.57 close stdin",
+		"9.07 exit code=1 sig=null",
+		""
+	]
+}

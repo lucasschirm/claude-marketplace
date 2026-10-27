@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i16-event-step_update",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i16-event-step_update/agy.log -p=",
+	"inputLines": ["{\"event\":\"step_update\"}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"step_update\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i16-event-step_update/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"step_update\"}",
+		"1.78 init",
+		"12.02 closeAfterMs: close stdin",
+		"15.37 exit code=0 sig=null",
+		""
+	]
+}

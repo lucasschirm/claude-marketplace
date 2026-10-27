@@ -1,0 +1,24 @@
+{
+	"sourceRun": "t17-order-and-overwrite",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t17-order-and-overwrite/agy.log --dangerously-skip-permissions --add-dir <SPIKE>/repos/zz-bridge -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: touch t17.txt  then reply OK.\"}}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t17-order-and-overwrite/agy.log --dangerously-skip-permissions --add-dir <SPIKE>/repos/zz-bridge -p=",
+		"cwd: <SPIKE>/repos/r14",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: touch t17.txt  then reply OK.\"}}",
+		"2.57 init",
+		"2.63 step_update user_input/DONE",
+		"5.34 step_update agent_response/DONE",
+		"5.34 step_update tool/ACTIVE run_command",
+		"5.41 step_update tool/DONE run_command",
+		"7.16 step_update agent_response/DONE \"\\n\"",
+		"7.16 result {\"conversation_id\":\"0703705a-adef-4581-8743-216620088799\",\"status\":\"SUCCESS\",\"response\":\"OK\\n\",\"duration_seconds\":4.553913209,\"num_turns\":1,\"usage\":{\"input_tokens\":15329,\"output_tokens\":44,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":15373}}",
+		"7.36 close stdin",
+		"12.39 exit code=0 sig=null",
+		""
+	]
+}

@@ -1,0 +1,20 @@
+{
+	"sourceRun": "i03-user-missing-message",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i03-user-missing-message/agy.log -p=",
+	"inputLines": ["{\"event\":\"user\"}"],
+	"exitCode": "1",
+	"signal": "null",
+	"stderr": "error: stream input \"user\" message is missing the \"message\" field\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i03-user-missing-message/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"user\"}",
+		"4.98 init",
+		"4.98 result {\"conversation_id\":\"a8e97ed5-406b-495f-864d-cb512dd5dfed\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"stream input \\\"user\\\" message is missing the \\\"message\\\" field\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":0}",
+		"5.18 close stdin",
+		"5.68 exit code=1 sig=null",
+		"12.01 closeAfterMs: close stdin",
+		""
+	]
+}

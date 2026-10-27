@@ -1,0 +1,34 @@
+{
+	"sourceRun": "f8-midturn-message",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f8-midturn-message/agy.log --dangerously-skip-permissions -p=",
+	"inputLines": [
+		"{\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: sleep 12  and wait for it, then reply DONE1.\"}}",
+		"{\"event\":\"user\",\"message\":{\"content\":\"Also include the word MIDTURN in your reply.\"}}"
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f8-midturn-message/agy.log --dangerously-skip-permissions -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: sleep 12  and wait for it, then reply DONE1.\"}}",
+		"3.27 init",
+		"3.31 step_update user_input/DONE",
+		"5.78 step_update agent_response/DONE",
+		"5.78 step_update tool/ACTIVE run_command",
+		"17.02 >>(extra) {\"event\":\"user\",\"message\":{\"content\":\"Also include the word MIDTURN in your reply.\"}}",
+		"17.77 step_update tool/DONE run_command",
+		"18.43 step_update agent_response/DONE \"\\n\"",
+		"18.43 step_update system_message/DONE",
+		"26.16 step_update agent_response/DONE \"\\n\"",
+		"26.16 result {\"conversation_id\":\"20591dcd-39c8-4c76-8051-3f2926db1703\",\"status\":\"SUCCESS\",\"response\":\"Running `sleep 12` in the background. Waiting for it to finish...\\nDONE1\\n\",\"duration_seconds\":22.869119955,\"num_turns\":1,\"usage\":{\"input_tokens\":23531,\"output_tokens\":57,\"thinking_tokens\":0,\"cache_read_tokens\":",
+		"26.19 step_update user_input/DONE",
+		"26.36 close stdin",
+		"35.38 step_update agent_response/DONE \"\\n\"",
+		"35.38 result {\"conversation_id\":\"20591dcd-39c8-4c76-8051-3f2926db1703\",\"status\":\"SUCCESS\",\"response\":\"DONE1 MIDTURN\\n\",\"duration_seconds\":32.081628967,\"num_turns\":2,\"usage\":{\"input_tokens\":31776,\"output_tokens\":61,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":31837}}",
+		"35.58 close stdin",
+		"36.57 exit code=0 sig=null",
+		""
+	]
+}

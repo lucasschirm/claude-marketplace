@@ -1,0 +1,19 @@
+{
+	"sourceRun": "z2-slash-hooks",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/z2-slash-hooks/agy.log -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"/hooks\"}}"],
+	"exitCode": "2",
+	"signal": "null",
+	"stderr": "error: /hooks is answered by the CLI itself and is unavailable with --input-format stream-json; run it as its own --print /hooks invocation\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/z2-slash-hooks/agy.log -p=",
+		"cwd: <SPIKE>/repos/r1",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"/hooks\"}}",
+		"2.21 init",
+		"2.21 result {\"conversation_id\":\"35b66548-9633-47be-a0b2-bf35ccf2b83a\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"/hooks is answered by the CLI itself and is unavailable with --input-format stream-json; run it as its own --print /hooks invocation\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output",
+		"2.41 close stdin",
+		"2.85 exit code=2 sig=null",
+		""
+	]
+}

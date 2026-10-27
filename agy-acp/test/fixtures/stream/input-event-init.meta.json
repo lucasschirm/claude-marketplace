@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i15-event-init",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i15-event-init/agy.log -p=",
+	"inputLines": ["{\"event\":\"init\"}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"init\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i15-event-init/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"init\"}",
+		"4.95 init",
+		"12.02 closeAfterMs: close stdin",
+		"14.13 exit code=0 sig=null",
+		""
+	]
+}

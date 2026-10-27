@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i09-event-control",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i09-event-control/agy.log -p=",
+	"inputLines": ["{\"event\":\"control\"}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"control\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i09-event-control/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"control\"}",
+		"2.17 init",
+		"12.02 closeAfterMs: close stdin",
+		"15.42 exit code=0 sig=null",
+		""
+	]
+}

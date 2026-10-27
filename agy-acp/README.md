@@ -10,15 +10,44 @@ talks ACP to `devin acp` — can spawn it and hand work to Antigravity.
 
 ## Status
 
-Early scaffold: the transport and the `initialize` handshake are implemented. `session/new`,
-`session/prompt`, permissions and the rest of the ACP surface land in the follow-up issues of
-[lucasschirm/claude-marketplace#49](https://github.com/lucasschirm/claude-marketplace/issues/49).
-Until then every method but `initialize` is answered with `-32601`.
+The transport, the `initialize` handshake, and the **agy process driver** (the `AgyProcess` in
+`src/agy/`, driven in tests by the fixture-replaying fake `agy` under `test/`) are implemented.
+`session/new`, `session/prompt`, permissions and the rest of the ACP surface land in the
+follow-up issues of
+[lucasschirm/claude-marketplace#49](https://github.com/lucasschirm/claude-marketplace/issues/49);
+until then every method but `initialize` is answered with `-32601`.
+
+## The agy process driver
+
+The process model, from the spike (agy 1.4.2):
+
+- launched as `agy --input-format stream-json --output-format stream-json -p= [flags]`;
+- its `conversation_id` comes from the `init` event, which is only emitted **after the first
+  stdin line** - so `probe()` sends an event agy ignores and gets an id without a model turn;
+- stdout is newline-delimited JSON events (split on `"\n"` only, never readline);
+- `result.usage`, `num_turns` and `duration_seconds` are cumulative per process and per resumed
+  conversation - the driver emits per-turn deltas and keeps the raw cumulative state under
+  `result.cumulative` for the next process of a `--conversation` resume;
+- SIGINT cancels the running turn (agy reports `error: "interrupted"` and kills its own tool
+  children); closing stdin does **not** stop a running turn, so `dispose()` escalates:
+  close stdin, `graceMs`, SIGTERM the process group, `termMs`, SIGKILL - nothing outlives it;
+- one child per session, in its own process group, with a controlled env.
+
+The contract types for `init` / `step_update` / `result` live in `src/agy/contract.ts` and are
+pinned against the recorded fixtures: every field in `test/fixtures/stream/field-inventory.json`
+has a typed accessor, and unknown event types or fields are kept as `raw` rather than fatal
+(agy 1.4.2 is not version-gated on a strict schema - see `checkAgyVersion`).
 
 ## Requirements
 
 - Node.js >= 23.6 (runs the TypeScript sources directly; there is no build step)
-- `agy` CLI on `PATH` — tested against 1.4.2 (needed once session support lands)
+- POSIX: the driver signals the child's process group with `SIGINT`/`SIGTERM`/`SIGKILL`, which
+  Windows `process.kill` does not map to (a `SIGINT` there terminates the process outright);
+  the process-group lifetime model is a POSIX one
+- `agy` CLI on `PATH` - tested against 1.4.2. The package exports `checkAgyVersion` for the
+  session layer to call before launch: it reports an untested version via a `warning` field
+  and sets `strictRefusal: true` when `AGY_ACP_STRICT_VERSION=1` - the driver itself does
+  not invoke it yet
 
 Zero npm runtime dependencies: Node built-ins only.
 

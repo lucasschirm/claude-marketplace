@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i13-event-tool_result",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i13-event-tool_result/agy.log -p=",
+	"inputLines": ["{\"event\":\"tool_result\"}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"tool_result\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i13-event-tool_result/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"tool_result\"}",
+		"4.68 init",
+		"12.01 closeAfterMs: close stdin",
+		"17.03 exit code=0 sig=null",
+		""
+	]
+}
