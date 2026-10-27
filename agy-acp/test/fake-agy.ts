@@ -63,7 +63,7 @@ const lines = fs
 	.readFileSync(path.join(STREAM_DIR, `${name}.stdout.ndjson`), "utf8")
 	.split("\n")
 	.filter((l) => l !== "");
-const exitCode = Number(meta.exitCode ?? "0");
+let exitCode = Number(meta.exitCode ?? "0");
 const inputLines: string[] = meta.inputLines ?? [];
 const initDelayMs = Number(process.env.FAKE_AGY_INIT_DELAY_MS ?? 20);
 const lineGapMs = Number(process.env.FAKE_AGY_LINE_GAP_MS ?? 8);
@@ -441,11 +441,12 @@ process.on("SIGINT", () => {
 		return;
 	}
 	// Mid-turn (or before the first turn): emit the interrupted result real agy would emit, then
-	// exit on its own - the record's exit precedes the parent's stdin close.
+	// exit on its own with 1 - the only observed interrupt (the record) exited 1.
 	const synthetic =
 		'{"event":"result","result":{"conversation_id":"' +
 		`${conversationId}","status":"ERROR","response":"","error":"interrupted","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}`;
 	emitLine(synthetic);
+	exitCode = 1;
 	settle();
 });
 

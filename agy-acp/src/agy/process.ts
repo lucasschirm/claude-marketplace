@@ -10,7 +10,6 @@ const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 const DEFAULT_STDERR_BYTES = 64 * 1024;
 const DEFAULT_GRACE_MS = 3_000;
 const DEFAULT_TERM_MS = 1_000;
-
 /** One `agy` child in its own process group: emits "event" per decoded line, and "exit"
  * (AgyExitInfo) exactly once - after stdio is drained, also on a spawn failure. */
 export class AgyProcess extends EventEmitter {
@@ -90,7 +89,6 @@ export class AgyProcess extends EventEmitter {
 	get cumulative(): AgyCumulative {
 		return this.cumulativeState;
 	}
-
 	get stderrTail(): string {
 		return this.stderrBuf;
 	}
@@ -116,8 +114,7 @@ export class AgyProcess extends EventEmitter {
 		if (!stdin.write(`${line}\n`)) this.log("stdin backpressure - continuing (stream lines are small)");
 	}
 
-	/** Resolves with the init conversation_id via a probe event agy ignores; a timeout carries
-	 * the stderr tail and allows a retry. */
+	/** Resolves with the init conversation_id via a probe event agy ignores; a timeout carries the stderr tail and allows a retry. */
 	probe(timeoutMs?: number): Promise<string> {
 		if (this.conversationIdValue !== null) return Promise.resolve(this.conversationIdValue);
 		if (this.exitedFlag) return Promise.reject(new Error(`agy has exited (code=${this.exitInfoValue?.code ?? "unknown"}); cannot probe`));
@@ -215,10 +212,11 @@ export class AgyProcess extends EventEmitter {
 	private onExit(code: number | null, signal: NodeJS.Signals | null): void {
 		if (this.exitedFlag) return;
 		this.exitedFlag = true;
-		this.appendStderr(this.stderrDecoder.decode()); // flush any trailing partial sequence
+		this.appendStderr(this.stderrDecoder.decode());
 		this.exitInfoValue = { code, signal, stderrTail: this.stderrTail };
-		const detail = `agy exited before init (code=${code ?? "none"} signal=${signal ?? "none"}); stderr: ${this.stderrTail.slice(0, 400)}`;
-		this.rejectPendingProbe(detail);
+		this.rejectPendingProbe(
+			`agy exited before init (code=${code ?? "none"} signal=${signal ?? "none"}); stderr: ${this.stderrTail.slice(0, 400)}`,
+		);
 		this.log(`agy exited code=${code} signal=${signal ?? "none"}`);
 		this.emit("exit", this.exitInfoValue);
 	}
@@ -227,6 +225,8 @@ export class AgyProcess extends EventEmitter {
 		const pending = this.pendingProbe;
 		if (!pending) return;
 		this.pendingProbe = null;
+		// The drifted-init case: the child is still alive, so clear the cached promise for a retry.
+		this.probePromise = null;
 		clearTimeout(pending.timer);
 		pending.reject(new Error(message));
 	}
@@ -245,8 +245,7 @@ export class AgyProcess extends EventEmitter {
 
 	private appendStderr(chunk: string): void {
 		this.stderrBuf += chunk;
-		// The budget is in bytes; trim one whole code point at a time so a multi-byte character
-		// (including astral, two UTF-16 units) never straddles the cut.
+		// The budget is in bytes; trim one whole code point at a time so a multi-byte character never straddles the cut.
 		while (Buffer.byteLength(this.stderrBuf, "utf8") > this.stderrLimit && this.stderrBuf.length > 0) {
 			const cp = this.stderrBuf.codePointAt(0) ?? 0;
 			this.stderrBuf = this.stderrBuf.slice(cp > 0xffff ? 2 : 1);

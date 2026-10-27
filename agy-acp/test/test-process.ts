@@ -297,7 +297,11 @@ test("SIGINT cancels the turn: interrupted result, exit 1, stderr tail captured"
 		// Wait until every recorded line before the interrupted result is out, so the fake is in
 		// its recorded-replay state (waitingForSignal) when SIGINT lands - not mid-turn, where it
 		// would emit the synthetic zero-counter result instead.
-		await waitFor("the replay to reach the interrupted result", 5000, () => h.events.length >= 4);
+		await waitFor(
+			"the replay to reach the interrupted result",
+			5000,
+			() => h.events.length >= fixtureLines("interrupted-sigint").length - 1,
+		);
 		h.driver.interrupt();
 		const interrupted = await waitFor(
 			"the interrupted result",
@@ -488,5 +492,21 @@ test("version check: tested, untested, and strict refusal", async () => {
 		}
 	} finally {
 		delete process.env.FAKE_AGY_VERSION;
+	}
+});
+
+test("EOF mid-turn: a running turn survives, finishes, and the recorded exit lands", async () => {
+	const h = startDriver("midturn-message-queued", { model: "gemini-3.8-flash-low", skipPermissions: true });
+	try {
+		await h.driver.probe(3000);
+		const [first, second] = fixtureMeta("midturn-message-queued").inputLines ?? [];
+		h.driver.send(promptOf(first));
+		await waitFor("turn one's result", 5000, () => results(h).length >= 1);
+		h.driver.send(promptOf(second)); // turn two starts; its lines take a while to emit
+		const exit = await h.driver.dispose(); // EOF lands mid-turn-two, like the record's 26.36
+		assert.strictEqual(exit.code, 0, "the record: the running turn finished, then agy exited 0");
+		assert.strictEqual(results(h).length, 2, "the turn that was running when EOF landed finished");
+	} finally {
+		await h.driver.dispose();
 	}
 });
