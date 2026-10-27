@@ -1,0 +1,107 @@
+{
+	"fixture": "simple-multiturn-textblocks",
+	"turns": [
+		{
+			"prompt": "Reply with exactly: PONG",
+			"updates": [
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "PONG"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 7242,
+						"output_tokens": 2,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 7244
+					},
+					"numTurns": 1,
+					"durationSeconds": 2.873072242
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		},
+		{
+			"prompt": "Remember the word ZEBRA. Reply with exactly: OK",
+			"updates": [
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "OK"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 7317,
+						"output_tokens": 1,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 7318
+					},
+					"numTurns": 1,
+					"durationSeconds": 1.9527264899999999
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		},
+		{
+			"prompt": "What word did I ask you to remember? Reply with just the word.",
+			"updates": [
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ZEBRA"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 7394,
+						"output_tokens": 2,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 7396
+					},
+					"numTurns": 1,
+					"durationSeconds": 2.320025265
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

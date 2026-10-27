@@ -1,0 +1,526 @@
+{
+	"fixture": "tool-hook-decision-values",
+	"turns": [
+		{
+			"prompt": "Make six separate run_command tool calls, one at a time, and continue even if one fails: touch gA.txt ; touch gB.txt ; touch gC.txt ; touch gD.txt ; touch gE.txt ; touch gF.txt . Then reply with one line per command: name and the exact error text if any.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:2",
+					"title": "run_command: touch gA.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch gA.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:2",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "failed to unmarshal result from hook jsonhook__spike-r12_PostToolUse_0_0 via protojson: {\"decision\":\"ask\",\"reason\":\"ask reason\"}: proto: (line 1:2): unknown field \"decision\""
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:4",
+					"title": "run_command: touch gB.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch gB.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:4",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "failed to unmarshal result from hook jsonhook__spike-r12_PostToolUse_0_0 via protojson: {\"decision\":\"force_ask\",\"reason\":\"force_ask reason\"}: proto: (line 1:2): unknown field \"decision\""
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:6",
+					"title": "run_command: touch gC.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch gC.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:6",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "failed to unmarshal result from hook jsonhook__spike-r12_PostToolUse_0_0 via protojson: {\"decision\":\"deny_unless_prior_grant\",\"reason\":\"dupg reason\"}: proto: (line 1:2): unknown field \"decision\""
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:8",
+					"title": "run_command: touch gD.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch gD.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:8",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "tool call denied by pre-tool hook: SPIKE legacy denyReason"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:10",
+					"title": "run_command: touch gE.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch gE.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:10",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "failed to unmarshal result from hook jsonhook__spike-r12_PostToolUse_0_0 via protojson: {\"decision\":\"allow\",\"overwrite\":{\"CommandLine\":\"touch gE-rewritten.txt\"}}: proto: (line 1:2): unknown field \"decision\""
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:12",
+					"title": "run_command: touch gF.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch gF.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb9cc2f7-64dd-40fc-a4a0-23105a729b29:12",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "unsupported hook decision: bogus-value"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "`touch"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " gA.txt`: Encountered error in tool "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "execution: failed to unm"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "arshal resul"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "t from"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " hook jsonhook__spike-r12_PostToolUs"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "e_0_0 via protojson: {\"d"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ecision\":\""
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ask\",\"reason\":\"ask reaso"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "n\"}: proto: (line 1:2): "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "unknown fiel"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "d \"decision\"\n"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "`touch gB.txt`: Encountered error in"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " tool execution: failed "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "to unmarshal"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " result from hook jsonho"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ok__spike"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "-r12_PostToolUse_0_0 via protojson: "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "{\"decision\":\"force_ask\","
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\"reason"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\":\"force_ask reason\"}: p"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "roto: (line 1:2): unknow"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "n field \"decision\"\n`touc"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "h"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " gC.txt`: Encountered error in tool execution: f"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ailed to unm"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "arshal result from hook "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "jsonhook__sp"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ike-"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "r12_PostToolUse_0_0 via protojson: {"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\"decision\":\""
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "deny_unless_prior_grant"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\",\"reason\":\"dupg reason\""
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "}: proto: (line 1:2): un"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "known field \"decision\"\n"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "`touch gD.txt`: Encountered error in"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " tool execut"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ion: tool call denied by"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " pre-tool ho"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ok: SPIKE"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " legacy denyReason\n`touch gE.txt`: Encountered e"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "rror in tool"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " execution: failed to un"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "marshal resu"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "lt from hook jsonhook__spike-r12_PostToolUs"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "e_0_0 via pr"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "otojson: {\"decision\":\""
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "allow\",\"overwrite\":{\"CommandLine\":\"t"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ouch gE-rewritten.txt\"}}: proto: (li"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ne 1:2): unknown field \"decision\"\n`touch gF.txt`: Encountered error in t"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ool execution: unsupported hook decision: bogus-value\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 56346,
+						"output_tokens": 583,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 56929
+					},
+					"numTurns": 1,
+					"durationSeconds": 26.181258815
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

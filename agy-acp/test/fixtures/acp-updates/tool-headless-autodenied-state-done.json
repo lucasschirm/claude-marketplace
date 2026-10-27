@@ -1,0 +1,47 @@
+{
+	"fixture": "tool-headless-autodenied-state-done",
+	"turns": [
+		{
+			"prompt": "Run the shell command: touch t1.txt  then reply OK.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "9e728d69-6569-49d0-be5f-a24aa57fc8c3:2",
+					"title": "run_command: touch t1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch t1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "9e728d69-6569-49d0-be5f-a24aa57fc8c3:2",
+					"status": "completed"
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 7249,
+						"output_tokens": 41,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 7290
+					},
+					"numTurns": 1,
+					"durationSeconds": 2.294239685
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "[agy auto-denied 1 action(s) in headless mode: RunCommand]"
+					}
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

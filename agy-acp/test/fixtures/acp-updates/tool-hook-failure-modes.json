@@ -1,0 +1,376 @@
+{
+	"fixture": "tool-hook-failure-modes",
+	"turns": [
+		{
+			"prompt": "Make five separate run_command tool calls, one at a time, and continue even if one fails: touch fA.txt ; touch fB.txt ; touch fC.txt ; touch fD.txt ; touch fE.txt . Then reply with one line per command: name and the exact error text if any.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:2",
+					"title": "run_command: touch fA.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch fA.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:2",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__spike-r11_PreToolUse_0_0\" failed: command failed: signal: killed, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:4",
+					"title": "run_command: touch fB.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch fB.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:4",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__spike-r11_PreToolUse_0_0\" failed: command failed: exit status 1, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:6",
+					"title": "run_command: touch fC.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch fC.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:6",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "failed to unmarshal result from hook jsonhook__spike-r11_PreToolUse_0_0 via protojson: this is not json: proto: syntax error (line 1:1): invalid value this"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:8",
+					"title": "run_command: touch fD.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch fD.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:8",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__spike-r11_PreToolUse_0_0\" failed: command failed: exit status 2, stderr: SPIKE-EXIT2 blocked via exit code 2"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:10",
+					"title": "run_command: touch fE.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch fE.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "e99e8907-31d9-47c4-84de-f56870af1b83:10",
+					"status": "completed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "Command exited with code 0.\n\nNo output from the command."
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "touch f"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "A.txt: Encountered error"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " in tool execution: JSON"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " hook \"jsonhook__spike"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "-r11_PreToolUse_0_0\" fai"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "led: command failed: sig"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "nal: killed,"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " stderr:"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " \ntouch fB.txt: Encounte"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "red error in tool execut"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ion: JSON ho"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ok \"jsonhook__spike-r11"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "_PreToolUse_0_0\" failed: command fai"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "led: exit status 1, stde"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "rr: \ntouch"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " fC.txt: Encountered error in tool e"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "xecution: fa"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "iled to unmarshal result"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " from hook jsonhook__spi"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ke-"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "r11_PreToolUse_0_0 via p"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "rotojson: this is not js"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "on: proto: s"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "yntax error"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " (line 1:1): invalid value this\ntouc"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "h fD.txt: Encountered er"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ror in tool "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "execution:"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " JSON hook \"jsonhook__spike-r11_PreToolUse_0_0\" "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "failed: comm"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "and failed: exit status 2, stderr: SPIKE-EXIT2"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " blocked via exit code 2\ntouch fE.txt: none"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 47617,
+						"output_tokens": 424,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 48041
+					},
+					"numTurns": 1,
+					"durationSeconds": 24.691648431
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

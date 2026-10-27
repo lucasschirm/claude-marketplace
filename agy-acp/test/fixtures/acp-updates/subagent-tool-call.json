@@ -1,0 +1,83 @@
+{
+	"fixture": "subagent-tool-call",
+	"turns": [
+		{
+			"prompt": "Use the invoke_subagent tool to start a subagent and instruct it to run the shell command: touch sub1.txt . Do not run the command yourself. When the subagent finishes, reply DONE.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "835d6f00-0758-4ce4-81c9-2950dcab62d3:2",
+					"title": "invoke_subagent: File Creator",
+					"kind": "other",
+					"status": "pending",
+					"rawInput": {
+						"Role": "File Creator",
+						"TypeName": "self"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "835d6f00-0758-4ce4-81c9-2950dcab62d3:2",
+					"status": "completed"
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "I"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " have invoked the subagent to run the command `touch sub1.txt`. Waiting for it to fi"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "nish.\n"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "[system message]"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "DONE"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 23632,
+						"output_tokens": 78,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 23710
+					},
+					"numTurns": 1,
+					"durationSeconds": 24.45342132
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

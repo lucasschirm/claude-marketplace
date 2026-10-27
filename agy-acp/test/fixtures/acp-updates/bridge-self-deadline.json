@@ -1,0 +1,98 @@
+{
+	"fixture": "bridge-self-deadline",
+	"turns": [
+		{
+			"prompt": "(agy-acp replay: placeholder turn)",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "ff3269d8-3a4f-46f8-b6bf-728a06dab840:2",
+					"title": "run_command: touch pD1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch pD1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "ff3269d8-3a4f-46f8-b6bf-728a06dab840:2",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "tool call denied by pre-tool hook: agy-acp: the user did not answer this permission request within 5 s. Do not retry this action or work around it; stop and ask the user how to proceed."
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "The command"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " `touch pD1.txt` was blocked by the permission p"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "rompt timeout ("
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "`tool call denied by pre-tool hook: "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "agy-acp: the user did not answer this permission request within 5 s`).\n\n"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "How would you like to pr"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "oceed? Should I re-run the command so you can approve the prompt?\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 15348,
+						"output_tokens": 112,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 15460
+					},
+					"numTurns": 1,
+					"durationSeconds": 9.356855661
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

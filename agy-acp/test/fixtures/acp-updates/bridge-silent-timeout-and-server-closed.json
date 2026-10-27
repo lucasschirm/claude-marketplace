@@ -1,0 +1,270 @@
+{
+	"fixture": "bridge-silent-timeout-and-server-closed",
+	"turns": [
+		{
+			"prompt": "(agy-acp replay: placeholder turn)",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:2",
+					"title": "run_command: touch pB1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch pB1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:2",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__agy-acp-20f9c08d1387d067_PreToolUse_0_0\" failed: command failed: signal: killed, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:4",
+					"title": "run_command: touch pB1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch pB1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:4",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__agy-acp-20f9c08d1387d067_PreToolUse_0_0\" failed: command failed: signal: killed, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:6",
+					"title": "write_file: <SPIKE>/repos/protoB/pB1.txt",
+					"kind": "edit",
+					"status": "pending",
+					"rawInput": {
+						"Path": "<SPIKE>/repos/protoB/pB1.txt"
+					},
+					"locations": [
+						{
+							"path": "<SPIKE>/repos/protoB/pB1.txt"
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:6",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "invalid arguments:\n- at '/Content': minLength: got 0, want 1"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:8",
+					"title": "write_file: <SPIKE>/repos/protoB/pB1.txt",
+					"kind": "edit",
+					"status": "pending",
+					"rawInput": {
+						"Path": "<SPIKE>/repos/protoB/pB1.txt"
+					},
+					"locations": [
+						{
+							"path": "<SPIKE>/repos/protoB/pB1.txt"
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:8",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__agy-acp-20f9c08d1387d067_PreToolUse_0_0\" failed: command failed: signal: killed, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:10",
+					"title": "run_command: touch pB1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch pB1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:10",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__agy-acp-20f9c08d1387d067_PreToolUse_0_0\" failed: command failed: signal: killed, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:12",
+					"title": "run_command: touch pB1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch pB1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fd23736a-b50a-4b90-bd7a-169fc25d3529:12",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "JSON hook \"jsonhook__agy-acp-20f9c08d1387d067_PreToolUse_0_0\" failed: command failed: signal: killed, stderr:"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "The command"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " `touch pB1.txt` could not be execut"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ed because a pre-tool ho"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ok (`jsonhoo"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "k"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "__agy-acp-20f9c08d1387d067_Pre"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ToolUse_0_0`) is failing/timing out and blocking"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " tool execut"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ion:\n\n```\nEncountered er"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "ror in"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " tool execution: JSON hook \"jsonhook__agy-acp-20"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "f9c08d1387d067_PreToolUse_0_0\" failed: command failed: signa"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "l: killed, stderr: \n```\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 56855,
+						"output_tokens": 497,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 57352
+					},
+					"numTurns": 1,
+					"durationSeconds": 120.721557854
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

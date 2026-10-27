@@ -8,11 +8,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { INVALID_PARAMS, JsonRpcConnection, RpcError } from "./jsonrpc.ts";
-
-// Keep in sync with agy-acp/package.json (test-package.ts asserts it).
-export const AGY_ACP_VERSION = "0.1.0";
-export const PROTOCOL_VERSION = 1;
+import { startAgyAcpServer, AGY_ACP_VERSION, PROTOCOL_VERSION } from "./server.ts";
+export { AGY_ACP_VERSION, PROTOCOL_VERSION };
 
 const USAGE = `agy-acp ${AGY_ACP_VERSION} - an ACP server for Google's agy CLI
 
@@ -45,24 +42,6 @@ function createLogger(): (line: string) => void {
 	};
 }
 
-function handleInitialize(params: unknown): unknown {
-	const requested = typeof params === "object" && params !== null ? (params as Record<string, unknown>).protocolVersion : undefined;
-	// ACP negotiation: a client asking for a newer version gets the latest we support (the spec's
-	// MUST - the client decides). A version we cannot honour at all is rejected with -32602.
-	if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 1) {
-		throw new RpcError(INVALID_PARAMS, `unsupported protocolVersion ${JSON.stringify(requested)} - agy-acp speaks ${PROTOCOL_VERSION}`);
-	}
-	return {
-		protocolVersion: PROTOCOL_VERSION,
-		agentCapabilities: {
-			loadSession: false,
-			promptCapabilities: { audio: false, embeddedContext: false, image: false },
-		},
-		authMethods: [],
-		agentInfo: { name: "agy-acp", version: AGY_ACP_VERSION },
-	};
-}
-
 const KNOWN_ARGS = new Set(["--help", "-h", "--version", "-v"]);
 
 export function main(args: string[]): void {
@@ -82,11 +61,9 @@ export function main(args: string[]): void {
 	}
 
 	const log = createLogger();
-	const connection = new JsonRpcConnection({ input: process.stdin, output: process.stdout, log });
-	connection.registerMethod("initialize", handleInitialize);
-	connection.onNotification((method) => log(`ignored notification: ${method}`));
-	connection.onClose((reason) => log(`connection closed: ${reason}`));
-	// stdin EOF ends the event loop on its own; nothing else keeps a handle open.
+	startAgyAcpServer({ input: process.stdin, output: process.stdout, log });
+	// stdin EOF ends the event loop on its own (the connection closes, the sessions are disposed,
+	// and their child process groups are killed); nothing else keeps a handle open.
 }
 
 const thisFile = fileURLToPath(import.meta.url);

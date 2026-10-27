@@ -1,0 +1,77 @@
+{
+	"fixture": "tool-hook-denied",
+	"turns": [
+		{
+			"prompt": "Run the shell command: touch t9.txt  then reply OK.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "6e53151c-3c17-47e6-b028-73f2efee3524:2",
+					"title": "run_command: touch t9.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch t9.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "6e53151c-3c17-47e6-b028-73f2efee3524:2",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "tool call denied by pre-tool hook: SPIKE-DENY-8812: blocked by agy-acp user; tell the user the code"
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "The command"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": " execution was denied by a pre-tool hook: `SPIKE-DENY-8812: blocked by a"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "gy-acp user`."
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 15176,
+						"output_tokens": 74,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 15250
+					},
+					"numTurns": 1,
+					"durationSeconds": 4.937838909
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

@@ -57,6 +57,7 @@ test("initialize over stdio is answered, and stdin EOF exits 0", async () => {
 	const prompts = caps.promptCapabilities as Record<string, unknown>;
 	assert.strictEqual(prompts.image, false);
 	assert.strictEqual(prompts.audio, false);
+	assert.strictEqual(prompts.embeddedContext, true, "embedded-text resource blocks are accepted and flattened");
 	assert.deepStrictEqual(result.authMethods, []);
 	assert.deepStrictEqual(result.agentInfo, { name: "agy-acp", version: AGY_ACP_VERSION });
 });
@@ -80,7 +81,7 @@ test("a protocol version we cannot honour at all is rejected cleanly", async () 
 });
 
 test("methods that are not implemented yet get -32601, not silence", async () => {
-	const res = await run([], line({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } }));
+	const res = await run([], line({ jsonrpc: "2.0", id: 1, method: "session/load", params: { sessionId: "s", cwd: "/tmp" } }));
 	assert.strictEqual(res.code, 0);
 	const frame = JSON.parse(res.stdout.trim()) as { error: { code: number } };
 	assert.strictEqual(frame.error.code, -32601);

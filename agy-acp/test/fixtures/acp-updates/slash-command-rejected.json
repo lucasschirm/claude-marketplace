@@ -1,0 +1,15 @@
+{
+	"fixture": "slash-command-rejected",
+	"turns": [
+		{
+			"prompt": "/hooks",
+			"updates": [],
+			"response": {
+				"error": {
+					"code": -32603,
+					"message": "agy turn failed: /hooks is answered by the CLI itself and is unavailable with --input-format stream-json; run it as its own --print /hooks invocation"
+				}
+			}
+		}
+	]
+}

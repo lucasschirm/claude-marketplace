@@ -1,0 +1,63 @@
+{
+	"fixture": "bridge-allow-deny-150s-hold",
+	"turns": [
+		{
+			"prompt": "(agy-acp replay: placeholder turn)",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "fb8baa15-06a3-425a-abcf-3eb5a89ee612:2",
+					"title": "run_command: touch pA1.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch pA1.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "fb8baa15-06a3-425a-abcf-3eb5a89ee612:2",
+					"status": "completed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "Command exited with code 0.\n\nNo output from the command."
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "OK"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 14769,
+						"output_tokens": 45,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 14814
+					},
+					"numTurns": 1,
+					"durationSeconds": 8.09764375
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}
