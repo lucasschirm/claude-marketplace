@@ -131,6 +131,8 @@ export interface AcpToolCall {
 	content?: AcpToolCallContent[];
 	locations?: AcpToolCallLocation[];
 	rawInput?: unknown;
+	/** agy-acp extension: the pending permission state and rewritten-args detection. */
+	_meta?: Record<string, unknown>;
 }
 export interface AcpToolCallUpdate {
 	sessionUpdate: "tool_call_update";
@@ -140,6 +142,8 @@ export interface AcpToolCallUpdate {
 	content?: AcpToolCallContent[];
 	locations?: AcpToolCallLocation[];
 	rawInput?: unknown;
+	/** agy-acp extension: the pending permission state and rewritten-args detection. */
+	_meta?: Record<string, unknown>;
 }
 /** agy-acp extension: the per-turn usage delta (the driver converts the cumulative counters). */
 export interface AcpUsageUpdate {
