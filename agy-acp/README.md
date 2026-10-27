@@ -45,8 +45,9 @@ has a typed accessor, and unknown event types or fields are kept as `raw` rather
   Windows `process.kill` does not map to (a `SIGINT` there terminates the process outright);
   the process-group lifetime model is a POSIX one
 - `agy` CLI on `PATH` - tested against 1.4.2. The package exports `checkAgyVersion` for the
-  session layer to call before launch (it warns on an untested version; `AGY_ACP_STRICT_VERSION=1`
-  refuses instead of warning) - the driver itself does not invoke it yet
+  session layer to call before launch: it reports an untested version via a `warning` field
+  and sets `strictRefusal: true` when `AGY_ACP_STRICT_VERSION=1` - the driver itself does
+  not invoke it yet
 
 Zero npm runtime dependencies: Node built-ins only.
 
