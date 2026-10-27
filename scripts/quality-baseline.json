@@ -15,8 +15,8 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
-    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noExplicitAny": 153,
+    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedFunctionParameters": 1,
@@ -48,7 +48,7 @@
     "agy-acp/src/agy/args.ts": 51,
     "agy-acp/src/agy/contract.ts": 289,
     "agy-acp/src/agy/events.ts": 31,
-    "agy-acp/src/agy/process.ts": 300,
+    "agy-acp/src/agy/process.ts": 299,
     "agy-acp/src/agy/version.ts": 91,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/framing.ts": 81,
@@ -212,6 +212,6 @@
       ]
     }
   ],
-  "generatedFrom": "bf0abcf",
+  "generatedFrom": "91fd35d",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }
