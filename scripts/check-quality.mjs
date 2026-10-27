@@ -517,7 +517,6 @@ const INBOUND_PARSE_ALLOWLIST = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/agy/contract.ts",
 ]);
->>>>>>> f94ba9b (agy-acp 2/11: agy process driver, stream-json contract types, fixture-replaying fake agy)
 
 function countJsonParseOutsideExecLib() {
 	const hits = [];

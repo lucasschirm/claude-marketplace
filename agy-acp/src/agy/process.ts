@@ -1,6 +1,3 @@
-// Driver for one headless `agy` process: probe, send, interrupt, dispose (see the
-// "The agy process driver" section of the README for the process model the spike established).
-
 import { EventEmitter } from "node:events";
 import { spawnProcessGroup } from "../lib/child-process.ts";
 import { DEFAULT_MAX_FRAME_BYTES, FrameDecoder } from "../framing.ts";
@@ -15,12 +12,9 @@ const DEFAULT_GRACE_MS = 3_000;
 const DEFAULT_TERM_MS = 1_000;
 
 /**
- * One `agy` child. Emits:
- *   - "event" (AgyDriverEvent) for every decoded init / step_update / result line;
- *   - "exit" (AgyExitInfo) exactly once, also on a spawn failure.
- *
- * The child runs in its own process group; nothing outlives `dispose()` (or, on a crash of
- * agy-acp itself, the group dies with the session - that cleanup is the server's job).
+ * One `agy` child in its own process group: emits "event" (AgyDriverEvent) per decoded init /
+ * step_update / result line, and "exit" (AgyExitInfo) exactly once - after stdio is drained,
+ * also on a spawn failure. Nothing outlives `dispose()`.
  */
 export class AgyProcess extends EventEmitter {
 	private readonly child: ReturnType<typeof spawnProcessGroup>;
@@ -32,16 +26,26 @@ export class AgyProcess extends EventEmitter {
 	private readonly termMs: number;
 	private cumulativeState: AgyCumulative;
 	private stderrBuf = "";
+	private stderrDecoder = new TextDecoder();
 	private conversationIdValue: string | null = null;
 	private exitedFlag = false;
 	private exitInfoValue: AgyExitInfo | null = null;
 	private spawnErrorValue: Error | null = null;
 	private pendingProbe: { resolve: (id: string) => void; reject: (err: Error) => void; timer: NodeJS.Timeout } | null = null;
+	private probePromise: Promise<string> | null = null;
 	private disposePromise: Promise<AgyExitInfo> | null = null;
 
 	constructor(options: AgyProcessOptions) {
 		super();
-		this.log = options.log ?? (() => {});
+		const userLog = options.log ?? (() => {});
+		// A logger that throws must not take the driver down (jsonrpc.ts wraps the same callback).
+		this.log = (line: string) => {
+			try {
+				userLog(line);
+			} catch {
+				// the logger's own failure is not the driver's to surface
+			}
+		};
 		this.probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
 		this.stderrLimit = options.stderrBytes ?? DEFAULT_STDERR_BYTES;
 		this.graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
@@ -52,34 +56,34 @@ export class AgyProcess extends EventEmitter {
 			command: argv[0],
 			args: argv.slice(1),
 			cwd: options.cwd,
-			// A child that cannot start (ENOENT) reports through "exit" with code null - one terminal event either way.
+			// ENOENT reports through "close" with code null - one terminal event either way.
 			env: options.env ?? process.env,
 		});
 		this.decoder = new FrameDecoder(
 			options.maxLineBytes ?? DEFAULT_MAX_FRAME_BYTES,
 			(line) => this.handleLine(line),
 			(reason) => this.log(`undecodable stdout frame: ${reason}`),
-			(bytes) => this.log(`stdout line exceeds ${bytes} bytes - stopping the stream`),
+			(bytes) => {
+				// A stalled stream would hang the turn forever - kill the child (jsonrpc.ts treats the same condition as fatal).
+				this.log(`stdout line exceeds ${bytes} bytes - killing the child`);
+				this.signalGroup("SIGKILL");
+			},
 		);
-		const stdout = this.child.stdout;
-		const stderr = this.child.stderr;
-		const stdin = this.child.stdin;
+		const { stdout, stderr, stdin } = this.child;
 		if (!stdout || !stderr || !stdin) throw new Error("agy's stdio is not piped - cannot drive it");
 		stdout.on("data", (d: Buffer) => this.decoder.push(d));
-		stderr.on("data", (d: Buffer) => this.appendStderr(d.toString("utf8")));
+		stderr.on("data", (d: Buffer) => this.appendStderr(this.stderrDecoder.decode(d, { stream: true })));
 		for (const stream of [stdout, stderr, stdin]) {
 			stream.on("error", (err: Error) => this.log(`stdio error: ${err.message}`));
 		}
 		this.child.on("error", (err: Error) => this.onSpawnError(err));
-		this.child.on("exit", (code, signal) => this.onExit(code, signal));
+		// "close" (not "exit"): stdio is drained, so the final frame and the stderr tail are in hand first.
+		this.child.on("close", (code, signal) => this.onExit(code, signal));
 	}
-
-	// ------------------------------------------------------------------ reads
 
 	get pid(): number | undefined {
 		return this.child.pid;
 	}
-
 	/** The id from `init`, once it has arrived. */
 	get conversationId(): string | null {
 		return this.conversationIdValue;
@@ -93,22 +97,18 @@ export class AgyProcess extends EventEmitter {
 	get stderrTail(): string {
 		return this.stderrBuf;
 	}
-
 	get exited(): boolean {
 		return this.exitedFlag;
 	}
-
 	get exitInfo(): AgyExitInfo | null {
 		return this.exitInfoValue;
 	}
-
 	get spawnError(): Error | null {
 		return this.spawnErrorValue;
 	}
-
-	/** One user turn, using the content shape the fixtures prove. */
+	/** One user turn, using the string content shape the recorded successful inputs prove. */
 	send(text: string): void {
-		this.sendRaw(JSON.stringify({ event: "user", message: { content: [{ type: "text", text }] } }));
+		this.sendRaw(JSON.stringify({ event: "user", message: { content: text } }));
 	}
 
 	/** One raw line to agy's stdin; nothing is validated (tests exercise the fatal path this way). */
@@ -119,44 +119,39 @@ export class AgyProcess extends EventEmitter {
 		if (!stdin.write(`${line}\n`)) this.log("stdin backpressure - continuing (stream lines are small)");
 	}
 
-	// ------------------------------------------------------------------ lifecycle
-
-	/**
-	 * Sends the probe event and resolves with the `conversation_id` from `init`. Fails with a
-	 * timeout that carries the stderr tail when `init` does not arrive (spike: a bad model id
-	 * yields no `init` at all).
-	 */
+	/** Resolves with the `init` `conversation_id` via a probe event agy ignores; a second probe
+	 * before `init` reuses the first, and a timeout carries the stderr tail. */
 	probe(timeoutMs?: number): Promise<string> {
 		if (this.conversationIdValue !== null) return Promise.resolve(this.conversationIdValue);
 		if (this.exitedFlag) return Promise.reject(new Error(`agy has exited (code=${this.exitInfoValue?.code ?? "unknown"}); cannot probe`));
+		if (this.probePromise) return this.probePromise;
+		this.sendRaw(`{"event":"${AGY_PROBE_EVENT}"}`);
 		const ms = timeoutMs ?? this.probeTimeoutMs;
-		return new Promise<string>((resolve, reject) => {
+		const promise = new Promise<string>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				if (this.pendingProbe?.timer === timer) this.pendingProbe = null;
 				reject(new Error(`agy did not send init within ${ms} ms; stderr tail: ${this.stderrTail}`));
 			}, ms);
 			timer.unref();
 			this.pendingProbe = { resolve, reject, timer };
-			this.sendRaw(`{"event":"${AGY_PROBE_EVENT}"}`);
 		});
+		this.probePromise = promise;
+		return promise;
 	}
 
-	/** Cancels the running turn; agy answers `result{error:"interrupted"}` and exits 1. */
 	interrupt(): void {
 		const pid = this.child.pid;
-		if (pid === undefined) return;
-		try {
-			process.kill(pid, "SIGINT");
-		} catch (err) {
-			// ESRCH: already gone - nothing to cancel.
-			this.log(`interrupt failed: ${(err as Error).message}`);
-		}
+		if (pid !== undefined)
+			try {
+				process.kill(pid, "SIGINT");
+			} catch (err) {
+				// ESRCH: already gone - nothing to cancel.
+				this.log(`interrupt failed: ${(err as Error).message}`);
+			}
 	}
 
-	/**
-	 * Shuts the child down and waits until the process group is gone: close stdin, give a calm
-	 * exit `graceMs`, then SIGTERM the group, wait `termMs`, then SIGKILL it. Idempotent.
-	 */
+	/** Shuts the child down and waits until the group is gone: close stdin, `graceMs`, SIGTERM,
+	 * `termMs`, SIGKILL. Idempotent. */
 	dispose(): Promise<AgyExitInfo> {
 		if (this.disposePromise) return this.disposePromise;
 		this.disposePromise = new Promise<AgyExitInfo>((resolve) => {
@@ -171,7 +166,14 @@ export class AgyProcess extends EventEmitter {
 					},
 					finish,
 				);
-			this.closeStdin();
+			const stdin = this.child.stdin;
+			if (stdin && !stdin.destroyed)
+				try {
+					stdin.end();
+				} catch (err) {
+					// A broken pipe at shutdown is not an error - the child is going away.
+					this.log(`closing stdin failed: ${(err as Error).message}`);
+				}
 			this.waitThen(
 				this.graceMs,
 				() => {
@@ -184,29 +186,17 @@ export class AgyProcess extends EventEmitter {
 		return this.disposePromise;
 	}
 
-	private closeStdin(): void {
-		const stdin = this.child.stdin;
-		if (!stdin || stdin.destroyed) return;
-		try {
-			stdin.end();
-		} catch (err) {
-			// A broken pipe at shutdown is not an error - the child is going away.
-			this.log(`closing stdin failed: ${(err as Error).message}`);
-		}
-	}
-
 	private signalGroup(signal: NodeJS.Signals): void {
 		const pid = this.child.pid;
-		if (pid === undefined) return;
-		try {
-			process.kill(-pid, signal);
-		} catch (err) {
-			// ESRCH: the group is already gone.
-			this.log(`signalling process group ${-pid} failed: ${(err as Error).message}`);
-		}
+		if (pid !== undefined)
+			try {
+				process.kill(-pid, signal);
+			} catch (err) {
+				// ESRCH: the group is already gone.
+				this.log(`signalling process group ${-pid} failed: ${(err as Error).message}`);
+			}
 	}
 
-	/** Runs `onTimeout` after `ms` if the child is still alive, else `onExit` immediately. */
 	private waitThen(ms: number, onTimeout: () => void, onExit: () => void): void {
 		if (this.exitedFlag) {
 			setImmediate(onExit);
@@ -230,20 +220,22 @@ export class AgyProcess extends EventEmitter {
 		if (this.exitedFlag) return;
 		this.exitedFlag = true;
 		this.exitInfoValue = { code, signal, stderrTail: this.stderrTail };
-		const pending = this.pendingProbe;
-		if (pending) {
-			this.pendingProbe = null;
-			clearTimeout(pending.timer);
-			pending.reject(
-				new Error(`agy exited before init (code=${code ?? "none"} signal=${signal ?? "none"}); stderr: ${this.stderrTail.slice(0, 400)}`),
-			);
-		}
+		const detail = `agy exited before init (code=${code ?? "none"} signal=${signal ?? "none"}); stderr: ${this.stderrTail.slice(0, 400)}`;
+		this.rejectPendingProbe(detail);
 		this.log(`agy exited code=${code} signal=${signal ?? "none"}`);
 		this.emit("exit", this.exitInfoValue);
 	}
 
+	private rejectPendingProbe(message: string): void {
+		const pending = this.pendingProbe;
+		if (!pending) return;
+		this.pendingProbe = null;
+		clearTimeout(pending.timer);
+		pending.reject(new Error(message));
+	}
+
 	private onSpawnError(err: Error): void {
-		// A spawn failure (ENOENT, EACCES) never fires "exit" - surface it through the same terminal channel.
+		// A spawn failure (ENOENT, EACCES) carries no exit code - one terminal event either way.
 		this.spawnErrorValue = err;
 		this.log(`spawn error: ${err.message}`);
 		if (!this.exitedFlag) {
@@ -251,27 +243,36 @@ export class AgyProcess extends EventEmitter {
 			this.exitInfoValue = { code: null, signal: null, stderrTail: err.message };
 			this.emit("exit", this.exitInfoValue);
 		}
+		this.rejectPendingProbe(`agy failed to start: ${err.message}`);
 	}
 
 	private appendStderr(chunk: string): void {
 		this.stderrBuf += chunk;
-		if (this.stderrBuf.length > this.stderrLimit) this.stderrBuf = this.stderrBuf.slice(-this.stderrLimit);
+		// The budget is in bytes; trim one code unit at a time so a multi-byte character never straddles the cut.
+		while (Buffer.byteLength(this.stderrBuf, "utf8") > this.stderrLimit && this.stderrBuf.length > 1) {
+			this.stderrBuf = this.stderrBuf.slice(1);
+		}
 	}
 
 	private handleLine(line: string): void {
 		const parsed = parseAgyLine(line);
 		if (parsed.kind === "unknown") {
-			this.log(`ignoring unknown agy event ${JSON.stringify(parsed.event) || "(unparseable line)"}`);
+			this.log(`ignoring unknown agy event ${parsed.event === "" ? "(unparseable line)" : parsed.event}`);
 			return;
 		}
 		const event = parsed.event;
 		if (event.event === "init") {
-			this.conversationIdValue = event.conversation_id;
 			const pending = this.pendingProbe;
-			if (pending) {
-				this.pendingProbe = null;
-				clearTimeout(pending.timer);
-				pending.resolve(event.conversation_id);
+			if (event.conversation_id !== "") {
+				this.conversationIdValue = event.conversation_id;
+				if (pending) {
+					this.pendingProbe = null;
+					clearTimeout(pending.timer);
+					pending.resolve(event.conversation_id);
+				}
+			} else if (pending) {
+				// A drifted init without a usable id fails the probe instead of resolving with "".
+				this.rejectPendingProbe("init carried no conversation_id");
 			}
 			this.emit("event", event);
 			return;

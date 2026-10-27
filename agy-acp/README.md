@@ -41,6 +41,9 @@ has a typed accessor, and unknown event types or fields are kept as `raw` rather
 ## Requirements
 
 - Node.js >= 23.6 (runs the TypeScript sources directly; there is no build step)
+- POSIX: the driver signals the child's process group with `SIGINT`/`SIGTERM`/`SIGKILL`, which
+  Windows `process.kill` does not map to (a `SIGINT` there terminates the process outright);
+  the process-group lifetime model is a POSIX one
 - `agy` CLI on `PATH` - tested against 1.4.2 (the driver version-checks it on launch and warns
   on an untested version; `AGY_ACP_STRICT_VERSION=1` refuses instead of warning)
 

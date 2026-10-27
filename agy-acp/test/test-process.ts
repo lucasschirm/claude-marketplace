@@ -190,7 +190,11 @@ async function replayFixture(fixture: string): Promise<void> {
 			sendRecordedLine(h, line);
 			if (interruptsEndTheRecord && results(h).length < nResults) h.driver.interrupt();
 			const expected = results(h).length + 1;
-			await waitFor(`${fixture}: turn to settle`, 2500, () => h.driver.exitInfo !== null || results(h).length >= expected);
+			// A non-user event (e.g. a recorded assistant line) cannot settle a turn; its fixture
+			// has no result for this send, and the exit arrives when dispose() closes stdin.
+			if (expected <= nResults) {
+				await waitFor(`${fixture}: turn to settle`, 2500, () => h.driver.exitInfo !== null || results(h).length >= expected);
+			}
 		}
 		await waitFor(`${fixture}: all results`, 5000, () => h.driver.exitInfo !== null || results(h).length >= nResults);
 		const exit = await h.driver.dispose();
@@ -299,7 +303,14 @@ test("SIGINT cancels the turn: interrupted result, exit 1, stderr tail captured"
 			() => results(h).find((r) => r.result.error === "interrupted") || false,
 		);
 		assert.strictEqual(interrupted.result.status, "ERROR");
-		const exit = await waitFor("exit", 5000, () => (h.exits.length > 0 ? h.exits[0] : false));
+		// Pin the recorded replay (not the synthetic mid-turn result): the record carries the
+		// turn's real counters, the synthetic one carries num_turns 0 and zero usage.
+		assert.strictEqual(interrupted.result.num_turns, 1);
+		assert.ok(interrupted.result.usage.input_tokens > 0);
+		assert.ok(interrupted.result.usage.output_tokens > 0);
+		// The fake sits at the boundary after the interrupted result, so the exit comes from
+		// dispose() closing stdin - the first leg of the shutdown, with the recorded exit code.
+		const exit = await h.driver.dispose();
 		assert.strictEqual(exit.code, 1);
 		assert.match(h.driver.stderrTail, /error: interrupted/);
 	} finally {

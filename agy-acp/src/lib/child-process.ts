@@ -18,8 +18,8 @@ export interface ProcessGroupSpawnOptions {
 	args?: string[];
 	/** Working directory. */
 	cwd?: string;
-	/** The exact environment the child sees. Always passed explicitly. */
-	env?: NodeJS.ProcessEnv;
+	/** The exact environment the child sees; required, so an implicit inherit is impossible. */
+	env: NodeJS.ProcessEnv;
 	/** Max lifetime in milliseconds; 0 (the default) means no Node-level kill - the caller owns it. */
 	timeoutMs?: number;
 }

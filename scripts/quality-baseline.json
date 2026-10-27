@@ -6,6 +6,7 @@
     "globalThisOwnership": 33,
     "jsonParseLocation": 9,
     "noStdioWrites": 0,
+    "agyStdoutFramesOnly": 0,
     "emptyCatch": 47,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
@@ -14,13 +15,12 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 53,
     "biome.complexity/useOptionalChain": 8,
+    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noExplicitAny": 153,
     "biome.suspicious/noGlobalIsNan": 8,
-    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedFunctionParameters": 1,
-    "biome.correctness/noUnusedImports": 1,
-    "agyStdoutFramesOnly": 0
+    "biome.correctness/noUnusedImports": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
@@ -35,7 +35,7 @@
     "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
     "extensions/lib/gh-health.ts": 295,
-    "extensions/lib/github-review-threads.ts": 639,
+    "extensions/lib/github-review-threads.ts": 638,
     "extensions/lib/nonblocking.ts": 494,
     "extensions/lib/orca-client.ts": 569,
     "extensions/lib/pr-tasks-manager.ts": 849,
@@ -44,9 +44,16 @@
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1510,
     "extensions/tools.ts": 627,
+    "agy-acp/src/agy-driver.ts": 38,
+    "agy-acp/src/agy/args.ts": 51,
+    "agy-acp/src/agy/contract.ts": 289,
+    "agy-acp/src/agy/events.ts": 31,
+    "agy-acp/src/agy/process.ts": 300,
+    "agy-acp/src/agy/version.ts": 91,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/framing.ts": 81,
     "agy-acp/src/jsonrpc.ts": 296,
+    "agy-acp/src/lib/child-process.ts": 40,
     "agy-acp/src/main.ts": 105
   },
   "notes": [
@@ -196,8 +203,15 @@
       "changes": [
         "agy-acp/src/jsonrpc.ts: 296 lines > baseline 281 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-27",
+      "reason": "exclude recorded spike reference fixtures from lint because they are a behavioural specification, not repo code",
+      "changes": [
+        "biome.jsonc changed since these numbers were recorded (26e8dcbbf3b6c1b0 -> 32be8dcbbc1d0ce8): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
     }
   ],
-  "generatedFrom": "5ffc83c",
-  "biomeConfigHash": "26e8dcbbf3b6c1b0"
+  "generatedFrom": "bf0abcf",
+  "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

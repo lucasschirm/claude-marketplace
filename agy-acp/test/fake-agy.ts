@@ -85,8 +85,9 @@ let queuedUserLines = 0; // user lines that arrived mid-turn
 let userLinesConsumed = 0;
 const hasInitLine = lines.some((l) => lineEvent(l) === "init");
 
-// A process parked at a turn boundary (real agy, waiting for input) must survive EOF on stdin;
-// an open pipe is not enough once the parent closes it, so hold a live timer instead.
+/// A process parked at a turn boundary stays alive while stdin is open (real agy waits for
+// input there; an open pipe is not enough once the parent closes it, so hold a live timer
+// until the "end" handler settles it). A mid-turn turn survives EOF the same way.
 let keepAlive: ReturnType<typeof setInterval> | null = null;
 function startWaiting(): void {
 	if (!keepAlive) keepAlive = setInterval(() => {}, 1000);
@@ -145,28 +146,37 @@ function writeStderr(): void {
 function settle(): void {
 	if (settled) return;
 	settled = true;
+	writeStderr(); // the recorded stderr belongs to the session; it lands as the process goes
 	stopWaiting();
 	scheduleExit(exitCode);
 }
 
 function finishReplay(): void {
 	done = true;
-	// Real `agy -p=` exits once the final result is out; do the same.
-	settle();
+	if (!hasInitLine) {
+		// Startup failure: the process leaves with the recorded code without waiting for input.
+		settle();
+		return;
+	}
+	// Real agy sits at the turn boundary after the final line and exits when stdin closes.
+	awaitingUser = true;
+	startWaiting();
 }
 
 function emitLine(line: string, then?: () => void): void {
 	if (settled) return; // the record is finished; late callbacks must not extend the stream
-	const half = Math.max(1, Math.floor(line.length * 0.6));
 	const job = () => {
 		writing = true;
+		// Split the encoded bytes (not UTF-16 units), so a multi-byte character never straddles the cut.
+		const buf = Buffer.from(line, "utf8");
+		const half = Math.max(1, Math.floor(buf.length / 2));
 		setTimeout(() => {
-			process.stdout.write(line.slice(0, half));
+			process.stdout.write(buf.subarray(0, half));
 			setTimeout(() => {
 				// The frame terminator rides the last chunk, so it is the driver's line assembly -
 				// not the fake - that joins the two halves. The continuation may queue the next
 				// line; the write callback then starts it (or exits, if the replay is over).
-				process.stdout.write(`${line.slice(half)}\n`, () => {
+				process.stdout.write(Buffer.concat([buf.subarray(half), Buffer.from("\n")]), () => {
 					then?.();
 					lineWritten();
 				});
@@ -208,7 +218,6 @@ function advance(): void {
 	nextLine++;
 	if (isResult) {
 		lastEmittedWasResult = true;
-		if (nextLine === lines.length) writeStderr(); // stderr lands with the final line
 	}
 	emitLine(line, () => {
 		if (nextLine >= lines.length) {
@@ -217,10 +226,12 @@ function advance(): void {
 		}
 		if (isResult) {
 			// A result closes the turn: continue only when the next user line is already queued,
-			// otherwise pause until one arrives.
+			// otherwise pause until one arrives - or exit at once if stdin is already closed.
 			if (queuedUserLines > 0) {
 				queuedUserLines--;
 				advance();
+			} else if (stdinClosed) {
+				settle();
 			} else {
 				awaitingUser = true;
 				startWaiting();
@@ -234,7 +245,17 @@ function advance(): void {
 // ------------------------------------------------------------------ stdin handling
 
 let stdinBuf = "";
+let stdinClosed = false;
 process.stdin.setEncoding("utf8");
+process.stdin.on("end", () => {
+	// Real agy, sitting at a turn boundary, exits with its code when stdin closes; a mid-turn
+	// turn survives EOF until the turn ends (see the result branch in advance()).
+	stdinClosed = true;
+	if (settled || waitingForSignal) return;
+	if (started && !awaitingUser && !done) return;
+	stopWaiting();
+	settle();
+});
 process.stdin.on("data", (d: string) => {
 	stdinBuf += d;
 	for (;;) {
@@ -317,7 +338,6 @@ function emitRest(): void {
 	while (nextLine < lines.length) {
 		const line = lines[nextLine];
 		nextLine++;
-		if (nextLine === lines.length) writeStderr();
 		emitLine(line);
 	}
 	settle();
@@ -405,11 +425,9 @@ function hasUsableUserContent(line: string): boolean {
 process.on("SIGINT", () => {
 	if (waitingForSignal) {
 		waitingForSignal = false;
-		writeStderr(); // real agy prints "error: interrupted" as it aborts
 		emitLine(lines[lines.length - 1]);
 		nextLine = lines.length;
-		finishReplay();
-		settle();
+		finishReplay(); // parks; the recorded exit code lands when stdin closes
 		return;
 	}
 	if (settled) return;
@@ -423,13 +441,15 @@ process.on("SIGINT", () => {
 		scheduleExit(130);
 		return;
 	}
-	// Mid-turn: emit the interrupted result real agy would emit, then the recorded exit code.
+	// Mid-turn: emit the interrupted result real agy would emit, then sit at the boundary;
+	// the recorded exit code lands when stdin closes.
 	const synthetic =
 		'{"event":"result","result":{"conversation_id":"' +
 		`${conversationId}","status":"ERROR","response":"","error":"interrupted","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}`;
-	writeStderr();
 	emitLine(synthetic);
-	settle();
+	done = true;
+	awaitingUser = true;
+	startWaiting();
 });
 
 // ------------------------------------------------------------------ flag validation

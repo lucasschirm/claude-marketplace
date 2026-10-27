@@ -50,11 +50,13 @@ function runVersionCommand(argv: string[], timeoutMs: number): Promise<string> {
 		const fail = (message: string) => {
 			if (settled) return;
 			settled = true;
+			clearTimeout(watchdog);
 			reject(new Error(`${message}; stderr: ${stderr.trim() || "(empty)"}`));
 		};
 		const finish = (code: number | null, signal: NodeJS.Signals | null) => {
 			if (settled) return;
 			settled = true;
+			clearTimeout(watchdog);
 			const version = stdout
 				.split("\n")
 				.map((l) => l.trim())
@@ -69,8 +71,20 @@ function runVersionCommand(argv: string[], timeoutMs: number): Promise<string> {
 		child.stderr?.on("data", (d: Buffer) => {
 			stderr += d.toString("utf8");
 		});
+		// The spawn timeout SIGTERMs only the child's pid, once; a binary that ignores SIGTERM must
+		// not keep this promise alive - a watchdog kills the group and reports the timeout explicitly.
+		const watchdog = setTimeout(() => {
+			if (child.pid !== undefined)
+				try {
+					process.kill(-child.pid, "SIGKILL");
+				} catch {
+					// the group is already gone
+				}
+			fail(`agy --version timed out after ${timeoutMs} ms`);
+		}, timeoutMs);
+		watchdog.unref();
 		child.on("error", (err: Error) => fail(`cannot run ${argv[0]}: ${err.message}`));
-		// A hung binary dies on the spawn timeout (above), and its exit lands here.
+		// A normal exit (or the spawn timeout's SIGTERM) lands here; the watchdog covers the rest.
 		child.on("exit", (code, signal) => finish(code, signal));
 	});
 }
