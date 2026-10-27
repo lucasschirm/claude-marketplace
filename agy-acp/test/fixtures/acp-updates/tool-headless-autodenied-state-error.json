@@ -1,0 +1,56 @@
+{
+	"fixture": "tool-headless-autodenied-state-error",
+	"turns": [
+		{
+			"prompt": "Run the shell command: touch t6.txt  then reply OK.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "ad0e2c76-26d4-4a9d-b4f4-28f9e525cbf4:2",
+					"title": "run_command: touch t6.txt",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "touch t6.txt"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "ad0e2c76-26d4-4a9d-b4f4-28f9e525cbf4:2",
+					"status": "failed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "permission check failed for unsandboxed \"touch t6.txt\": user denied permission to run command:\ntouch t6.txt\nDo not attempt to circumvent this denial by rephrasing the command, using alternative tools/scripts (e.g. python, sh, curl), or accessing the same target resource. Proceed without performing this action."
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 7514,
+						"output_tokens": 42,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 7556
+					},
+					"numTurns": 1,
+					"durationSeconds": 3.456844574
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "[agy auto-denied 1 action(s) in headless mode: RunCommand]"
+					}
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}

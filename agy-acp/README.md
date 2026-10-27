@@ -10,12 +10,24 @@ talks ACP to `devin acp` — can spawn it and hand work to Antigravity.
 
 ## Status
 
-The transport, the `initialize` handshake, and the **agy process driver** (the `AgyProcess` in
-`src/agy/`, driven in tests by the fixture-replaying fake `agy` under `test/`) are implemented.
-`session/new`, `session/prompt`, permissions and the rest of the ACP surface land in the
+The transport, the `initialize` handshake, the **agy process driver** (the `AgyProcess` in
+`src/agy/`, driven in tests by the fixture-replaying fake `agy` under `test/`) and the
+**session layer** (`src/session.ts` + `src/server.ts`) are implemented. `session/new`
+validates `cwd` (absolute, existing directory) and `mcpServers`, probes agy for the
+`conversation_id`, and returns `modes`/`models` stubs (real selection lands in sub-issue 6);
+requested `mcpServers` are reported via `_meta` rather than silently dropped. `session/prompt`
+accepts text, resource-link and embedded-text blocks (flattened to one text, since agy
+headless is text-only), rejects image/audio with `-32602`, and runs one turn at a time
+(`-32002`). The stream maps to `session/update` notifications - `text_delta` becomes
+`agent_message_chunk`, tool steps become `tool_call` / `tool_call_update` (pending, completed
+with truncated output, or failed), per-turn usage becomes `usage_update` - and every turn
+ends with a `stopReason` or a JSON-RPC error, never an error dressed as `end_turn`:
+`result` ERROR and a child exit without a `result` are `-32603` errors (the latter marks the
+session for a `--conversation` respawn on the next prompt), a headless auto-deny is an
+`end_turn` whose `denied_actions` go out as a notice before the response and ride in
+`_meta.deniedActions`. Permissions and the rest of the ACP surface land in the
 follow-up issues of
-[lucasschirm/claude-marketplace#49](https://github.com/lucasschirm/claude-marketplace/issues/49);
-until then every method but `initialize` is answered with `-32601`.
+[lucasschirm/claude-marketplace#49](https://github.com/lucasschirm/claude-marketplace/issues/49).
 
 ## The agy process driver
 

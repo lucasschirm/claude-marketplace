@@ -1,0 +1,132 @@
+{
+	"fixture": "midturn-message-queued",
+	"turns": [
+		{
+			"prompt": "Run the shell command: sleep 12  and wait for it, then reply DONE1.",
+			"updates": [
+				{
+					"sessionUpdate": "tool_call",
+					"toolCallId": "20591dcd-39c8-4c76-8051-3f2926db1703:2",
+					"title": "run_command: sleep 12",
+					"kind": "execute",
+					"status": "pending",
+					"rawInput": {
+						"CommandLine": "sleep 12"
+					}
+				},
+				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "20591dcd-39c8-4c76-8051-3f2926db1703:2",
+					"status": "completed",
+					"content": [
+						{
+							"type": "content",
+							"content": {
+								"type": "text",
+								"text": "Command exited with code 0.\n\nNo output from the command."
+							}
+						}
+					]
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "Running "
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "`sleep 12` in the background. Waiting for it to finish..."
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "[system message]"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "DONE1"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 23531,
+						"output_tokens": 57,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 23588
+					},
+					"numTurns": 1,
+					"durationSeconds": 22.869119955
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		},
+		{
+			"prompt": "Also include the word MIDTURN in your reply.",
+			"updates": [
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "DONE"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "1 MIDTURN"
+					}
+				},
+				{
+					"sessionUpdate": "agent_message_chunk",
+					"content": {
+						"type": "text",
+						"text": "\n"
+					}
+				},
+				{
+					"sessionUpdate": "usage_update",
+					"usage": {
+						"input_tokens": 8245,
+						"output_tokens": 4,
+						"thinking_tokens": 0,
+						"cache_read_tokens": 0,
+						"total_tokens": 8249
+					},
+					"numTurns": 1,
+					"durationSeconds": 9.212509012000002
+				}
+			],
+			"response": {
+				"stopReason": "end_turn"
+			}
+		}
+	]
+}
