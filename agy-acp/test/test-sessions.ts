@@ -12,7 +12,15 @@
 //     silent end_turn); result ERROR and a child crash mid-turn as JSON-RPC errors - an error is
 //     never reported as end_turn, asserted across all reachable error fixtures;
 //   - respawn: a needsRespawn session relaunches agy with --conversation <id> on the next prompt;
-//   - connection close disposes the sessions: no fake agy survives.
+//     a respawn that starts a fresh conversation (a different init id) is refused, not accepted
+//     with negative usage deltas;
+//   - session lifecycle: a session/new in flight when the connection closes is disposed, not
+//     registered (no leaked child); the version gate runs with the launch env; connection close
+//     disposes the sessions: no fake agy survives.
+//   - prompt flattening: the resource-link name is carried; a blob resource is rejected (-32602),
+//     never silently dropped;
+//   - a subagent tool's terminal state (which arrives as step_type "subagent") settles the tracked
+//     tool call as completed, not failed.
 import * as assert from "node:assert";
 import * as fs from "node:fs";
 import { PassThrough } from "node:stream";
@@ -227,6 +235,51 @@ test("session/new probes agy and returns the id, the stubs, and the mcpServers r
 		const reported = meta.mcpServers as Record<string, unknown>;
 		assert.strictEqual(reported.supported, false, "mcpServers are reported as unsupported");
 		assert.deepStrictEqual(reported.requested, servers, "and never silently dropped (echoed back)");
+		assert.ok(
+			h.logs.every((l) => !l.includes("differs from")),
+			"the first probe defines the id: no spurious init-id drift log on a fresh session",
+		);
+	} finally {
+		h.close();
+		await h.server.disposeSessions();
+	}
+});
+
+test("a session/new in flight when the connection closes does not leak its child", async () => {
+	// The probe is the window: with a slow fake init (lineGap 400 ms), the child is alive and
+	// the probe in flight long before session/new resolves. A connection close in that window
+	// used to dispose an empty registry, and the late registry entry registered a session nothing
+	// ever disposes (its child would outlive the server). The late add must dispose the session
+	// instead, and a concurrent disposeAll must wait for that dispose.
+	const before = new Set(fakeAgyPids());
+	const launch = launchOptionsForFixture("input-event-bogus");
+	launch.env = { ...launch.env, FAKE_AGY_LINE_GAP_MS: "400" };
+	const h = startHarness(launch);
+	const creating = h.request("session/new", { cwd: process.cwd() });
+	await waitFor("the fake agy child to spawn", 10000, () => fakeAgyPids().some((p) => !before.has(p)));
+	h.close(); // the connection closes while the probe is still in flight (init arrives at ~400 ms)
+	await h.server.disposeSessions();
+	const frame = await creating; // session/new still answers; its session is disposed, not registered
+	assert.ok(frame.result, `session/new answered: ${JSON.stringify(frame.error ?? frame.result)}`);
+	assert.ok(
+		h.logs.some((l) => l.includes("started after the connection closed")),
+		"the late add took the dispose path",
+	);
+	await waitFor("the late session's child to die", 10000, () => fakeAgyPids().every((p) => before.has(p)));
+});
+
+test("the version gate checks the binary the sessions will spawn (the launch env)", async () => {
+	// The launch env is the exact environment the children see; the gate must run in it too.
+	// FAKE_AGY_VERSION is only visible to the fake's --version through this env (the server
+	// process itself does not set it), so the reported version proves the env made it through.
+	const launch = launchOptionsForFixture("input-event-bogus");
+	launch.env = { FAKE_AGY_FIXTURE: "input-event-bogus", FAKE_AGY_VERSION: "1.4.3" };
+	const h = startHarness(launch);
+	try {
+		const { result } = (await newSession(h, process.cwd())) as { result: Record<string, unknown> };
+		const meta = result._meta as Record<string, unknown>;
+		const version = meta.agyVersion as Record<string, unknown>;
+		assert.strictEqual(version.version, "1.4.3", "the gate ran with the launch env, not the server's");
 	} finally {
 		h.close();
 		await h.server.disposeSessions();
@@ -351,6 +404,30 @@ test("headless auto-deny: the denied actions are surfaced, never a silent end_tu
 	}
 });
 
+test("subagent tool step: the invoke_subagent DONE (step_type subagent) settles the tool call", async () => {
+	// The recorded terminal update of an invoke_subagent arrives as step_type "subagent"; settling
+	// is tracking-based, so the tracked tool call completes instead of being reported failed.
+	const fixture = "subagent-tool-call";
+	const h = startHarness(launchOptionsForFixture(fixture));
+	try {
+		const { result } = (await newSession(h, process.cwd())) as { result: Record<string, unknown> };
+		const frame = await h.request("session/prompt", { sessionId: result.sessionId, prompt: [textBlock(promptsForFixture(fixture)[0])] });
+		assert.strictEqual(frame.error, undefined, JSON.stringify(frame.error));
+		assert.strictEqual((frame.result as Record<string, unknown>).stopReason, "end_turn");
+		const updates = sessionUpdates(h);
+		const toolCall = updates.find((u) => u.sessionUpdate === "tool_call");
+		assert.ok(toolCall, "the invoke_subagent tool_call went out");
+		assert.match(String(toolCall.title), /^invoke_subagent: /, "the title carries the Role parameter");
+		const settled = updates.filter((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === toolCall.toolCallId);
+		assert.strictEqual(settled.length, 1, "exactly one terminal update for the tool");
+		assert.strictEqual(settled[0].status, "completed", "the subagent DONE settles the tool call");
+		assert.ok(!updates.some((u) => u.sessionUpdate === "tool_call_update" && u.status === "failed"), "no failed tool_call_update");
+	} finally {
+		h.close();
+		await h.server.disposeSessions();
+	}
+});
+
 test("a result ERROR returns a JSON-RPC error with agyError and stderrTail", async () => {
 	const fixture = "slash-command-rejected";
 	const h = startHarness(launchOptionsForFixture(fixture));
@@ -411,6 +488,33 @@ test("a child crash mid-turn is a JSON-RPC error; the next prompt respawns with 
 	}
 });
 
+test("a respawn that cannot find the conversation is refused, not accepted with a fresh one", async () => {
+	// The relaunch's init reports a different conversation id: agy could not resume and started a
+	// fresh conversation, whose counters restart near zero. Accepting it would produce negative
+	// usage deltas (the driver was seeded with the last cumulative state), so the resume is
+	// refused with -32603 and needsRespawn survives, so the next prompt retries.
+	const h = startHarness({
+		argvPrefix: [process.execPath, FAKE_CRASH],
+		probeTimeoutMs: 4000,
+		graceMs: 500,
+		termMs: 300,
+		env: { FAKE_AGY_RESUME_MISMATCH: "1" },
+	});
+	try {
+		const { result } = (await newSession(h, process.cwd())) as { result: Record<string, unknown> };
+		const first = await h.request("session/prompt", { sessionId: result.sessionId, prompt: [textBlock("make it crash")] });
+		assertErrorFrame(first, -32603, "the crashed turn");
+		const second = await h.request("session/prompt", { sessionId: result.sessionId, prompt: [textBlock("come back")] });
+		assertErrorFrame(second, -32603, "the refused resume");
+		assert.match(second.error?.message ?? "", /instead of resuming/, "the fresh conversation id is named");
+		const third = await h.request("session/prompt", { sessionId: result.sessionId, prompt: [textBlock("come back")] });
+		assertErrorFrame(third, -32603, "the retry refuses again");
+	} finally {
+		h.close();
+		await h.server.disposeSessions();
+	}
+});
+
 test("a concurrent prompt is rejected with -32002 turn in progress", async () => {
 	const fixture = "midturn-message-queued"; // two recorded turns; turn one is long enough to overlap
 	const launch = launchOptionsForFixture(fixture);
@@ -445,6 +549,7 @@ test("prompt validation: image, audio, unknown, empty and unknown-session are -3
 		const cases: Array<[unknown, RegExp]> = [
 			[[{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }], /image/],
 			[[{ type: "audio", data: "aGVsbG8=", mimeType: "audio/wav" }], /audio/],
+			[[{ type: "resource", resource: { uri: "file:///x", blob: "aGVsbG8=" } }], /no embedded text/],
 			[[{ type: "vibrate" }], /unsupported content block type/],
 			["a bare string", /array/],
 			[[], /must not be empty/],
@@ -468,12 +573,14 @@ test("flattenPrompt flattens text, resource-link and embedded-text blocks", () =
 	assert.strictEqual(
 		flattenPrompt([
 			{ type: "text", text: "Hello" },
-			{ type: "resource_link", uri: "https://example.com" },
+			{ type: "resource_link", uri: "https://example.com", name: "My Doc" },
 			{ type: "resource", resource: { uri: "file:///x", text: "embedded" } },
 		]),
-		"Hello\nhttps://example.com\nembedded",
+		"Hello\nMy Doc\nhttps://example.com\nembedded",
 	);
+	assert.strictEqual(flattenPrompt([{ type: "resource_link", uri: "https://example.com" }]), "https://example.com");
 	assert.throws(() => flattenPrompt([{ type: "image", data: "x", mimeType: "image/png" }]), /image/);
+	assert.throws(() => flattenPrompt([{ type: "resource", resource: { uri: "file:///x", blob: "x" } }]), /no embedded text/);
 	assert.throws(() => flattenPrompt([[]]), /unsupported content block type/);
 	assert.throws(() => flattenPrompt([{ type: "text", text: "  " }]), /no text/);
 });

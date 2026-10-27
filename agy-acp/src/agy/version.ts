@@ -1,9 +1,8 @@
 // `agy --version` gate.
 //
 // The stream contract has no schema version, so the agy version is the only drift signal: the
-// fixtures were recorded against a tested version, and any other version is at best untested.
-// Untested produces a warning; `AGY_ACP_STRICT_VERSION=1` turns it into a refusal, which a host
-// that must not run on an unknown agy can set.
+// fixtures were recorded against a tested version, and any other version is at best untested; an
+// untested version produces a warning, and `AGY_ACP_STRICT_VERSION=1` turns it into a refusal.
 
 import { spawnProcessGroup } from "../lib/child-process.ts";
 
@@ -23,24 +22,25 @@ export interface AgyVersionStatus {
 	warning: string | null;
 }
 
-/**
- * Runs `argv[0] argv[1..n]` (e.g. `["agy", "--version"]`), bounded by `timeoutMs`, and judges the
- * printed version. Throws when the binary cannot be run, times out, or prints no version.
- */
-export async function checkAgyVersion(argv: string[], timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<AgyVersionStatus> {
-	const version = await runVersionCommand(argv, timeoutMs);
+/** Runs `argv` (e.g. `["agy", "--version"]`) in `env`, bounded by `timeoutMs`, and judges the printed version. Throws when the binary cannot be run, times out, or prints no version. */
+export async function checkAgyVersion(
+	argv: string[],
+	timeoutMs: number = DEFAULT_TIMEOUT_MS,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<AgyVersionStatus> {
+	const version = await runVersionCommand(argv, timeoutMs, env);
 	const tested = TESTED_AGY_VERSIONS.includes(version);
 	const strict = process.env.AGY_ACP_STRICT_VERSION === "1";
 	const warning = tested ? null : `agy ${version} is untested; agy-acp is tested against ${TESTED_AGY_VERSIONS.join(", ")}`;
 	return { version, tested, strictRefusal: !tested && strict, warning };
 }
 
-function runVersionCommand(argv: string[], timeoutMs: number): Promise<string> {
+function runVersionCommand(argv: string[], timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const child = spawnProcessGroup({
 			command: argv[0],
 			args: argv.slice(1),
-			env: process.env,
+			env,
 			// --version exits on its own; the bound is for a hung binary, not for work.
 			timeoutMs,
 		});

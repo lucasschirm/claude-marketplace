@@ -51,7 +51,8 @@ function makeVersionGate(launch: AgyLaunchOptions): () => Promise<AgyVersionStat
 	return () => {
 		if (!cached) {
 			const argv = [...(launch.argvPrefix ?? [launch.command ?? "agy"]), "--version"];
-			cached = checkAgyVersion(argv).catch((err: Error) => {
+			// The gate must check the binary the sessions will spawn: the same argv and the same env.
+			cached = checkAgyVersion(argv, undefined, launch.env ?? process.env).catch((err: Error) => {
 				cached = null; // a transient spawn failure is not a verdict about the version
 				throw err;
 			});
@@ -171,16 +172,33 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	return { disposeSessions: () => registry.disposeAll() };
 }
 
-/** The session table; disposeAll() runs when the connection closes, so no child outlives the server. */
+/**
+ * The session table; disposeAll() runs when the connection closes, so no child outlives the
+ * server. The closed flag closes a race: a session/new whose start() (the probe takes seconds
+ * on a real agy) completes after disposeAll() ran would otherwise register a session nothing
+ * ever disposes - a late add disposes the session instead, and the in-flight dispose is tracked
+ * so a concurrent disposeAll() waits for it.
+ */
 export class SessionRegistry {
 	private readonly sessions = new Map<string, AgySession>();
 	private readonly log: (line: string) => void;
+	private closed = false;
+	private readonly pendingDisposes: Promise<void>[] = [];
 
 	constructor(log: (line: string) => void) {
 		this.log = log;
 	}
 
 	add(sessionId: string, session: AgySession): void {
+		if (this.closed) {
+			this.log(`session ${sessionId} started after the connection closed - disposing it`);
+			this.pendingDisposes.push(
+				session.dispose().catch((err: Error) => {
+					this.log(`session ${sessionId} dispose failed: ${err.message}`);
+				}),
+			);
+			return;
+		}
 		this.sessions.set(sessionId, session);
 	}
 
@@ -189,6 +207,7 @@ export class SessionRegistry {
 	}
 
 	async disposeAll(): Promise<void> {
+		this.closed = true;
 		const entries = [...this.sessions.values()];
 		this.sessions.clear();
 		for (const session of entries) {
@@ -199,5 +218,6 @@ export class SessionRegistry {
 				this.log(`session ${session.id} dispose failed: ${(err as Error).message}`);
 			}
 		}
+		await Promise.all(this.pendingDisposes.splice(0));
 	}
 }

@@ -1,25 +1,32 @@
 // The session/prompt flattening: agy's headless mode accepts text only, so an ACP prompt is
 // flattened to one text string. Text, resource-link and embedded-text blocks are supported;
-// image and audio are explicitly rejected with -32602 (silently dropping them would be a lie).
+// image, audio and blob resources are explicitly rejected with -32602 (silently dropping them
+// would be a lie).
 
 import { INVALID_PARAMS, RpcError } from "./errors.ts";
 
-/** The text one prompt block contributes; null means "nothing to send" (a resource without text). */
-function blockText(b: Record<string, unknown>, i: number): string | null {
+/** The text one prompt block contributes; every supported block contributes text, everything else is -32602. */
+function blockText(b: Record<string, unknown>, i: number): string {
 	switch (b.type) {
 		case "text":
 			if (typeof b.text !== "string") throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a text block needs a text string`);
 			return b.text;
-		case "resource_link":
+		case "resource_link": {
 			if (typeof b.uri !== "string") throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource_link block needs a uri string`);
-			return b.uri;
+			// The name (or title) is the human-meaningful part of the block; it is flattened with the uri.
+			const label =
+				(typeof b.name === "string" && b.name !== "" ? b.name : null) ?? (typeof b.title === "string" && b.title !== "" ? b.title : null);
+			return label !== null ? `${label}\n${b.uri}` : b.uri;
+		}
 		case "resource": {
 			const resource = b.resource;
 			if (typeof resource !== "object" || resource === null)
 				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource block needs a resource object`);
 			const text = (resource as Record<string, unknown>).text;
-			// Only embedded text is flammable; a resource without text has nothing to send.
-			return typeof text === "string" ? text : null;
+			// Only embedded text is flammable; a blob resource cannot be flattened, not even away.
+			if (typeof text !== "string")
+				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource block carries no embedded text (blobs are not supported)`);
+			return text;
 		}
 		case "image":
 			throw new RpcError(INVALID_PARAMS, `prompt block ${i}: image blocks are not supported - agy headless accepts text only`);
@@ -37,8 +44,7 @@ export function flattenPrompt(blocks: unknown): string {
 	const parts: string[] = [];
 	for (const [i, block] of blocks.entries()) {
 		if (typeof block !== "object" || block === null) throw new RpcError(INVALID_PARAMS, `prompt block ${i} must be an object`);
-		const text = blockText(block as Record<string, unknown>, i);
-		if (text !== null) parts.push(text);
+		parts.push(blockText(block as Record<string, unknown>, i));
 	}
 	const flattened = parts.join("\n");
 	if (flattened.trim() === "") throw new RpcError(INVALID_PARAMS, "prompt flattens to no text");

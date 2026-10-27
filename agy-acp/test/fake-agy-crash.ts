@@ -9,6 +9,10 @@
 //     (exit 0);
 //   - `--version` prints 1.4.2 (the tested version, so the server's version gate passes).
 //
+// FAKE_AGY_RESUME_MISMATCH=1: on the relaunch the init reports a different conversation id -
+// simulating an agy that could not find the conversation and started a fresh one (its counters
+// would restart near zero; the server must refuse such a resume, not accept it).
+//
 // The relaunch is accepted only with the exact expected `--conversation` value (and the basic
 // headless flag vector, like the fixture fake): a drifted respawn argv fails the test.
 
@@ -43,7 +47,7 @@ if (resumed && argv[convIndex + 1] !== CONVERSATION_ID) {
 
 const initEvent = {
 	event: "init",
-	conversation_id: CONVERSATION_ID,
+	conversation_id: resumed && process.env.FAKE_AGY_RESUME_MISMATCH === "1" ? "9f9f9f9f-1111-2222-3333-444455556666" : CONVERSATION_ID,
 	init: { model: "fake-crash-model", cwd: process.cwd(), tools: [], permission_mode: "request-review" },
 };
 

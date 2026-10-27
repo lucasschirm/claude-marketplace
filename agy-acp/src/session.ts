@@ -1,13 +1,12 @@
 // One ACP session: owns the agy child process for one conversation, maps its stream to
-// session/update notifications, and settles each session/prompt with a stopReason or a
-// JSON-RPC error.
+// session/update notifications, and settles each session/prompt with a stopReason or a JSON-RPC error.
 //
-// The guarantee this sub-issue is named for: an error is never reported as end_turn. A
-// `result` ERROR and a child exit without a `result` are -32603 errors (the latter marks
-// the session needsRespawn, so the next prompt relaunches agy with `--conversation <id>`);
-// a headless auto-deny is an end_turn, but the denied actions go out as a notice before
-// the response and ride in _meta.deniedActions. Tool steps still ACTIVE when the turn
-// ends are reported failed, so a client never shows a tool running forever.
+// The guarantee this sub-issue is named for: an error is never reported as end_turn. A `result`
+// ERROR and a child exit without a `result` are -32603 errors (the latter marks the session
+// needsRespawn, so the next prompt relaunches agy with `--conversation <id>`); a headless
+// auto-deny is an end_turn, but the denied actions go out as a notice before the response and
+// ride in _meta.deniedActions. Tool steps still ACTIVE when the turn ends are reported failed
+// (no tool runs forever).
 
 import { INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { TURN_IN_PROGRESS, type AcpPromptResult, type AcpSessionUpdate } from "./acp.ts";
@@ -122,11 +121,8 @@ export class AgySession {
 		return promise;
 	}
 
-	/**
-	 * The live child, respawning when needed: a needsRespawn session relaunches agy with
-	 * `--conversation <id>` and the last reported cumulative counters, so usage deltas and the
-	 * step numbering continue the conversation.
-	 */
+	/** The live child, respawning when needed: a needsRespawn session relaunches agy with
+	 * `--conversation <id>` and the last reported cumulative counters, so usage deltas and the step numbering continue. */
 	private async ensureDriver(): Promise<AgyProcess> {
 		const current = this.driver;
 		if (current && this.live && !this.needsRespawn) return current;
@@ -137,7 +133,10 @@ export class AgySession {
 		this.wire(driver);
 		this.config.log(`session ${this.id}: ${resume ? `respawning agy with --conversation ${this.id}` : "spawning agy"}`);
 		try {
-			await driver.probe(this.config.probeTimeoutMs);
+			const probed = await driver.probe(this.config.probeTimeoutMs);
+			// A resume that starts a fresh conversation would produce negative usage deltas (the driver was
+			// seeded with the last cumulative state). Refuse; needsRespawn survives, so retry on the next prompt.
+			if (resume && probed !== this.id) throw new Error(`agy started a new conversation (${probed}) instead of resuming ${this.id}`);
 			this.needsRespawnValue = false;
 			return driver;
 		} catch (err) {
@@ -178,7 +177,9 @@ export class AgySession {
 	private onEvent(driver: AgyProcess, e: AgyDriverEvent): void {
 		if (e.event === "init") {
 			this.initModelValue = e.init.model;
-			if (e.conversation_id !== this.id) this.config.log(`session ${this.id}: init id ${e.conversation_id} differs from ${this.id}`);
+			// First start: this.id is still empty (the probe sets it); a mismatch can only exist on a respawned driver - the one to log.
+			if (this.id !== "" && e.conversation_id !== this.id)
+				this.config.log(`session ${this.id}: init id ${e.conversation_id} differs from ${this.id}`);
 			return;
 		}
 		if (e.event === "step_update") {
@@ -220,8 +221,7 @@ export class AgySession {
 		if (!pending) return;
 		pending.settled = true;
 		this.pending = null;
-		// A tool still ACTIVE when the turn ends is reported failed, so a client never shows
-		// a tool running forever.
+		// A tool still ACTIVE when the turn ends is reported failed, so a client never shows a tool running forever.
 		this.failActiveTools("the turn ended before the tool reported a terminal state");
 		const denied = e.result.denied_actions;
 		// The driver already turned agy's cumulative counters into per-turn deltas (no double counting across turns).
@@ -263,19 +263,20 @@ export class AgySession {
 			this.emit(agentMessageChunk(systemMessageText(s.text_delta)));
 			return;
 		}
-		if (s.step_type !== "tool") return; // user_input, subagent (sub-issue 59): logged by the caller's record, not mapped
+		// A terminal step_update may carry the step's own type (an invoke_subagent DONE arrives as step_type
+		// "subagent"), so settling is tracking-based: any tracked id settles, untracked ones (user_input)
+		// are ignored. Subagent *internal* steps stay unmapped (sub-issue 59).
 		const id = toolCallIdOf(this.id, s.step_index);
 		if (s.state === "ACTIVE") {
+			if (s.step_type !== "tool") return;
 			this.activeTools.add(id);
 			const name = s.tool_name ?? s.tool_info?.name ?? "tool";
 			const parameters = s.tool_info?.parameters;
 			const title = toolTitleOf(name, parameters ?? {});
 			this.emit(toolCallStarted(id, title, toolKindOf(name), parameters, parameters ? toolLocationsOf(parameters) : undefined));
-		} else if (s.state === "DONE") {
-			this.activeTools.delete(id);
+		} else if (s.state === "DONE" && this.activeTools.delete(id)) {
 			this.emit(toolCallCompleted(id, s.tool_info?.output));
-		} else if (s.state === "ERROR") {
-			this.activeTools.delete(id);
+		} else if (s.state === "ERROR" && this.activeTools.delete(id)) {
 			this.emit(toolCallFailed(id, s.tool_info?.error?.message ?? "tool failed"));
 		}
 	}

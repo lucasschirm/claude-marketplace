@@ -9,8 +9,10 @@
 //   - system_message             → a logged agent_message_chunk notice
 //   - per-turn usage delta       → usage_update (agy-acp extension)
 //
-// Subagent steps have no mapping here: their gating and attribution land in sub-issue 59, so they
-// are logged by the session, not mapped.
+// Subagent steps have no mapping of their own: their gating and attribution land in sub-issue 59.
+// The one exception is settling: a tool step's terminal state may arrive with the step's own
+// type (an invoke_subagent DONE comes in as step_type "subagent"), so a tracked toolCallId
+// settles regardless of the type it arrives under.
 
 import type {
 	AcpAgentMessageChunk,

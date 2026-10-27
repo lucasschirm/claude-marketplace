@@ -16,6 +16,11 @@
 					}
 				},
 				{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId": "835d6f00-0758-4ce4-81c9-2950dcab62d3:2",
+					"status": "completed"
+				},
+				{
 					"sessionUpdate": "agent_message_chunk",
 					"content": {
 						"type": "text",
@@ -56,20 +61,6 @@
 						"type": "text",
 						"text": "\n"
 					}
-				},
-				{
-					"sessionUpdate": "tool_call_update",
-					"toolCallId": "835d6f00-0758-4ce4-81c9-2950dcab62d3:2",
-					"status": "failed",
-					"content": [
-						{
-							"type": "content",
-							"content": {
-								"type": "text",
-								"text": "the turn ended before the tool reported a terminal state"
-							}
-						}
-					]
 				},
 				{
 					"sessionUpdate": "usage_update",
