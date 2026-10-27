@@ -1,0 +1,28 @@
+{
+	"sourceRun": "t20-subagent-coverage",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t20-subagent-coverage/agy.log --dangerously-skip-permissions -p=",
+	"inputLines": [
+		"{\"event\":\"user\",\"message\":{\"content\":\"Use the invoke_subagent tool to start a subagent and instruct it to run the shell command: touch sub1.txt . Do not run the command yourself. When the subagent finishes, reply DONE.\"}}"
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t20-subagent-coverage/agy.log --dangerously-skip-permissions -p=",
+		"cwd: <SPIKE>/repos/r20",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"Use the invoke_subagent tool to start a subagent and instruct it to run the shell command: touch sub1.txt . Do not run the command yourself. When the subagent finishes, reply DONE.\"}}",
+		"2.04 init",
+		"2.10 step_update user_input/DONE",
+		"4.05 step_update agent_response/DONE",
+		"4.05 step_update tool/ACTIVE invoke_subagent",
+		"4.13 step_update subagent/DONE invoke_subagent",
+		"7.96 step_update agent_response/DONE \"nish.\\n\"",
+		"24.40 step_update system_message/DONE",
+		"26.50 step_update agent_response/DONE \"\\n\"",
+		"26.53 result {\"conversation_id\":\"835d6f00-0758-4ce4-81c9-2950dcab62d3\",\"status\":\"SUCCESS\",\"response\":\"I have invoked the subagent to run the command `touch sub1.txt`. Waiting for it to finish.\\nDONE\\n\",\"duration_seconds\":24.45342132,\"num_turns\":1,\"usage\":{\"input_tokens\":23632,\"output_tokens\":78,\"thinking_tokens\"",
+		"26.73 close stdin",
+		"27.09 exit code=0 sig=null",
+		""
+	]
+}

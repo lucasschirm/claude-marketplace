@@ -1,0 +1,33 @@
+{
+	"sourceRun": "f12-simple-multiturn-blocks",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f12-simple-multiturn-blocks/agy.log -p=",
+	"inputLines": [
+		"{\"event\":\"user\",\"message\":{\"content\":\"Reply with exactly: PONG\"}}",
+		"{\"event\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Remember the word ZEBRA. Reply with exactly: OK\"}]}}",
+		"{\"event\":\"user\",\"message\":{\"content\":\"What word did I ask you to remember? Reply with just the word.\"}}"
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/f12-simple-multiturn-blocks/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.00 >> {\"event\":\"user\",\"message\":{\"content\":\"Reply with exactly: PONG\"}}",
+		"9.38 init",
+		"9.44 step_update user_input/DONE",
+		"12.26 step_update agent_response/DONE \"\\n\"",
+		"12.31 result {\"conversation_id\":\"082c098f-2c40-438a-a000-6e0f83f234da\",\"status\":\"SUCCESS\",\"response\":\"PONG\\n\",\"duration_seconds\":2.873072242,\"num_turns\":1,\"usage\":{\"input_tokens\":7242,\"output_tokens\":2,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":7244}}",
+		"12.51 >> {\"event\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Remember the word ZEBRA. Reply with exactly: OK\"}]}}",
+		"12.54 step_update user_input/DONE",
+		"14.23 step_update agent_response/DONE \"\\n\"",
+		"14.25 result {\"conversation_id\":\"082c098f-2c40-438a-a000-6e0f83f234da\",\"status\":\"SUCCESS\",\"response\":\"OK\\n\",\"duration_seconds\":4.825798732,\"num_turns\":2,\"usage\":{\"input_tokens\":14559,\"output_tokens\":3,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":14562}}",
+		"14.45 >> {\"event\":\"user\",\"message\":{\"content\":\"What word did I ask you to remember? Reply with just the word.\"}}",
+		"14.48 step_update user_input/DONE",
+		"16.55 step_update agent_response/DONE \"\\n\"",
+		"16.57 result {\"conversation_id\":\"082c098f-2c40-438a-a000-6e0f83f234da\",\"status\":\"SUCCESS\",\"response\":\"ZEBRA\\n\",\"duration_seconds\":7.145823997,\"num_turns\":3,\"usage\":{\"input_tokens\":21953,\"output_tokens\":5,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":21958}}",
+		"16.77 close stdin",
+		"19.62 exit code=0 sig=null",
+		""
+	]
+}

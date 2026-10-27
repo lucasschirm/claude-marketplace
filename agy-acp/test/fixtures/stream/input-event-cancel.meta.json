@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i10-event-cancel",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i10-event-cancel/agy.log -p=",
+	"inputLines": ["{\"event\":\"cancel\"}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"cancel\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i10-event-cancel/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"cancel\"}",
+		"2.46 init",
+		"12.02 closeAfterMs: close stdin",
+		"15.49 exit code=0 sig=null",
+		""
+	]
+}

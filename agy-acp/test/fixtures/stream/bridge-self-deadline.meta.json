@@ -1,0 +1,30 @@
+{
+	"sourceRun": "proto-D",
+	"agyVersion": "1.4.2",
+	"bridgeTurns": [
+		{
+			"prompt": "Run the shell command: touch pD1.txt  then reply OK.",
+			"bridgeAnswer": "\"silent\""
+		}
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"      6.0 spawned agy pid=2389007",
+		"      6.6 >> turn 0 answer=\"silent\": Run the shell command: touch pD1.txt  then reply OK.",
+		"      7.2 listening on <SPIKE>/zz-bridge-932b1ef1/agy-acp.sock; hook=agy-acp-2c58f6f330265c72",
+		"   3113.5 EV init",
+		"   3169.8 EV user_input DONE",
+		"   5165.8 EV agent_response DONE",
+		"   5166.0 EV tool run_command ACTIVE step=2",
+		"   5215.3 REQ hookPid=2389891 hookStartToConnect=3ms sinceToolActive=49.3ms tool=run_command stepIdx=2 args={\"CommandLine\":\"touch pD1.txt\",\"WaitMsBeforeAsync\":5000,\"toolSummary\":\"Create pD1.txt file\"}",
+		"   5215.3 ANS (silent: never answering)",
+		"  10249.5 EV tool run_command ERROR step=2 err=\"tool call denied by pre-tool hook: agy-acp: the user did not answer this permission request within 5 s. Do not retry this action or work around it; stop and ask the user how to proceed.\"",
+		"  12498.1 EV agent_response DONE \"oceed? Should I re-run the command so you can approve the prompt?\\n\"",
+		"  12498.3 EV result {\"s\":\"SUCCESS\",\"r\":\"The command `touch pD1.txt` was blocked by the permission prompt timeout (`tool call denied by pre-tool hook: agy-acp: the user did not answer this permission request within 5 s`).\\n\\nHow would you like to proceed? Should I re-run the command so you can approve the prompt?\\n\"}",
+		"  12598.5 close stdin",
+		"  12797.8 agy exit code=0 sig=null",
+		""
+	]
+}

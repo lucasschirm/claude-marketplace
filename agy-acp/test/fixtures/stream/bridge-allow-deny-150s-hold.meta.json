@@ -1,0 +1,56 @@
+{
+	"sourceRun": "proto-A",
+	"agyVersion": "1.4.2",
+	"bridgeTurns": [
+		{
+			"prompt": "Run the shell command: touch pA1.txt  then reply OK.",
+			"bridgeAnswer": "\"allow\""
+		},
+		{
+			"prompt": "Run the shell command: touch pA2.txt  then reply OK.",
+			"bridgeAnswer": "\"deny\""
+		},
+		{
+			"prompt": "Run the shell command: touch pA3.txt  then reply OK.",
+			"bridgeAnswer": "{\"delayMs\":150000,\"then\":\"allow\"}"
+		}
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"      8.1 spawned agy pid=2331340",
+		"      8.8 >> turn 0 answer=\"allow\": Run the shell command: touch pA1.txt  then reply OK.",
+		"      9.7 listening on <SPIKE>/zz-bridge-766e9a05/agy-acp.sock; hook=agy-acp-05774d1841812841",
+		"   1569.2 EV init",
+		"   1623.7 EV user_input DONE",
+		"   5933.2 EV agent_response DONE",
+		"   5933.4 EV tool run_command ACTIVE step=2",
+		"   6017.9 REQ hookPid=2332473 hookStartToConnect=3ms sinceToolActive=84.5ms tool=run_command stepIdx=2 args={\"CommandLine\":\"touch pA1.txt\",\"WaitMsBeforeAsync\":5000,\"toolSummary\":\"Create pA1.txt file\"}",
+		"   6018.0 ANS allow (held 0.1ms)",
+		"   6186.7 EV tool run_command DONE step=2 sinceAnswer=168.7ms",
+		"   9685.7 EV agent_response DONE \"\\n\"",
+		"   9736.3 EV result {\"s\":\"SUCCESS\",\"r\":\"OK\\n\"}",
+		"   9836.8 >> turn 1 answer=\"deny\": Run the shell command: touch pA2.txt  then reply OK.",
+		"   9870.1 EV user_input DONE",
+		"  12012.7 EV agent_response DONE",
+		"  12012.8 EV tool run_command ACTIVE step=6",
+		"  12070.3 REQ hookPid=2335472 hookStartToConnect=2ms sinceToolActive=57.5ms tool=run_command stepIdx=6 args={\"CommandLine\":\"touch pA2.txt\",\"WaitMsBeforeAsync\":5000,\"toolSummary\":\"Create pA2.txt file\"}",
+		"  12070.3 ANS deny User rejected this tool call in the ACP client (code PROTO-REJECT-42). (held 0.1ms)",
+		"  12088.4 EV tool run_command ERROR step=6 sinceAnswer=18.0ms err=\"tool call denied by pre-tool hook: User rejected this tool call in the ACP client (code PROTO-REJECT-42).\"",
+		"  13978.7 EV agent_response DONE \"\\n\"",
+		"  14004.7 EV result {\"s\":\"SUCCESS\",\"r\":\"The command to create `pA2.txt` was rejected/denied. Please let me know how you would like to proceed.\\n\"}",
+		"  14105.0 >> turn 2 answer={\"delayMs\":150000,\"then\":\"allow\"}: Run the shell command: touch pA3.txt  then reply OK.",
+		"  14137.7 EV user_input DONE",
+		"  16026.8 EV agent_response DONE",
+		"  16026.8 EV tool run_command ACTIVE step=10",
+		"  16054.8 REQ hookPid=2336291 hookStartToConnect=3ms sinceToolActive=28.0ms tool=run_command stepIdx=10 args={\"CommandLine\":\"touch pA3.txt\",\"WaitMsBeforeAsync\":5000,\"toolSummary\":\"Create pA3.txt file\"}",
+		" 166057.7 ANS allow (held 150002.8ms)",
+		" 166238.5 EV tool run_command DONE step=10 sinceAnswer=180.8ms",
+		" 193510.4 EV agent_response DONE \"\\n\"",
+		" 193561.3 EV result {\"s\":\"SUCCESS\",\"r\":\"OK\\n\"}",
+		" 193661.6 close stdin",
+		" 198685.9 agy exit code=0 sig=null",
+		""
+	]
+}

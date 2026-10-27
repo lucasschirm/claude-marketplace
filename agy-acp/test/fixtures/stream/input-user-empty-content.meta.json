@@ -1,0 +1,20 @@
+{
+	"sourceRun": "i05-user-empty-content",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i05-user-empty-content/agy.log -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"\"}}"],
+	"exitCode": "1",
+	"signal": "null",
+	"stderr": "error: Error: empty prompt. Usage: agy --print \"your prompt here\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i05-user-empty-content/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"\"}}",
+		"2.63 init",
+		"2.63 result {\"conversation_id\":\"84cd2533-18ed-4354-b86f-19da44f22d2b\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"Error: empty prompt. Usage: agy --print \\\"your prompt here\\\"\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":0}}",
+		"2.77 exit code=1 sig=null",
+		"2.83 close stdin",
+		"12.02 closeAfterMs: close stdin",
+		""
+	]
+}

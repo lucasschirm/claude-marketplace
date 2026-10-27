@@ -1,0 +1,20 @@
+{
+	"sourceRun": "i04-user-empty-message",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i04-user-empty-message/agy.log -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{}}"],
+	"exitCode": "1",
+	"signal": "null",
+	"stderr": "error: stream input \"user\" message has no content\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i04-user-empty-message/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"user\",\"message\":{}}",
+		"1.75 init",
+		"1.75 result {\"conversation_id\":\"f49b5438-7224-49da-a54a-bc9515f2c5a5\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"stream input \\\"user\\\" message has no content\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":0}}",
+		"1.90 exit code=1 sig=null",
+		"1.95 close stdin",
+		"12.02 closeAfterMs: close stdin",
+		""
+	]
+}

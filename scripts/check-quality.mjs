@@ -507,10 +507,17 @@ function countGlobalThisWrites() {
 
 /**
  * Where parsing inbound text is allowed, named exactly: the subprocess door and the sibling that knows
- * what its payloads look like (extensions), and the ACP frame reader (agy-acp). A prefix match would let
- * `exec-anything.ts` parse whatever it liked, which is the hole this invariant exists to keep shut.
+ * what its payloads look like (extensions), the ACP frame reader, and agy's stream-json contract
+ * (agy-acp). A prefix match would let `exec-anything.ts` parse whatever it liked, which is the hole
+ * this invariant exists to keep shut.
  */
-const INBOUND_PARSE_ALLOWLIST = new Set(["extensions/lib/exec.ts", "extensions/lib/exec-payload.ts", "agy-acp/src/jsonrpc.ts"]);
+const INBOUND_PARSE_ALLOWLIST = new Set([
+	"extensions/lib/exec.ts",
+	"extensions/lib/exec-payload.ts",
+	"agy-acp/src/jsonrpc.ts",
+	"agy-acp/src/agy/contract.ts",
+]);
+>>>>>>> f94ba9b (agy-acp 2/11: agy process driver, stream-json contract types, fixture-replaying fake agy)
 
 function countJsonParseOutsideExecLib() {
 	const hits = [];
@@ -818,7 +825,7 @@ const INVARIANTS = [
 	},
 	{
 		name: "jsonParseLocation",
-		description: "only the subprocess door, its payload sibling, and the ACP frame reader parse inbound text",
+		description: "only the subprocess door, its payload sibling, the ACP frame reader and agy's stream-json contract parse inbound text",
 		measure: countJsonParseOutsideExecLib,
 	},
 	{

@@ -1,0 +1,18 @@
+{
+	"sourceRun": "i11-event-assistant",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i11-event-assistant/agy.log -p=",
+	"inputLines": ["{\"event\":\"assistant\",\"message\":{\"content\":\"x\"}}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "warning: ignoring unsupported stream input message event \"assistant\"\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i11-event-assistant/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"event\":\"assistant\",\"message\":{\"content\":\"x\"}}",
+		"2.55 init",
+		"12.02 closeAfterMs: close stdin",
+		"12.17 exit code=0 sig=null",
+		""
+	]
+}

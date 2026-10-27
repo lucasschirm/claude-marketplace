@@ -1,0 +1,23 @@
+{
+	"sourceRun": "t6-fakehome-hook-allow",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t6-fakehome-hook-allow/agy.log -p=",
+	"inputLines": ["{\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: touch t6.txt  then reply OK.\"}}"],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "jetski: no output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. command(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t6-fakehome-hook-allow/agy.log -p=",
+		"cwd: <SPIKE>/repos/r6",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"Run the shell command: touch t6.txt  then reply OK.\"}}",
+		"8.03 init",
+		"8.08 step_update user_input/DONE",
+		"11.46 step_update agent_response/DONE",
+		"11.46 step_update tool/ACTIVE run_command",
+		"11.51 step_update tool/ERROR run_command",
+		"11.51 result {\"conversation_id\":\"ad0e2c76-26d4-4a9d-b4f4-28f9e525cbf4\",\"status\":\"SUCCESS\",\"response\":\"\",\"duration_seconds\":3.456844574,\"num_turns\":1,\"usage\":{\"input_tokens\":7514,\"output_tokens\":42,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":7556},\"denied_actions\":[{\"action\":\"command\",\"display_name\":",
+		"11.71 close stdin",
+		"12.21 exit code=0 sig=null",
+		""
+	]
+}

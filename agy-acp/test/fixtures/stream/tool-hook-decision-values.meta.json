@@ -1,0 +1,41 @@
+{
+	"sourceRun": "t12-decision-values",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t12-decision-values/agy.log --dangerously-skip-permissions -p=",
+	"inputLines": [
+		"{\"event\":\"user\",\"message\":{\"content\":\"Make six separate run_command tool calls, one at a time, and continue even if one fails: touch gA.txt ; touch gB.txt ; touch gC.txt ; touch gD.txt ; touch gE.txt ; touch gF.txt . Then reply with one line per command: name and the exact error text if any.\"}}"
+	],
+	"exitCode": "0",
+	"signal": "null",
+	"stderr": "",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/t12-decision-values/agy.log --dangerously-skip-permissions -p=",
+		"cwd: <SPIKE>/repos/r12",
+		"0.01 >> {\"event\":\"user\",\"message\":{\"content\":\"Make six separate run_command tool calls, one at a time, and continue even if one fails: touch gA.txt ; touch gB.txt ; touch gC.txt ; touch gD.txt ; touch gE.txt ; touch gF.txt . Then reply with one line per command: name and the exact error text if any.\"}}",
+		"1.99 init",
+		"2.02 step_update user_input/DONE",
+		"4.17 step_update agent_response/DONE",
+		"4.17 step_update tool/ACTIVE run_command",
+		"4.24 step_update tool/ERROR run_command",
+		"7.19 step_update agent_response/DONE",
+		"7.19 step_update tool/ACTIVE run_command",
+		"7.24 step_update tool/ERROR run_command",
+		"9.63 step_update agent_response/DONE",
+		"9.63 step_update tool/ACTIVE run_command",
+		"9.68 step_update tool/ERROR run_command",
+		"18.64 step_update agent_response/DONE",
+		"18.64 step_update tool/ACTIVE run_command",
+		"18.66 step_update tool/ERROR run_command",
+		"21.99 step_update agent_response/DONE",
+		"21.99 step_update tool/ACTIVE run_command",
+		"22.07 step_update tool/ERROR run_command",
+		"24.76 step_update agent_response/DONE",
+		"24.76 step_update tool/ACTIVE run_command",
+		"24.78 step_update tool/ERROR run_command",
+		"28.18 step_update agent_response/DONE \"ool execution: unsupported hook decision: bogus-value\\n\"",
+		"28.20 result {\"conversation_id\":\"fb9cc2f7-64dd-40fc-a4a0-23105a729b29\",\"status\":\"SUCCESS\",\"response\":\"`touch gA.txt`: Encountered error in tool execution: failed to unmarshal result from hook jsonhook__spike-r12_PostToolUse_0_0 via protojson: {\\\"decision\\\":\\\"ask\\\",\\\"reason\\\":\\\"ask reason\\\"}: proto: (line 1:2): u",
+		"28.40 close stdin",
+		"30.21 exit code=0 sig=null",
+		""
+	]
+}

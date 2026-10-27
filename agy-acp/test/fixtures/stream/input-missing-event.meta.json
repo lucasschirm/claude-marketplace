@@ -1,0 +1,20 @@
+{
+	"sourceRun": "i02-missing-event",
+	"agyVersion": "1.4.2",
+	"args": "agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i02-missing-event/agy.log -p=",
+	"inputLines": ["{\"foo\":1}"],
+	"exitCode": "1",
+	"signal": "null",
+	"stderr": "error: stream input message is missing the \"event\" field\n",
+	"timeline": [
+		"args: agy --input-format stream-json --output-format stream-json --model gemini-3.8-flash-low --log-file <SPIKE>/runs/i02-missing-event/agy.log -p=",
+		"cwd: <SPIKE>/repos/fx",
+		"0.01 >> {\"foo\":1}",
+		"1.64 init",
+		"1.64 result {\"conversation_id\":\"710bc1af-4ae3-450e-95c4-c1da9af40395\",\"status\":\"ERROR\",\"response\":\"\",\"error\":\"stream input message is missing the \\\"event\\\" field\",\"duration_seconds\":0,\"num_turns\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"thinking_tokens\":0,\"cache_read_tokens\":0,\"total_tokens\":0}}",
+		"1.84 close stdin",
+		"1.98 exit code=1 sig=null",
+		"12.02 closeAfterMs: close stdin",
+		""
+	]
+}
