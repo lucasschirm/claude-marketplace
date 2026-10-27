@@ -51,7 +51,7 @@ export interface BridgeServerOptions {
 	conversationId: () => string | null;
 	handle: (req: BridgeRequest) => Promise<BridgeReply>;
 	/** The hook went away (connection lost) before its request was answered. */
-	onConnectionLost: (stepIdx: number) => void;
+	onConnectionLost: (key: string) => void;
 }
 
 export class BridgeServer {
@@ -75,26 +75,33 @@ export class BridgeServer {
 			hookTimeoutSec: this.opts.hookTimeoutSec,
 		});
 		({ dir: this.dir, socketPath: this.socketPath, hookName: this.hookName } = layout);
-		// 0700 for the parent too: a sibling user must not be able to drop a hooks.json into it.
-		await fs.promises.mkdir(path.dirname(layout.dir), { recursive: true, mode: 0o700 });
-		for (const d of [layout.dir, path.join(layout.dir, ".agents")]) await fs.promises.mkdir(d, { mode: 0o700 });
-		await fs.promises.writeFile(path.join(layout.dir, ".agents", "hooks.json"), layout.hooksJson, { mode: 0o600 });
-		await fs.promises.chmod(layout.dir, 0o700);
-		const server = createNetServer((conn) => {
-			this.connections.add(conn);
-			conn.on("close", () => this.connections.delete(conn));
-			this.handleConnection(conn);
-		});
-		server.on("error", (err) => this.opts.log(`bridge socket error: ${err.message}`));
-		this.server = server;
-		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject);
-			server.listen(this.socketPath, () => {
-				server.removeListener("error", reject);
-				resolve();
+		try {
+			// 0700 for the parent too: a sibling user must not be able to drop a hooks.json into it.
+			await fs.promises.mkdir(path.dirname(layout.dir), { recursive: true, mode: 0o700 });
+			for (const d of [layout.dir, path.join(layout.dir, ".agents")]) await fs.promises.mkdir(d, { mode: 0o700 });
+			await fs.promises.writeFile(path.join(layout.dir, ".agents", "hooks.json"), layout.hooksJson, { mode: 0o600 });
+			await fs.promises.chmod(layout.dir, 0o700);
+			const server = createNetServer((conn) => {
+				this.connections.add(conn);
+				conn.on("close", () => this.connections.delete(conn));
+				this.handleConnection(conn);
 			});
-		});
-		await fs.promises.chmod(this.socketPath, 0o600);
+			server.on("error", (err) => this.opts.log(`bridge socket error: ${err.message}`));
+			this.server = server;
+			await new Promise<void>((resolve, reject) => {
+				server.once("error", reject);
+				server.listen(this.socketPath, () => {
+					server.removeListener("error", reject);
+					resolve();
+				});
+			});
+			await fs.promises.chmod(this.socketPath, 0o600);
+		} catch (err) {
+			// A partial start (the listener is up but e.g. the socket chmod failed) must not leak a
+			// live listener or a half-written dir: close it, then propagate.
+			await this.stop();
+			throw err;
+		}
 	}
 
 	/** Closes the socket and removes the dir. Idempotent. */
@@ -115,17 +122,17 @@ export class BridgeServer {
 
 	/** One hook connection: one request line in, one reply line out, then closed. */
 	private handleConnection(conn: Socket): void {
-		let stepIdx = -1,
-			answered = false;
+		let lostKey = ""; // conversation-scoped pending-ask key, set after auth
+		let answered = false;
 		const hold = setTimeout(() => {
 			this.opts.log(`bridge: connection held beyond ${this.opts.maxHoldMs} ms - closing`);
 			conn.destroy();
 		}, this.opts.maxHoldMs).unref();
 		conn.on("close", () => {
 			clearTimeout(hold);
-			if (!answered) {
+			if (!answered && lostKey !== "") {
 				try {
-					this.opts.onConnectionLost(stepIdx);
+					this.opts.onConnectionLost(lostKey);
 				} catch (err) {
 					this.opts.log(`bridge: connection-lost handler failed: ${(err as Error).message}`);
 				}
@@ -147,24 +154,32 @@ export class BridgeServer {
 				conn.destroy();
 				return;
 			}
-			stepIdx = req.stepIdx;
+			// The token (per-session, 256-bit) is the real boundary; the conversation check is
+			// defence in depth. A subagent's internal tool call may carry its own (sub) conversation
+			// id: same agy process, same token, and the call still goes through policy + the client.
 			if (req.token !== this.opts.token) {
-				this.opts.log(`bridge: token mismatch (step ${stepIdx}) - closing`);
+				this.opts.log(`bridge: token mismatch (step ${req.stepIdx}) - closing`);
 				conn.destroy();
 				return;
 			}
 			const expected = this.opts.conversationId();
-			if (expected === null || req.conversationId !== expected) {
+			if (expected === null || (req.conversationId !== expected && req.conversationId === "")) {
 				this.opts.log(
 					`bridge: conversation mismatch (got ${req.conversationId || "(none)"}, want ${expected ?? "(not probed)"}) - closing`,
 				);
 				conn.destroy();
 				return;
 			}
+			// after auth: an unauthenticated close must not abort a legitimate pending ask
+			lostKey = `${req.conversationId}:${req.stepIdx}`;
 			void this.opts.handle(req).then(
 				(reply) => {
 					answered = true;
-					conn.end(`${JSON.stringify(reply)}\n`);
+					try {
+						conn.end(`${JSON.stringify(reply)}\n`);
+					} catch {
+						// a dead connection cannot be revived; the reply is lost and the hook fails closed
+					}
 				},
 				(err: Error) => {
 					this.opts.log(`bridge: handler failed: ${err.message}`);
@@ -270,30 +285,4 @@ export function bridgeRuntimeDirs(): string[] {
 	if (xdg && xdg.trim() !== "") out.push(path.join(xdg, "agy-acp"));
 	out.push(os.tmpdir());
 	return out;
-}
-
-/** Startup hygiene: remove bridge dirs left by crashed runs. Stale means: our name plus an
- * mtime older than STALE_BRIDGE_MS; anything else stays. */
-export async function cleanupStaleBridges(log: (line: string) => void, nowMs: number = Date.now()): Promise<void> {
-	for (const root of bridgeRuntimeDirs()) {
-		let entries: string[];
-		try {
-			entries = await fs.promises.readdir(root);
-		} catch {
-			continue; // no runtime dir yet (or unreadable) - nothing to clean
-		}
-		for (const entry of entries) {
-			if (!BRIDGE_DIR_NAME_RE.test(entry)) continue;
-			const p = path.join(root, entry);
-			try {
-				const st = await fs.promises.stat(p);
-				if (nowMs - st.mtimeMs > STALE_BRIDGE_MS) {
-					await fs.promises.rm(p, { recursive: true, force: true });
-					log(`bridge cleanup: removed stale ${p}`);
-				}
-			} catch {
-				// the dir vanished between readdir and stat - nothing to clean
-			}
-		}
-	}
 }

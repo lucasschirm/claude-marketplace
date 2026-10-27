@@ -43,13 +43,20 @@ fail-closed: every exit path prints one JSON decision (empty stdout would be an 
 agy), every denial carries the "Do not retry this call." wording (without it the model
 retried 5 times in the spike), and every path exits 0.
 
+Stale bridge dirs (a crashed run) are cleaned at startup: a dir is removed when it is
+over an hour old **and its socket no longer answers** - a live session's dir is never
+removed, however old it is. A subagent's internal tool call may carry its own conversation
+id; it is served (the per-session token is the boundary) and goes through the same policy
+and client ask. `session/set_mode` (the four mode ids) answers the request and emits a
+`current_mode_update` notification.
+
 The decision ladder (`src/permission.ts` + `src/permission-gate.ts`), in every mode:
 
 1. a tool call whose args reference the bridge dir or socket is denied (the agent can see
    the dir in `workspacePaths`); in `plan` mode, state-changing tools are denied locally;
 2. `read_file` inside the workspace is auto-allowed (plus `write_file`/`edit_file` in
    `accept-edits`); an `allow-always` answer is held as an in-session grant (run_command
-   grants cover the normalised first 64 characters of the command, file grants the resolved
+   grants cover the full whitespace-normalised command, file grants the resolved
    path); unknown tools are never auto-allowed;
 3. otherwise the client is asked via `session/request_permission` (options `allow_once`,
    `allow_always`, `reject_once`; anything else - including a timeout or a closed

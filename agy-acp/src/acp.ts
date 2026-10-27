@@ -152,7 +152,11 @@ export interface AcpUsageUpdate {
 	numTurns: number;
 	durationSeconds: number;
 }
-export type AcpSessionUpdate = AcpAgentMessageChunk | AcpToolCall | AcpToolCallUpdate | AcpUsageUpdate;
+export interface AcpCurrentModeUpdate {
+	sessionUpdate: "current_mode_update";
+	currentModeId: string;
+}
+export type AcpSessionUpdate = AcpAgentMessageChunk | AcpToolCall | AcpToolCallUpdate | AcpUsageUpdate | AcpCurrentModeUpdate;
 export interface AcpSessionUpdateParams {
 	sessionId: string;
 	update: AcpSessionUpdate;

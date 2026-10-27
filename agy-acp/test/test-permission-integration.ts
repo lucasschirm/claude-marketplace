@@ -348,6 +348,9 @@ test("plan mode: the denial is local, the client is never asked", async () => {
 	try {
 		const sid = await newSession(h);
 		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
+		const modeUpd = h.updates.find((u) => u.sessionUpdate === "current_mode_update");
+		assert.ok(modeUpd, "set_mode emits a current_mode_update notification");
+		assert.strictEqual((modeUpd as { currentModeId?: string })?.currentModeId, "plan");
 		const pr = await h.request("session/prompt", {
 			sessionId: sid,
 			prompt: [{ type: "text", text: promptsForFixture("tool-hook-denied")[0] }],

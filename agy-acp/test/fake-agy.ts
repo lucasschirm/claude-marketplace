@@ -72,6 +72,24 @@ const lines = fs
 	.readFileSync(path.join(STREAM_DIR, `${name}.stdout.ndjson`), "utf8")
 	.split("\n")
 	.filter((l) => l !== "");
+// FAKE_AGY_STATE_OVERRIDE=<state> remaps the terminal states of the recorded tool steps. It lets
+// the tests exercise a state outside the observed set (the driver's lenient copy passes it
+// through, and the session must keep such a tool tracked until the turn end fails it).
+const stateOverride = process.env.FAKE_AGY_STATE_OVERRIDE;
+if (stateOverride !== undefined) {
+	for (let i = 0; i < lines.length; i++) {
+		try {
+			const o = JSON.parse(lines[i]) as { step_update?: { step_type?: string; state?: string } };
+			const su = o.step_update;
+			if (su && su.step_type === "tool" && typeof su.state === "string" && su.state !== "ACTIVE") {
+				su.state = stateOverride;
+				lines[i] = JSON.stringify(o);
+			}
+		} catch {
+			// a non-JSON line is left as-is
+		}
+	}
+}
 let exitCode = Number(meta.exitCode ?? "0");
 const inputLines: string[] = meta.inputLines ?? [];
 const initDelayMs = Number(process.env.FAKE_AGY_INIT_DELAY_MS ?? 20);

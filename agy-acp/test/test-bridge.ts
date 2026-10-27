@@ -14,7 +14,8 @@ import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AGY_ACP_VERSION } from "../src/server.ts";
-import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs, cleanupStaleBridges } from "../src/bridge-server.ts";
+import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs } from "../src/bridge-server.ts";
+import { cleanupStaleBridges } from "../src/bridge-cleanup.ts";
 import { PermissionGate } from "../src/permission-gate.ts";
 import { PLAN_DENY_REASON } from "../src/permission.ts";
 
@@ -183,10 +184,10 @@ test("a round trip: token + conversation-id in, one JSON line out, then the conn
 	}
 });
 
-test("a wrong token or a wrong conversation-id closes the connection with no reply (the hook fails closed)", async () => {
+test("a wrong token or an empty conversation-id closes the connection with no reply (the hook fails closed)", async () => {
 	for (const [token, conv] of [
 		["wrong", "conv-1"],
-		["tok-1", "other"],
+		["tok-1", ""],
 	] as const) {
 		const logs: string[] = [];
 		const server = new BridgeServer({
@@ -214,6 +215,79 @@ test("a wrong token or a wrong conversation-id closes the connection with no rep
 		} finally {
 			await server.stop();
 		}
+	}
+});
+
+test("a subagent's own conversation id is accepted (same token; the call still goes through policy + the client)", async () => {
+	const handled: string[] = [];
+	const server = new BridgeServer({
+		log: () => {},
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK,
+		hookTimeoutSec: 60,
+		maxHoldMs: 5000,
+		conversationId: () => "conv-1",
+		handle: async (req) => {
+			handled.push(req.conversationId);
+			return { decision: "allow" };
+		},
+		onConnectionLost: () => {},
+	});
+	await server.start();
+	try {
+		const { line } = await askSocket(server.socketPath, {
+			token: "tok-1",
+			conversationId: "conv-1-sub",
+			stepIdx: 3,
+			toolCall: { name: "run_command", args: {} },
+		});
+		assert.strictEqual(line, JSON.stringify({ decision: "allow" }), "the sub conversation is served, not closed");
+		assert.deepStrictEqual(handled, ["conv-1-sub"], "the request reached the handler");
+	} finally {
+		await server.stop();
+	}
+});
+
+test("an unauthenticated or early-dropped connection does not abort a legitimate pending ask", async () => {
+	const lost: string[] = [];
+	const server = new BridgeServer({
+		log: () => {},
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK,
+		hookTimeoutSec: 60,
+		maxHoldMs: 5000,
+		conversationId: () => "conv-1",
+		handle: () => new Promise(() => {}), // never answers, so the legit ask stays pending
+		onConnectionLost: (key) => {
+			lost.push(key);
+		},
+	});
+	await server.start();
+	try {
+		// A legitimate pending ask at conv-1:5 (the handler never answers, so it stays pending).
+		const legit = askSocket(server.socketPath, {
+			token: "tok-1",
+			conversationId: "conv-1",
+			stepIdx: 5,
+			toolCall: { name: "run_command", args: {} },
+		});
+		void legit; // resolves on its 3 s timeout; its late close must not run before the assertion below
+		// A wrong-token connection (its step index matches the pending ask's).
+		const badTok = askSocket(server.socketPath, {
+			token: "wrong",
+			conversationId: "conv-1",
+			stepIdx: 5,
+			toolCall: { name: "run_command", args: {} },
+		});
+		// A connection that is dropped immediately (no data at all).
+		const early = askSocket(server.socketPath, {});
+		await Promise.all([badTok, early]);
+		await new Promise((r) => setTimeout(r, 100)); // let the close handlers run
+		assert.strictEqual(lost.length, 0, "no onConnectionLost for unauthenticated or dataless connections");
+	} finally {
+		await server.stop();
 	}
 });
 
@@ -307,8 +381,8 @@ test("a handler failure destroys the connection with no reply (the hook fails cl
 	}
 });
 
-test("maxHoldMs cuts a never-answering ask: the connection dies and onConnectionLost names the step", async () => {
-	let lost: number | undefined;
+test("maxHoldMs cuts a never-answering ask: the connection dies and onConnectionLost names the conversation-scoped ask", async () => {
+	let lost: string | undefined;
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
@@ -318,8 +392,8 @@ test("maxHoldMs cuts a never-answering ask: the connection dies and onConnection
 		maxHoldMs: 300,
 		conversationId: () => "conv-1",
 		handle: () => new Promise(() => {}),
-		onConnectionLost: (stepIdx) => {
-			lost = stepIdx;
+		onConnectionLost: (key) => {
+			lost = key;
 		},
 	});
 	await server.start();
@@ -335,7 +409,7 @@ test("maxHoldMs cuts a never-answering ask: the connection dies and onConnection
 		});
 		await new Promise((r) => setTimeout(r, 100)); // let the server-side close handler (onConnectionLost) run
 		assert.ok(Date.now() - t0 < 3000, "the hold cut the connection well before the hook deadline");
-		assert.strictEqual(lost, 7, "onConnectionLost names the step");
+		assert.strictEqual(lost, "conv-1:7", "onConnectionLost names the conversation-scoped ask");
 	} finally {
 		await server.stop();
 	}
@@ -361,6 +435,38 @@ test("bridgeRuntimeDirs and cleanupStaleBridges: stale dirs go, fresh and unrela
 		assert.ok(!fs.existsSync(old), "the 2h-old bridge dir is removed");
 		assert.ok(fs.existsSync(fresh), "a fresh bridge dir stays");
 		assert.ok(fs.existsSync(unrelated), "an unrelated dir stays");
+		assert.match(logs.join("\n"), /removed stale/, "the removal was logged");
+	} finally {
+		if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
+		else process.env.XDG_RUNTIME_DIR = saved;
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("cleanupStaleBridges: a 2h-old dir whose socket still answers is live, not stale", async () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cleanup-live-"));
+	const runtime = path.join(root, "agy-acp");
+	fs.mkdirSync(runtime);
+	const live = path.join(runtime, `agy-acp-${"ab".repeat(8)}`);
+	fs.mkdirSync(live);
+	const server = net.createServer();
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(path.join(live, "socket"), resolve);
+	});
+	const past = Date.now() / 1000 - 7200;
+	fs.utimesSync(live, past, past); // old mtime, but the socket is serving
+	const saved = process.env.XDG_RUNTIME_DIR;
+	process.env.XDG_RUNTIME_DIR = root;
+	const logs: string[] = [];
+	try {
+		await cleanupStaleBridges((l) => logs.push(l), Date.now());
+		assert.ok(fs.existsSync(live), "the live dir (old mtime, answering socket) stays");
+		assert.strictEqual(logs.length, 0, "no removal logged");
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+		fs.utimesSync(live, past, past); // the socket is dead now
+		await cleanupStaleBridges((l) => logs.push(l), Date.now());
+		assert.ok(!fs.existsSync(live), "after the socket dies, the same old dir is removed");
 		assert.match(logs.join("\n"), /removed stale/, "the removal was logged");
 	} finally {
 		if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
@@ -459,21 +565,38 @@ interface GateHarness {
 	gate: PermissionGate;
 	requests: Array<true>;
 	updates: Array<Record<string, unknown>>;
-	ask: (stepIdx: number, name: string, args: Record<string, unknown>) => Promise<{ decision: string; reason?: string }>;
+	logs: string[];
+	ask: (
+		stepIdx: number,
+		name: string,
+		args: Record<string, unknown>,
+		conversationId?: string,
+	) => Promise<{ decision: string; reason?: string }>;
 }
 
-async function startGateHarness(opts: { cwd: string; clientDeadlineMs?: number; outcome?: () => unknown }): Promise<GateHarness> {
+async function startGateHarness(opts: {
+	cwd: string;
+	clientDeadlineMs?: number;
+	outcome?: () => unknown;
+	requestImpl?: (m: string, p: Record<string, unknown>, ms: number) => Promise<unknown>;
+}): Promise<GateHarness> {
 	const requests: Array<true> = [];
 	const updates: Array<Record<string, unknown>> = [];
+	const logs: string[] = [];
+	const impl = opts.requestImpl;
 	const gate = new PermissionGate({
-		log: () => {},
+		log: (l) => {
+			logs.push(l);
+		},
 		notify: (u) => {
 			updates.push(u as unknown as Record<string, unknown>);
 		},
-		request: async (_m, _p, _ms) => {
-			requests.push(true);
-			return opts.outcome ? opts.outcome() : { outcome: { outcome: "selected", optionId: "allow_once" } };
-		},
+		request: impl
+			? (m, p, ms) => impl(m, p, ms)
+			: async (_m, _p, _ms) => {
+					requests.push(true);
+					return opts.outcome ? opts.outcome() : { outcome: { outcome: "selected", optionId: "allow_once" } };
+				},
 		cwd: opts.cwd,
 		clientDeadlineMs: opts.clientDeadlineMs ?? 3000,
 		hookDeadlineMs: 60000,
@@ -482,11 +605,12 @@ async function startGateHarness(opts: { cwd: string; clientDeadlineMs?: number; 
 		conversationId: () => "conv-1",
 	});
 	await gate.start();
-	const ask = async (stepIdx: number, name: string, args: Record<string, unknown>) => {
-		const { line } = await askSocket(gate.socketPath, { token: "tok-1", conversationId: "conv-1", stepIdx, toolCall: { name, args } });
+	const ask = async (stepIdx: number, name: string, args: Record<string, unknown>, conversationId = "conv-1") => {
+		const { line } = await askSocket(gate.socketPath, { token: "tok-1", conversationId, stepIdx, toolCall: { name, args } });
+		if (line === "") throw new Error(`no reply for step ${stepIdx} (the connection was closed)`);
 		return JSON.parse(line) as { decision: string; reason?: string };
 	};
-	return { gate, requests, updates, ask };
+	return { gate, requests, updates, logs, ask };
 }
 
 test("the gate: allow-always grants are in-memory, per key (the matching rules, live)", async () => {
@@ -545,13 +669,13 @@ test("the gate: allow-always grants are in-memory, per key (the matching rules, 
 	}
 });
 
-test("the gate: a mismatched conversation-id is refused at the socket (never a client ask)", async () => {
+test("the gate: an empty conversation-id is refused at the socket (never a client ask)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-conv-")));
 	try {
 		const h = await startGateHarness({ cwd: workspace });
 		const { line } = await askSocket(h.gate.socketPath, {
 			token: "tok-1",
-			conversationId: "other",
+			conversationId: "",
 			stepIdx: 1,
 			toolCall: { name: "run_command", args: { CommandLine: "ls" } },
 		});
@@ -717,6 +841,51 @@ test("the gate: the stream's ACTIVE records the parameters; a hook request repor
 			undefined,
 			"no pending metadata on an auto-allowed call",
 		);
+		await h.gate.dispose();
+	} finally {
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+test("the gate: a subagent's pending ask (same step index, sub conversation) is aborted in isolation", async () => {
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-conv-")));
+	const asks: Array<{ resolve: (v: unknown) => void }> = [];
+	try {
+		const h = await startGateHarness({
+			cwd: workspace,
+			requestImpl: () => new Promise((r) => asks.push({ resolve: r })),
+		});
+		// A main ask and a subagent ask at the same step index, both policy-asks (run_command).
+		const mainP = h.ask(5, "run_command", { CommandLine: "ls" });
+		// The subagent ask on a raw connection we control (so its hook side can be dropped).
+		const subConn = net.createConnection(h.gate.socketPath);
+		const subClosed = new Promise<void>((r) => subConn.on("close", () => r()));
+		subConn.write(
+			`${JSON.stringify({ token: "tok-1", conversationId: "conv-1-sub", stepIdx: 5, toolCall: { name: "run_command", args: { CommandLine: "ls" } } })}\n`,
+		);
+		for (;;) {
+			if (asks.length >= 2) break;
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		assert.strictEqual(asks.length, 2, "two client asks are in flight (main + sub)");
+		// Drop the subagent's hook connection: only the sub's ask aborts.
+		subConn.destroy();
+		await subClosed;
+		for (;;) {
+			if (h.logs.some((l) => l.includes("hook connection lost"))) break;
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		assert.ok(
+			h.logs.some((l) => /hook connection lost \(conv-1-sub:5\)/.test(l)),
+			"the sub key's loss was logged",
+		);
+		assert.ok(!h.logs.some((l) => /hook connection lost \(conv-1:5\)/.test(l)), "the main key's pending ask is not aborted");
+		// The aborted sub ask resolves as a reject (the reply goes to a dead connection, harmlessly);
+		// the main ask still answers when the client answers it.
+		assert.strictEqual(asks[0] !== undefined, true, "the main ask is still in flight");
+		asks[0].resolve({ outcome: { outcome: "selected", optionId: "allow_once" } });
+		const main = await mainP;
+		assert.strictEqual(main?.decision, "allow", "the main ask answered after the sub abort");
 		await h.gate.dispose();
 	} finally {
 		fs.rmSync(workspace, { recursive: true, force: true });

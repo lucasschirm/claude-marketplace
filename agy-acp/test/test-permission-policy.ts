@@ -179,7 +179,7 @@ test("the client options are the three exact ids, and only they are answers", ()
 });
 
 test("the allow-always key matching rules", () => {
-	// run_command: the normalised command (whitespace collapsed, truncated at 64 chars for very long ones).
+	// run_command: the full normalised command (whitespace collapsed, no prefix truncation).
 	assert.strictEqual(
 		grantKeyOf("run_command", { CommandLine: "git status" }, BASE),
 		grantKeyOf("run_command", { CommandLine: "git  status" }, BASE),
@@ -197,20 +197,21 @@ test("the allow-always key matching rules", () => {
 	);
 	assert.strictEqual(normalizeCommand("git   status"), "git status");
 	assert.strictEqual(normalizeCommand("  git status  "), "git status");
-	// a 64-char truncation: two commands sharing the first 64 chars share the grant, a difference within the first 64 does not
+	// the key is the full normalised command: a tail difference beyond 64 chars is a different grant
+	// (a prefix key would let `granted; hostile` inherit the grant).
 	const longA = `a${"b".repeat(70)}c`;
 	const longB = `a${"b".repeat(70)}d`;
-	assert.strictEqual(
+	assert.notStrictEqual(
 		grantKeyOf("run_command", { CommandLine: longA }, BASE),
 		grantKeyOf("run_command", { CommandLine: longB }, BASE),
-		"the 64-char truncation hides a tail difference",
+		"a tail difference is a different grant",
 	);
-	const diffA = `a${"b".repeat(50)}c${"d".repeat(20)}`;
-	const diffB = `a${"b".repeat(50)}e${"d".repeat(20)}`;
-	assert.notStrictEqual(
-		grantKeyOf("run_command", { CommandLine: diffA }, BASE),
-		grantKeyOf("run_command", { CommandLine: diffB }, BASE),
-		"a difference within the first 64 chars is a different grant",
+	const wsA = `a${"b".repeat(70)}  c`;
+	const wsB = `a${"b".repeat(70)}   c`;
+	assert.strictEqual(
+		grantKeyOf("run_command", { CommandLine: wsA }, BASE),
+		grantKeyOf("run_command", { CommandLine: wsB }, BASE),
+		"whitespace runs normalise even in long commands",
 	);
 	// file tools: the tool plus the resolved (symlink-safe) path.
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-policy-grant-"));

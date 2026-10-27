@@ -249,9 +249,11 @@ export class AgySession {
 		}
 		// A terminal step_update may carry the step's own type (an invoke_subagent DONE arrives as step_type
 		// "subagent"), so settling is tracking-based: any tracked id settles, untracked ones (user_input)
-		// are ignored. Subagent *internal* steps stay unmapped (sub-issue 59).
+		// are ignored. Subagent *internal* steps stay unmapped (sub-issue 59). A state outside the
+		// observed set (a newer agy state) keeps the tool tracked: failActiveTools settles it at turn end.
 		const id = toolCallIdOf(this.id, s.step_index);
 		if (s.state === "ACTIVE") this.mapActiveTool(s, id);
+		else if (s.state !== "DONE" && s.state !== "ERROR") return;
 		else if (this.activeTools.delete(id)) this.settleTerminalTool(s, id);
 	}
 
@@ -289,5 +291,8 @@ export class AgySession {
 		} catch (err) {
 			throw new RpcError(INVALID_PARAMS, (err as Error).message);
 		}
+		// The agent notifies the mode change (ACP: current_mode_update); the caller knows, but
+		// other listeners of the update stream do not.
+		this.emit({ sessionUpdate: "current_mode_update", currentModeId: modeId });
 	}
 }

@@ -64,7 +64,7 @@ export class PermissionGate {
 	private mode = "default";
 	private readonly grants = new Set<string>();
 	private readonly streamCalls = new Map<number, StreamCallRecord>();
-	private readonly pending = new Map<number, PendingAsk>();
+	private readonly pending = new Map<string, PendingAsk>();
 	private disposedFlag = false;
 
 	constructor(opts: PermissionGateOptions) {
@@ -77,7 +77,7 @@ export class PermissionGate {
 			maxHoldMs: opts.hookDeadlineMs + 60_000,
 			conversationId: opts.conversationId,
 			handle: (req) => this.handleHookRequest(req),
-			onConnectionLost: (stepIdx) => this.onConnectionLost(stepIdx),
+			onConnectionLost: (key) => this.onConnectionLost(key),
 		});
 	}
 
@@ -147,7 +147,7 @@ export class PermissionGate {
 		if (conversationId !== null && req.conversationId === conversationId) {
 			this.reportHookArgs(req, true); // in_progress update: the hook's args + the pending metadata
 		}
-		const outcome = await this.askClient(req.stepIdx, name, args);
+		const outcome = await this.askClient(req.stepIdx, name, args, req.conversationId);
 		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() }; // a disposed session is not a user reject
 		switch (outcome) {
 			case "allow":
@@ -168,16 +168,22 @@ export class PermissionGate {
 		stepIdx: number,
 		name: string,
 		args: Record<string, unknown>,
+		conversationId: string,
 	): Promise<"allow" | "allow-always" | "deadline" | "reject"> {
 		let resolveAbort: () => void = () => {};
 		const abortP = new Promise<void>((r) => (resolveAbort = r));
-		this.pending.set(stepIdx, { abort: () => resolveAbort() });
+		// Keyed per conversation: a subagent's step index may equal a main one, and a stray
+		// abort must not kill the other conversation's ask.
+		const key = `${conversationId}:${stepIdx}`;
+		this.pending.set(key, { abort: () => resolveAbort() });
 		const clientP = this.opts
 			.request(
 				"session/request_permission",
 				{
 					toolCall: {
-						toolCallId: toolCallIdOf(this.opts.conversationId() ?? "", stepIdx),
+						// The request's own conversation id: a subagent's step index must not be spliced
+						// onto the main conversation's tool call ids.
+						toolCallId: toolCallIdOf(conversationId, stepIdx),
 						title: toolTitleOf(name, args),
 						kind: toolKindOf(name),
 						status: "pending",
@@ -195,15 +201,15 @@ export class PermissionGate {
 				return /timed out/i.test(err.message) ? "deadline" : "reject";
 			});
 		return Promise.race([clientP, abortP.then(() => "reject" as const)]).finally(() => {
-			this.pending.delete(stepIdx);
+			this.pending.delete(key);
 		});
 	}
 
 	/** The hook went away before its answer: stop asking the client for it. */
-	private onConnectionLost(stepIdx: number): void {
-		const pending = this.pending.get(stepIdx);
+	private onConnectionLost(key: string): void {
+		const pending = this.pending.get(key);
 		if (pending) {
-			this.opts.log(`permission: hook connection lost (step ${stepIdx}) - aborting the client ask`);
+			this.opts.log(`permission: hook connection lost (${key}) - aborting the client ask`);
 			pending.abort();
 		}
 	}
@@ -257,7 +263,11 @@ export class PermissionGate {
 	}
 }
 
-/** The default deadline ladder: 10 min client < 11 min hook < 12 min timeout (600 s is the largest hook timeout the spike proved accepted; everything is configurable). */
+/** The default deadline ladder: 10 min client < 11 min hook < 12 min timeout (600 s is the
+ * largest hook timeout the spike verified agy honours; 720 s is the issue spec default. If a
+ * version clamps the hook timeout lower, the degradation is bounded: agy's kill of the hook
+ * races the client deadline, and the denial still carries a reason via the client path).
+ * Everything is configurable. */
 export const DEFAULT_CLIENT_DEADLINE_MS = 600_000;
 export const DEFAULT_HOOK_DEADLINE_MS = 660_000;
 export const DEFAULT_HOOK_TIMEOUT_SEC = 720;

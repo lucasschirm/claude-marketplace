@@ -220,11 +220,11 @@ export function sessionEndedReason(): string {
 
 // ---------------------------------------------------------------- allow-always grants
 
-/** A run_command grant covers the first 64 (whitespace-normalised) characters of the command. */
-export const COMMAND_PREFIX_CHARS = 64;
+/** Whitespace-normalised (trim, runs of whitespace to one space). The run_command grant key is
+ * the full normalised command: a prefix key would let a granted command's prefix cover a
+ * different, longer command. */
 export function normalizeCommand(command: string): string {
-	const n = command.trim().replace(/\s+/g, " ");
-	return n.length > COMMAND_PREFIX_CHARS ? n.slice(0, COMMAND_PREFIX_CHARS) : n;
+	return command.trim().replace(/\s+/g, " ");
 }
 
 function canonicalize(value: unknown): unknown {
@@ -257,8 +257,10 @@ export function argsDifferFrom(streamArgs: Record<string, unknown> | undefined, 
 }
 
 /**
- * The in-memory grant key: tool + command prefix (run_command) or tool + resolved path (file
- * tools), or just the tool name for everything else. Held per session, never written anywhere.
+ * The in-memory grant key: tool + full normalised command (run_command) or tool + resolved path
+ * (file tools), or just the tool name for everything else. Held per session, never written
+ * anywhere. The run_command key is the full normalised command (no prefix truncation: a prefix
+ * would let `granted; hostile` inherit the grant).
  */
 export function grantKeyOf(toolName: string, args: Record<string, unknown>, baseDir: string): string {
 	if (toolName === "run_command") {
