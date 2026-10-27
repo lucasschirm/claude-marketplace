@@ -11,7 +11,7 @@ export const AGY_PROBE_EVENT = "agy-acp-probe";
 
 export interface AgyProcessOptions {
 	cwd: string;
-	/** The exact environment the child sees. The caller owns it; it is never inherited implicitly. */
+	/** The exact environment the child sees; when omitted the driver passes its own process.env (the spawn itself never inherits implicitly). */
 	env?: NodeJS.ProcessEnv;
 	/** The program to run (default "agy"). */
 	command?: string;

@@ -78,7 +78,6 @@ let started = false; // the first stdin line has been processed (init needs it)
 let done = false; // every recorded line emitted
 let settled = false;
 let stderrWritten = false;
-let lastEmittedWasResult = false;
 let awaitingUser = false; // paused at a turn boundary, waiting for the line that starts the turn
 let waitingForSignal = false; // paused at the recorded interrupted result, waiting for SIGINT
 let queuedUserLines = 0; // user lines that arrived mid-turn
@@ -158,6 +157,11 @@ function finishReplay(): void {
 		settle();
 		return;
 	}
+	if (stdinClosed) {
+		// EOF mid-turn (the survival path): real agy finishes the turn and then exits.
+		settle();
+		return;
+	}
 	// Real agy sits at the turn boundary after the final line and exits when stdin closes.
 	awaitingUser = true;
 	startWaiting();
@@ -216,9 +220,6 @@ function advance(): void {
 	}
 	const isResult = lineEvent(line) === "result";
 	nextLine++;
-	if (isResult) {
-		lastEmittedWasResult = true;
-	}
 	emitLine(line, () => {
 		if (nextLine >= lines.length) {
 			finishReplay();
@@ -249,7 +250,9 @@ let stdinClosed = false;
 process.stdin.setEncoding("utf8");
 process.stdin.on("end", () => {
 	// Real agy, sitting at a turn boundary, exits with its code when stdin closes; a mid-turn
-	// turn survives EOF until the turn ends (see the result branch in advance()).
+	// turn survives EOF until the turn ends (see the result branch in advance()). The
+	// waitingForSignal state survives EOF too: the record delivered SIGINT there, so the fake
+	// keeps waiting for it (the group-teardown test pins that dispose must then escalate).
 	stdinClosed = true;
 	if (settled || waitingForSignal) return;
 	if (started && !awaitingUser && !done) return;
@@ -423,33 +426,27 @@ function hasUsableUserContent(line: string): boolean {
 // ------------------------------------------------------------------ signals
 
 process.on("SIGINT", () => {
+	if (settled) return;
 	if (waitingForSignal) {
 		waitingForSignal = false;
 		emitLine(lines[lines.length - 1]);
 		nextLine = lines.length;
-		finishReplay(); // parks; the recorded exit code lands when stdin closes
+		settle(); // record: agy exits on its own after the interrupted result, before stdin closes
 		return;
 	}
-	if (settled) return;
-	if (done) {
-		scheduleExit(exitCode);
-		return;
-	}
-	if (lastEmittedWasResult) {
+	if (awaitingUser) {
 		// Idle between turns: SIGINT just ends the process (real agy exits 130, no result).
 		stopWaiting();
 		scheduleExit(130);
 		return;
 	}
-	// Mid-turn: emit the interrupted result real agy would emit, then sit at the boundary;
-	// the recorded exit code lands when stdin closes.
+	// Mid-turn (or before the first turn): emit the interrupted result real agy would emit, then
+	// exit on its own - the record's exit precedes the parent's stdin close.
 	const synthetic =
 		'{"event":"result","result":{"conversation_id":"' +
 		`${conversationId}","status":"ERROR","response":"","error":"interrupted","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}`;
 	emitLine(synthetic);
-	done = true;
-	awaitingUser = true;
-	startWaiting();
+	settle();
 });
 
 // ------------------------------------------------------------------ flag validation
@@ -477,6 +474,13 @@ function parseArgv(tokens: string[]): FlagSet {
 	return out;
 }
 
+function assertNoDrift(got: FlagSet, want: FlagSet): void {
+	// Both directions: a recorded flag that the driver dropped, and a driver-side addition the
+	// record never saw, both drift.
+	for (const key of got.values.keys()) if (!want.values.has(key) && key !== "--log-file") die(`fake-agy: unexpected flag ${key}`, 2);
+	for (const flag of got.flags) if (flag !== "-p=" && !want.flags.has(flag)) die(`fake-agy: unexpected flag ${flag}`, 2);
+}
+
 function checkArgs(): void {
 	const got = parseArgv(argv);
 	for (const [flag, value] of [
@@ -498,4 +502,5 @@ function checkArgs(): void {
 	for (const flag of want.flags) {
 		if (flag !== "-p=" && !got.flags.has(flag)) die(`fake-agy: expected flag ${flag}`, 2);
 	}
+	assertNoDrift(got, want);
 }

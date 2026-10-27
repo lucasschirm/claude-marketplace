@@ -84,7 +84,7 @@ function runVersionCommand(argv: string[], timeoutMs: number): Promise<string> {
 		}, timeoutMs);
 		watchdog.unref();
 		child.on("error", (err: Error) => fail(`cannot run ${argv[0]}: ${err.message}`));
-		// A normal exit (or the spawn timeout's SIGTERM) lands here; the watchdog covers the rest.
-		child.on("exit", (code, signal) => finish(code, signal));
+		// "close" (not "exit"): stdout is fully delivered before the terminal state (process.ts, same).
+		child.on("close", (code, signal) => finish(code, signal));
 	});
 }

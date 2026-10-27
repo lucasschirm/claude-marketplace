@@ -11,11 +11,8 @@ const DEFAULT_STDERR_BYTES = 64 * 1024;
 const DEFAULT_GRACE_MS = 3_000;
 const DEFAULT_TERM_MS = 1_000;
 
-/**
- * One `agy` child in its own process group: emits "event" (AgyDriverEvent) per decoded init /
- * step_update / result line, and "exit" (AgyExitInfo) exactly once - after stdio is drained,
- * also on a spawn failure. Nothing outlives `dispose()`.
- */
+/** One `agy` child in its own process group: emits "event" per decoded line, and "exit"
+ * (AgyExitInfo) exactly once - after stdio is drained, also on a spawn failure. */
 export class AgyProcess extends EventEmitter {
 	private readonly child: ReturnType<typeof spawnProcessGroup>;
 	private readonly log: (line: string) => void;
@@ -77,7 +74,7 @@ export class AgyProcess extends EventEmitter {
 			stream.on("error", (err: Error) => this.log(`stdio error: ${err.message}`));
 		}
 		this.child.on("error", (err: Error) => this.onSpawnError(err));
-		// "close" (not "exit"): stdio is drained, so the final frame and the stderr tail are in hand first.
+		// "close" (not "exit"): stdio is drained before the terminal state.
 		this.child.on("close", (code, signal) => this.onExit(code, signal));
 	}
 
@@ -119,8 +116,8 @@ export class AgyProcess extends EventEmitter {
 		if (!stdin.write(`${line}\n`)) this.log("stdin backpressure - continuing (stream lines are small)");
 	}
 
-	/** Resolves with the `init` `conversation_id` via a probe event agy ignores; a second probe
-	 * before `init` reuses the first, and a timeout carries the stderr tail. */
+	/** Resolves with the init conversation_id via a probe event agy ignores; a timeout carries
+	 * the stderr tail and allows a retry. */
 	probe(timeoutMs?: number): Promise<string> {
 		if (this.conversationIdValue !== null) return Promise.resolve(this.conversationIdValue);
 		if (this.exitedFlag) return Promise.reject(new Error(`agy has exited (code=${this.exitInfoValue?.code ?? "unknown"}); cannot probe`));
@@ -129,7 +126,7 @@ export class AgyProcess extends EventEmitter {
 		const ms = timeoutMs ?? this.probeTimeoutMs;
 		const promise = new Promise<string>((resolve, reject) => {
 			const timer = setTimeout(() => {
-				if (this.pendingProbe?.timer === timer) this.pendingProbe = null;
+				if (this.pendingProbe?.timer === timer) this.pendingProbe = this.probePromise = null; // a timeout allows a retry
 				reject(new Error(`agy did not send init within ${ms} ms; stderr tail: ${this.stderrTail}`));
 			}, ms);
 			timer.unref();
@@ -150,8 +147,7 @@ export class AgyProcess extends EventEmitter {
 			}
 	}
 
-	/** Shuts the child down and waits until the group is gone: close stdin, `graceMs`, SIGTERM,
-	 * `termMs`, SIGKILL. Idempotent. */
+	/** Shuts the child down: close stdin, graceMs, SIGTERM, termMs, SIGKILL. Idempotent. */
 	dispose(): Promise<AgyExitInfo> {
 		if (this.disposePromise) return this.disposePromise;
 		this.disposePromise = new Promise<AgyExitInfo>((resolve) => {
@@ -219,6 +215,7 @@ export class AgyProcess extends EventEmitter {
 	private onExit(code: number | null, signal: NodeJS.Signals | null): void {
 		if (this.exitedFlag) return;
 		this.exitedFlag = true;
+		this.appendStderr(this.stderrDecoder.decode()); // flush any trailing partial sequence
 		this.exitInfoValue = { code, signal, stderrTail: this.stderrTail };
 		const detail = `agy exited before init (code=${code ?? "none"} signal=${signal ?? "none"}); stderr: ${this.stderrTail.slice(0, 400)}`;
 		this.rejectPendingProbe(detail);
@@ -248,9 +245,11 @@ export class AgyProcess extends EventEmitter {
 
 	private appendStderr(chunk: string): void {
 		this.stderrBuf += chunk;
-		// The budget is in bytes; trim one code unit at a time so a multi-byte character never straddles the cut.
-		while (Buffer.byteLength(this.stderrBuf, "utf8") > this.stderrLimit && this.stderrBuf.length > 1) {
-			this.stderrBuf = this.stderrBuf.slice(1);
+		// The budget is in bytes; trim one whole code point at a time so a multi-byte character
+		// (including astral, two UTF-16 units) never straddles the cut.
+		while (Buffer.byteLength(this.stderrBuf, "utf8") > this.stderrLimit && this.stderrBuf.length > 0) {
+			const cp = this.stderrBuf.codePointAt(0) ?? 0;
+			this.stderrBuf = this.stderrBuf.slice(cp > 0xffff ? 2 : 1);
 		}
 	}
 

@@ -164,8 +164,9 @@ function driverOptsFor(fixture: string): AgyProcessOptions {
 /**
  * Every recorded scenario replays end-to-end through the driver: the probe gets the recorded
  * conversation id, each recorded (or placeholder, for the bridge scenarios that record no input
- * lines) user line advances a turn, SIGINT is delivered where the record ends interrupted, and
- * the exit code matches the record. The fake's flag validation means a drifted argv fails here.
+ * lines) user line advances a turn, SIGINT is delivered while the record's turn is still
+ * running (the dedicated SIGINT test pins the recorded-replay path), and the exit code matches
+ * the record. The fake's flag validation means a drifted argv fails here.
  */
 test("every fixture replays end-to-end through the driver", async () => {
 	for (const fixture of scenarioNames()) await replayFixture(fixture);
@@ -293,9 +294,10 @@ test("SIGINT cancels the turn: interrupted result, exit 1, stderr tail captured"
 	try {
 		await h.driver.probe(3000);
 		h.driver.send(promptOf(fixtureMeta("interrupted-sigint").inputLines?.[0] ?? ""));
-		await waitFor("the tool to go ACTIVE", 5000, () =>
-			h.events.some((e) => e.event === "step_update" && e.step_update.step_type === "tool"),
-		);
+		// Wait until every recorded line before the interrupted result is out, so the fake is in
+		// its recorded-replay state (waitingForSignal) when SIGINT lands - not mid-turn, where it
+		// would emit the synthetic zero-counter result instead.
+		await waitFor("the replay to reach the interrupted result", 5000, () => h.events.length >= 4);
 		h.driver.interrupt();
 		const interrupted = await waitFor(
 			"the interrupted result",
@@ -308,9 +310,9 @@ test("SIGINT cancels the turn: interrupted result, exit 1, stderr tail captured"
 		assert.strictEqual(interrupted.result.num_turns, 1);
 		assert.ok(interrupted.result.usage.input_tokens > 0);
 		assert.ok(interrupted.result.usage.output_tokens > 0);
-		// The fake sits at the boundary after the interrupted result, so the exit comes from
-		// dispose() closing stdin - the first leg of the shutdown, with the recorded exit code.
-		const exit = await h.driver.dispose();
+		// The record shows agy exiting on its own after the interrupted result, before the parent
+		// closes stdin - the fake models that, so the exit arrives without a dispose.
+		const exit = await waitFor("exit", 5000, () => (h.exits.length > 0 ? h.exits[0] : false));
 		assert.strictEqual(exit.code, 1);
 		assert.match(h.driver.stderrTail, /error: interrupted/);
 	} finally {
