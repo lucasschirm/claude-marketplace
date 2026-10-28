@@ -1,8 +1,9 @@
-// One ACP session: owns the agy child and the permission gate, maps the stream to
-// session/update notifications, and settles each prompt with a stopReason or a JSON-RPC
-// error (an error is never end_turn - see turn.ts). A child exit without a `result` marks
-// needsRespawn (the next prompt relaunches agy with `--conversation <id>`); a headless
-// auto-deny is an end_turn with _meta.deniedActions.
+// One ACP session: owns the agy child and the permission gate, and settles each prompt with a
+// stopReason or a JSON-RPC error (an error is never end_turn - see turn.ts; the stream mapping lives
+// in map-steps.ts). A child exit without a `result` marks needsRespawn, so the next prompt relaunches
+// agy with --conversation <id>; a headless auto-deny is an end_turn carrying _meta.deniedActions.
+// Issue #54 is the process lifecycle here: session/cancel (asks denied with the cancel reason, SIGINT,
+// then the group ladder), the lazy respawn of a child that died idle, and the heartbeat.
 import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { TURN_IN_PROGRESS, type AcpPromptResult, type AcpSessionUpdate } from "./acp.ts";
 import { flattenPrompt } from "./prompt.ts";
@@ -13,22 +14,15 @@ import {
 	newPermissionToken,
 	PermissionGate,
 } from "./permission-gate.ts";
-import { runTurn, failActiveTools, settleTurn, type PendingTurn } from "./turn.ts";
-import { AgyProcess, ZERO_CUMULATIVE, type AgyCumulative, type AgyDriverEvent, type AgyExitInfo } from "./agy-driver.ts";
+import { runTurn, failActiveTools, settleCancelled, settleTurn, type PendingTurn } from "./turn.ts";
+import { mapStepToUpdates } from "./map-steps.ts";
+import { spawnSessionAgy } from "./spawn-agy.ts";
+import { TurnHeartbeat } from "./heartbeat.ts";
+import { cancelAgy, CANCELLED_TOOL_REASON } from "./cancel.ts";
+import { DEFAULT_CANCEL_ESCALATE_MS, DEFAULT_HEARTBEAT_MS } from "./config.ts";
+import { ZERO_CUMULATIVE, type AgyProcess, type AgyCumulative, type AgyDriverEvent, type AgyExitInfo } from "./agy-driver.ts";
 // Type-only (erased at runtime): the launch options are the server's public API.
 import type { AgyLaunchOptions } from "./server.ts";
-import {
-	agentMessageChunk,
-	systemMessageText,
-	toolCallCompleted,
-	toolCallFailed,
-	toolCallIdOf,
-	toolCallStarted,
-	toolKindOf,
-	toolLocationsOf,
-	toolTitleOf,
-} from "./update-map.ts";
-
 export interface SessionLaunchConfig extends AgyLaunchOptions {
 	cwd: string;
 	log: (line: string) => void;
@@ -51,11 +45,11 @@ export class AgySession {
 	private disposed = false;
 	private cumulative: AgyCumulative = { ...ZERO_CUMULATIVE, usage: { ...ZERO_CUMULATIVE.usage } };
 	private turn: Promise<AcpPromptResult> | null = null;
-	// Public (turn.ts): the turn machinery settles the pending turn and the still-active tools.
+	private turnCountValue = 0; // the prompts started; the gate scopes a cancel to this number
+	private readonly heartbeat: TurnHeartbeat;
+	// Public (turn.ts, map-steps.ts): the turn machinery settles the pending turn and the still-active tools.
 	pending: PendingTurn | null = null;
 	activeTools = new Set<string>();
-	// Sub-issue 54 (cancel) will set this; until it lands it is never true, so a `result ERROR` is always an error.
-	cancelRequested = false;
 	constructor(config: SessionLaunchConfig) {
 		this.config = config;
 		this.hookToken = newPermissionToken();
@@ -70,7 +64,11 @@ export class AgySession {
 			hookTimeoutSec: config.hookTimeoutSec ?? DEFAULT_HOOK_TIMEOUT_SEC,
 			token: this.hookToken,
 			conversationId: () => (this.idValue === "" ? null : this.idValue),
+			// Derived, not a flag to keep in step: no prompt in flight means no answer to give.
+			currentTurn: () => this.turn,
+			turnCount: () => this.turnCountValue,
 		});
+		this.heartbeat = new TurnHeartbeat((update) => this.emit(update), { pendingPermissions: () => this.gate.pendingAsks() });
 	}
 
 	get id(): string {
@@ -112,22 +110,62 @@ export class AgySession {
 		if (this.disposed) throw new RpcError(INTERNAL_ERROR, "session is closed");
 		const text = flattenPrompt(blocks);
 		if (this.turn) throw new RpcError(TURN_IN_PROGRESS, "turn in progress");
-		this.turn = runTurn(this, text).finally(() => (this.turn = null));
+		// The beat starts before the child is chosen: a respawn is silence a watchdog must read as waiting.
+		this.turnCountValue++; // the gate scopes a cancel to this turn number
+		this.heartbeat.start(this.config.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
+		this.turn = runTurn(this, text).finally(() => {
+			this.turn = null;
+			this.heartbeat.stop();
+		});
 		return this.turn;
 	}
 
-	/** Kills the child (if any) and abandons any pending turn; idempotent. */
+	/**
+	 * session/cancel (issue #54), in the order a client can rely on: deny every pending permission
+	 * request with the "cancelled" reason, answer the prompt `cancelled`, then make agy stop - SIGINT,
+	 * and for an agy still alive `cancelEscalateMs` later the process-group ladder (SIGTERM, SIGKILL).
+	 * The session is marked for a `--conversation` respawn either way; a cancel arriving mid-respawn is
+	 * answered too, and that turn never starts.
+	 */
+	cancel(): void {
+		if (this.disposed) return;
+		const driver = this.driver;
+		if (!this.turn) {
+			// Idle between turns: a SIGINT would only kill a healthy child and buy a resume. Nothing is hung.
+			this.config.log(`session ${this.id}: session/cancel with no turn in flight - nothing to cancel`);
+			return;
+		}
+		this.needsRespawnValue = true;
+		// The asks first: a hook holding a tool call is released with our reason, and the dialog closes now.
+		this.gate.abortPending("the client cancelled the turn", "cancelled");
+		this.gate.onTurnEnd();
+		// Then the turn itself, answered now rather than whenever agy gets round to dying: a client that
+		// asked to stop never waits out the ladder below (this fails the tools still ACTIVE too).
+		settleCancelled(this, CANCELLED_TOOL_REASON);
+		// The SIGINT -> process-group window is AGY_ACP_CANCEL_ESCALATE_MS (default 5 s).
+		const escalateMs = this.config.cancelEscalateMs ?? DEFAULT_CANCEL_ESCALATE_MS;
+		if (!driver) {
+			// Still choosing its child (a respawn); turn.ts puts that child away instead of sending it text.
+			this.config.log(`session ${this.id}: cancelling a turn with no child yet - it will not start`);
+			return;
+		}
+		this.config.log(`session ${this.id}: cancelling the turn (SIGINT; group escalation after ${escalateMs} ms)`);
+		cancelAgy(driver, escalateMs, (line) => this.config.log(`session ${this.id}: ${line}`));
+	}
+
+	/** Kills the child (if any) and settles any pending turn `cancelled`; idempotent. */
 	async dispose(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
 		const driver = this.driver;
 		this.driver = null;
 		this.live = false;
+		this.heartbeat.stop();
 		const pending = this.pending;
 		if (pending && !pending.settled) {
-			pending.settled = true;
-			this.pending = null;
-			pending.reject(new Error("session disposed"));
+			// An interruption we caused is a cancellation, not an error (the session/cancel rule); stdin
+			// EOF is a half-close, so the client may still be reading what we already settled.
+			settleCancelled(this, "the session was disposed");
 		}
 		if (driver) await driver.dispose();
 		await this.gate.dispose(); // denies any pending permission request and removes the bridge dir
@@ -139,6 +177,14 @@ export class AgySession {
 		const current = this.driver;
 		if (current && this.live && !this.needsRespawn) return current;
 		const resume = this.needsRespawn;
+		if (current && !current.exited) {
+			// The child we are replacing is still dying (a cancel escalates asynchronously and the next
+			// prompt can arrive first): awaiting its bounded ladder keeps no child unowned.
+			this.config.log(`session ${this.id}: waiting for the dying agy child before respawning`);
+			this.driver = null;
+			this.live = false;
+			await current.dispose();
+		}
 		const driver = this.spawnDriver(resume);
 		this.driver = driver;
 		this.live = true;
@@ -152,40 +198,26 @@ export class AgySession {
 			this.needsRespawnValue = false;
 			return driver;
 		} catch (err) {
+			// Unown the child before waiting for it to die: its exit must not answer the prompt instead of this error.
 			this.live = false;
-			await driver.dispose();
 			this.driver = null;
+			await driver.dispose();
 			throw new RpcError(INTERNAL_ERROR, `agy failed to ${resume ? "resume" : "start"}: ${(err as Error).message}`, {
 				stderrTail: driver.stderrTail,
 			});
 		}
 	}
 
+	/** The child for one launch (first start or `--conversation` respawn); see spawn-agy.ts. */
 	private spawnDriver(resume: boolean): AgyProcess {
-		const a = this.config;
-		return new AgyProcess({
-			cwd: this.config.cwd,
-			// Child env: configured env plus the bridge trio (socket, token, hook deadline) - the hook dials with these.
-			env: {
-				...(a.env ?? process.env),
-				AGY_ACP_SOCK: this.gate.socketPath,
-				AGY_ACP_TOKEN: this.hookToken,
-				AGY_ACP_HOOK_DEADLINE_MS: String(this.hookDeadlineMs),
-			},
-			command: a.command,
-			argvPrefix: a.argvPrefix,
-			model: a.model,
-			effort: a.effort,
-			addDirs: [...(a.addDirs ?? []), this.gate.dir],
-			// Forced: the bridge hook is the only gate, and a hook cannot override headless
-			// auto-deny - the two are a pair. A launch without a bridge must never happen.
-			skipPermissions: true,
-			conversation: resume ? this.id : undefined,
+		return spawnSessionAgy({
+			config: this.config,
+			bridge: { socketPath: this.gate.socketPath, dir: this.gate.dir },
+			hookToken: this.hookToken,
+			hookDeadlineMs: this.hookDeadlineMs,
+			resume,
+			conversationId: this.id,
 			previous: this.cumulative,
-			probeTimeoutMs: a.probeTimeoutMs,
-			graceMs: a.graceMs,
-			termMs: a.termMs,
-			log: this.config.log,
 		});
 	}
 
@@ -207,7 +239,11 @@ export class AgySession {
 				this.config.log(`session ${this.id}: step_update outside a turn (step ${e.step_update.step_index}) - ignored`);
 				return;
 			}
-			this.mapStep(e);
+			// The stream mapping lives in map-steps.ts (the session owns the lifecycle, not the mapping).
+			mapStepToUpdates(
+				{ activeTools: this.activeTools, conversationId: this.id, log: this.config.log, emit: (u) => this.emit(u), gate: this.gate },
+				e.step_update,
+			);
 			return;
 		}
 		// result: the turn's terminal event; the raw cumulative state is kept for a respawn.
@@ -227,53 +263,17 @@ export class AgySession {
 				`session ${this.id}: agy exited (code=${info.code ?? "none"} signal=${info.signal ?? "none"}) - the next prompt respawns`,
 			);
 		}
+		// A cancel settled the turn when it was asked, so a cancelled child exiting is the expected
+		// ending here and reaches nothing below.
 		const pending = this.pending;
 		if (pending && !pending.settled) {
-			// A child that dies mid-turn: fail its still-active tools, then error the prompt - never an end_turn.
+			// A child that dies on its own mid-turn: fail its still-active tools, then error the prompt.
 			failActiveTools(this, "the agy process exited before the turn finished");
 			const why = `exit code=${info.code ?? "none"} signal=${info.signal ?? "none"}`;
 			pending.settled = true;
 			this.pending = null;
 			pending.reject(new RpcError(INTERNAL_ERROR, `agy exited without a result (${why})`, { agyError: why, stderrTail: info.stderrTail }));
 		}
-	}
-
-	private mapStep(e: Extract<AgyDriverEvent, { event: "step_update" }>): void {
-		const s = e.step_update;
-		if (s.step_type === "agent_response") {
-			if (typeof s.text_delta === "string" && s.text_delta !== "") this.emit(agentMessageChunk(s.text_delta));
-			return;
-		}
-		if (s.step_type === "system_message") {
-			this.config.log(`session ${this.id}: system_message step ${s.step_index} (${s.state})`);
-			this.emit(agentMessageChunk(systemMessageText(s.text_delta)));
-			return;
-		}
-		// A terminal step_update may carry the step's own type (an invoke_subagent DONE arrives as step_type
-		// "subagent"), so settling is tracking-based: any tracked id settles, untracked ones (user_input)
-		// are ignored. Subagent *internal* steps stay unmapped (sub-issue 59). A state outside the
-		// observed set (a newer agy state) keeps the tool tracked: failActiveTools settles it at turn end.
-		const id = toolCallIdOf(this.id, s.step_index);
-		if (s.state === "ACTIVE") this.mapActiveTool(s, id);
-		else if (s.state !== "DONE" && s.state !== "ERROR") return;
-		else if (this.activeTools.delete(id)) this.settleTerminalTool(s, id);
-	}
-
-	private mapActiveTool(s: Extract<AgyDriverEvent, { event: "step_update" }>["step_update"], id: string): void {
-		if (s.step_type !== "tool") return;
-		this.activeTools.add(id);
-		const name = s.tool_name ?? s.tool_info?.name ?? "tool";
-		const parameters = s.tool_info?.parameters;
-		// The stream's ACTIVE precedes the PreToolUse hook: the call is created from the stream's
-		// parameters; the gate follows with an in_progress update on a rewrite or a pending ask.
-		this.gate.onStreamActive(s.step_index, name, parameters);
-		const title = toolTitleOf(name, parameters ?? {});
-		this.emit(toolCallStarted(id, title, toolKindOf(name), parameters, parameters ? toolLocationsOf(parameters) : undefined));
-	}
-
-	private settleTerminalTool(s: Extract<AgyDriverEvent, { event: "step_update" }>["step_update"], id: string): void {
-		if (s.state === "DONE") this.emit(toolCallCompleted(id, s.tool_info?.output));
-		else if (s.state === "ERROR") this.emit(toolCallFailed(id, s.tool_info?.error?.message ?? "tool failed"));
 	}
 
 	/** The session/update emitter (public: turn.ts settles turns through the session). */

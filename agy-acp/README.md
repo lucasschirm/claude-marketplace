@@ -26,7 +26,10 @@ ends with a `stopReason` or a JSON-RPC error, never an error dressed as `end_tur
 `result` ERROR and a child exit without a `result` are `-32603` errors (the latter marks the
 session for a `--conversation` respawn on the next prompt), a headless auto-deny is an
 `end_turn` whose `denied_actions` go out as a notice before the response and ride in
-`_meta.deniedActions`. Permissions are live (the PreToolUse bridge, below); the rest of
+`_meta.deniedActions`. `session/cancel` is live, and with it the process lifecycle the long
+unattended runs need (see below): the prompt answers `stopReason: "cancelled"`, the pending
+permission requests are denied with that reason, and `agy` is made to stop rather than asked.
+Permissions are live (the PreToolUse bridge, below); the rest of
 the ACP surface lands in the
 follow-up issues of
 [lucasschirm/claude-marketplace#49](https://github.com/lucasschirm/claude-marketplace/issues/49).
@@ -66,7 +69,13 @@ The deadline ladder, lowest to highest: the client deadline (default 10 min, a d
 reason) < `AGY_ACP_HOOK_DEADLINE_MS` (the hook's own timer) < the `hooks.json` timeout
 (720 s, agy's timer). While a request is pending the `tool_call` update carries
 `_meta.permission` (state, deadline) for a client watchdog; on cancel, a child exit or
-dispose every pending request is denied.
+dispose every pending request is denied. A request that arrives with **no turn in flight** is refused
+outright rather than asked - between a cancel and the child's death, or from a hook that outlived an
+`agy` that died mid-turn, there is no prompt left to carry the answer, so an ask would be a dialog
+nobody can close. The session's live turn is what answers this question (`currentTurn`), so a new
+turn asks as usual without anything having to be reset - and because the gate also counts prompts
+(`turnCount`), a cancel stops being the reason for a refusal as soon as a later turn has run, even a
+turn that never reached a hook.
 
 agy emits a tool step's `ACTIVE` stream event **before** running the `PreToolUse` hook, so
 the `tool_call` is created from the stream's parameters and the hook's args arrive as an
@@ -75,6 +84,76 @@ a stream-reported key (agy adds metadata fields such as `toolSummary`, which are
 rewrite), the difference is logged and flagged `_meta.argsRewritten`. Remaining risk:
 our hook may not sort last in the chain, so a repo hook running after ours can still
 rewrite the args we evaluated.
+
+## Cancelling a turn, and the process going away
+
+A turn lives inside an `agy` process, and a long unattended run is where the two come apart. Both
+directions are the process's problem, not the model's, so they are handled here.
+
+**`session/cancel`** (a notification: it is never answered, so a cancel of an unknown session is
+logged rather than answered with an error) does four things, in the order a client can rely on:
+
+1. every pending `session/request_permission` of this session is denied with the cancellation
+   reason, so the hook is released with the same words the client sees - and the `tool_call_update`
+   that closes the dialog goes out with `_meta.permission.state: "cancelled"`. Anything that asks
+   **after** the turn is over is refused with those same words rather than asked: `agy` can fire a
+   hook between the cancel and the death it causes, and there is no `session/prompt` left to carry an
+   answer to it. The rule is the general one - no turn in flight, no permission request (see
+   `currentTurn` above) - so a hook that outlives an `agy` that died mid-turn is refused too, with
+   the session-ended reason.
+2. the in-flight `session/prompt` answers `{ "stopReason": "cancelled" }` **at once**, with its
+   still-`ACTIVE` tools reported failed: a client that asked to stop is never made to wait for an
+   `agy` that may take seconds to die (a `result` that arrives afterwards is ignored);
+3. `agy` gets `SIGINT` - the mechanism it implements, answering with `error: "interrupted"` and
+   killing the tool command it was running. One that is still alive `AGY_ACP_CANCEL_ESCALATE_MS`
+   later gets the teardown ladder on its process group (`SIGTERM`, then `SIGKILL`); one that died
+   on the `SIGINT` but left its tool command running in that group is swept the same way, because a
+   signal aimed at `agy` alone never reaches it;
+4. the session is marked `needsRespawn`: the next prompt relaunches `agy` with
+   `--conversation <id>`, so the cancellation costs the conversation nothing.
+
+A `session/cancel` that arrives **between** turns is a no-op, logged as one: a `SIGINT` there would
+only kill a healthy child and buy a multi-second resume, with nothing hung to unstick. One that
+arrives **during** a respawn (the turn has a prompt and a child that is still probing, or none at
+all) is answered like any other: the child is killed and the prompt is never sent, so the turn the
+client called off is never run.
+
+**The heartbeat** is how a silent turn tells a watchdog "waiting" from "gone" - the distinction that
+matters when a `PreToolUse` hook is blocked on a decision or a command has been running for a
+minute. While a turn is in flight the session emits a `session/update` whose only content is `_meta`:
+
+```json
+{ "sessionUpdate": "heartbeat",
+  "_meta": { "heartbeat": { "seq": 4, "atMs": 1764000000000, "turnMs": 45000,
+                            "state": "waiting_permission", "pendingPermissions": 1 } } }
+```
+
+`state` is `waiting_permission` while a decision is outstanding and `running` otherwise. A client
+that does not know the update ignores it (nothing else on the stream changes); one that does never
+has to parse content to prove liveness. The interval is `AGY_ACP_HEARTBEAT_MS` (default 15 000,
+`0` disables it), and the beat stops the moment the turn settles.
+
+**When agy-acp itself goes away** - the client closes stdin (ACP's hang-up), or `SIGTERM`, `SIGINT`
+or `SIGHUP` arrives - all three run one exit path: cancel every turn, deny every pending request,
+dispose every child, remove every bridge dir, flush the protocol channel, and only then exit. A
+hang-up *starts* that path rather than disposing the sessions first and reporting afterwards, because
+a teardown that happens before the deadline is armed is a teardown the deadline cannot bound. The
+path has a deadline (`AGY_ACP_SHUTDOWN_TIMEOUT_MS`, default 10 000) that **races** the cleanup rather
+than watches it: past it the process exits with the cleanup abandoned mid-flight and what is being
+left named in the log, because a wedged child must not turn a hang-up into a process somebody has to
+kill by hand. A second signal skips the remaining politeness. Exit code 0
+when the cleanup finished inside the deadline, 1 when it was forced.
+
+Two residuals, both from being killed rather than told to leave:
+
+- `SIGKILL`ed (or crashed) `agy-acp` cannot clean up: its `agy` children keep running (they are in
+  their own process groups, which is what makes the ladder reliable) and its bridge dirs survive.
+  The next start sweeps stale dirs - over an hour old **and** with a socket that no longer answers -
+  so the dirs go eventually; nothing reclaims the orphaned `agy` processes, and a hook of theirs
+  fails closed on the dead socket, so an orphan cannot run a tool call.
+- a tool command that detached itself (`setsid`, `nohup`, `& disown`) belongs to no process group we
+  can see, so it outlives every ladder above. `agy` killing its own tool children is what the spike
+  recorded; ours is the backstop for the ones it did not kill.
 
 ## The agy process driver
 
@@ -90,7 +169,10 @@ The process model, from the spike (agy 1.4.2):
 - SIGINT cancels the running turn (agy reports `error: "interrupted"` and kills its own tool
   children); closing stdin does **not** stop a running turn, so `dispose()` escalates:
   close stdin, `graceMs`, SIGTERM the process group, `termMs`, SIGKILL - nothing outlives it;
-- one child per session, in its own process group, with a controlled env.
+- one child per session, in its own process group, with a controlled env;
+- a child that dies is not respawned eagerly: the session marks `needsRespawn` and the next prompt
+  pays the resume, which is what keeps a session that goes quiet for an hour from spending launches.
+  A child that dies **during** a turn fails its still-`ACTIVE` tools and errors the prompt.
 
 The contract types for `init` / `step_update` / `result` live in `src/agy/contract.ts` and are
 pinned against the recorded fixtures: every field in `test/fixtures/stream/field-inventory.json`
@@ -122,6 +204,11 @@ agy-acp --help                      # usage
 AGY_ACP_LOG=/tmp/agy-acp.log agy-acp   # diagnostics to a file instead of stderr
 ```
 
+The knobs, all with the defaults above and all read from the environment (`agy-acp --help` prints
+them): `AGY_ACP_COMMAND` (the `agy` binary to launch), `AGY_ACP_CANCEL_ESCALATE_MS` (the
+`SIGINT` -> process-group window), `AGY_ACP_HEARTBEAT_MS` (0 disables the beat) and
+`AGY_ACP_SHUTDOWN_TIMEOUT_MS` (the exit deadline).
+
 For Zed, an `agent_servers` entry along the lines of:
 
 ```json
@@ -135,7 +222,7 @@ For Zed, an `agent_servers` entry along the lines of:
 }
 ```
 
-The server exits cleanly (code 0) when the client closes stdin.
+Closing stdin is the hang-up: the server disposes its sessions and their children, then exits 0.
 
 ## Development
 

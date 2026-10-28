@@ -16,11 +16,11 @@
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
     "biome.suspicious/noExplicitAny": 151,
-    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
-    "biome.correctness/noUnusedImports": 1,
-    "biome.correctness/noUnusedFunctionParameters": 1
+    "biome.correctness/noUnusedFunctionParameters": 1,
+    "biome.correctness/noUnusedImports": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
@@ -46,7 +46,7 @@
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 627,
-    "agy-acp/src/acp.ts": 164,
+    "agy-acp/src/acp.ts": 192,
     "agy-acp/src/agy-driver.ts": 38,
     "agy-acp/src/agy/args.ts": 51,
     "agy-acp/src/agy/contract.ts": 289,
@@ -55,18 +55,28 @@
     "agy-acp/src/agy/version.ts": 91,
     "agy-acp/src/bridge-cleanup.ts": 50,
     "agy-acp/src/bridge-hook.ts": 121,
-    "agy-acp/src/bridge-server.ts": 292,
+    "agy-acp/src/bridge-server.ts": 295,
+    "agy-acp/src/cancel.ts": 94,
+    "agy-acp/src/config.ts": 52,
     "agy-acp/src/errors.ts": 24,
+    "agy-acp/src/flush-stdout.ts": 39,
     "agy-acp/src/framing.ts": 81,
+    "agy-acp/src/heartbeat.ts": 70,
     "agy-acp/src/jsonrpc.ts": 296,
     "agy-acp/src/lib/child-process.ts": 40,
-    "agy-acp/src/main.ts": 86,
-    "agy-acp/src/permission-gate.ts": 286,
-    "agy-acp/src/permission.ts": 274,
+    "agy-acp/src/main.ts": 102,
+    "agy-acp/src/map-steps.ts": 77,
+    "agy-acp/src/pending-asks.ts": 105,
+    "agy-acp/src/permission-gate.ts": 285,
+    "agy-acp/src/permission.ts": 278,
     "agy-acp/src/prompt.ts": 53,
-    "agy-acp/src/server.ts": 241,
+    "agy-acp/src/server.ts": 271,
+    "agy-acp/src/session-registry.ts": 65,
     "agy-acp/src/session.ts": 300,
-    "agy-acp/src/turn.ts": 94,
+    "agy-acp/src/shutdown.ts": 114,
+    "agy-acp/src/spawn-agy.ts": 51,
+    "agy-acp/src/stream-calls.ts": 84,
+    "agy-acp/src/turn.ts": 129,
     "agy-acp/src/update-map.ts": 152
   },
   "notes": [
@@ -252,8 +262,20 @@
       "changes": [
         "extensions/observe-pr.ts: 2192 lines > baseline 2172 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-28",
+      "reason": "issue 54: cancel and process lifecycle grew six agy-acp sources past the counts main captured when PR 71 baselined them",
+      "changes": [
+        "agy-acp/src/acp.ts: 192 lines > baseline 164 (files may only shrink)",
+        "agy-acp/src/bridge-server.ts: 295 lines > baseline 292 (files may only shrink)",
+        "agy-acp/src/main.ts: 102 lines > baseline 86 (files may only shrink)",
+        "agy-acp/src/permission.ts: 278 lines > baseline 274 (files may only shrink)",
+        "agy-acp/src/server.ts: 271 lines > baseline 241 (files may only shrink)",
+        "agy-acp/src/turn.ts: 129 lines > baseline 94 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "e4eaf60",
+  "generatedFrom": "c4c5670",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

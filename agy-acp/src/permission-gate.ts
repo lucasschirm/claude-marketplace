@@ -7,7 +7,11 @@
 // Deadline ladder, lowest to highest: the client deadline (default 10 min, a deny with reason)
 // < AGY_ACP_HOOK_DEADLINE_MS (the hook's own timer) < the hooks.json timeout (agy's timer).
 // While a request is pending, the tool_call carries _meta.permission so a client watchdog can
-// see the state. On cancel or a child exit, every pending request is denied.
+// see the state. On a cancel, a child exit or a dispose every pending request is denied - with the
+// cancel reason on a cancel - and the client's ask is settled (see pending-asks.ts). A request that
+// arrives with no turn in flight is refused outright (see `currentTurn`): between a cancel and the
+// child's death, or from a hook that outlived an agy that died mid-turn, there is no prompt left to
+// carry the answer, so it would be a dialog nobody can close.
 //
 // Rewritten args: a repo hook may overwrite the args before our hook runs (the hook chain is
 // ordered by file path). We evaluate and display the args the hook received; when the stream's
@@ -21,7 +25,7 @@ import type { AcpSessionUpdate } from "./acp.ts";
 import { BridgeServer, type BridgeReply } from "./bridge-server.ts";
 import {
 	AGY_ACP_MODE_IDS,
-	argsDifferFrom,
+	cancelledReason,
 	decidePolicy,
 	deadlineReason,
 	grantKeyOf,
@@ -30,6 +34,8 @@ import {
 	rejectReason,
 	sessionEndedReason,
 } from "./permission.ts";
+import { PendingAsks, type AskAbort, type AskOutcome, type PendingAsk } from "./pending-asks.ts";
+import { StreamCalls } from "./stream-calls.ts";
 import { toolCallIdOf, toolKindOf, toolTitleOf } from "./update-map.ts";
 
 export interface PermissionGateOptions {
@@ -47,15 +53,20 @@ export interface PermissionGateOptions {
 	/** The per-session token; a null conversation id before the probe rejects every request. */
 	token: string;
 	conversationId: () => string | null;
-}
-
-interface StreamCallRecord {
-	name: string;
-	parameters: Record<string, unknown> | undefined;
-}
-
-interface PendingAsk {
-	abort: () => void;
+	/**
+	 * The `session/prompt` in flight, or null. A hook is a question about the turn that is running, so
+	 * when none is there is nothing left to carry the answer: the request is denied rather than turned
+	 * into a dialog nobody can close (and that a client would have to wait out). Derived, deliberately
+	 * - a flag the session has to remember to clear is a lockout waiting to happen.
+	 */
+	currentTurn: () => Promise<unknown> | null;
+	/**
+	 * How many prompts this session has started, counted whether or not any of them reached a hook.
+	 * That is what retires a cancel: the gate only ever looks at the session when a hook arrives, so a
+	 * later turn that never asks would otherwise leave an old cancel reading as the newest thing that
+	 * happened, and a stray hook would be told its turn was cancelled when it was not.
+	 */
+	turnCount: () => number;
 }
 
 export class PermissionGate {
@@ -63,12 +74,20 @@ export class PermissionGate {
 	private readonly bridge: BridgeServer;
 	private mode = "default";
 	private readonly grants = new Set<string>();
-	private readonly streamCalls = new Map<number, StreamCallRecord>();
-	private readonly pending = new Map<string, PendingAsk>();
+	private readonly stream: StreamCalls;
+	private readonly asks: PendingAsks;
 	private disposedFlag = false;
+	private cancelledAtTurn = -1; // the prompt count when a session/cancel ran; -1 = never
 
 	constructor(opts: PermissionGateOptions) {
 		this.opts = opts;
+		this.asks = new PendingAsks({ log: opts.log, notify: opts.notify });
+		this.stream = new StreamCalls({
+			log: opts.log,
+			notify: opts.notify,
+			conversationId: opts.conversationId,
+			clientDeadlineMs: opts.clientDeadlineMs,
+		});
 		this.bridge = new BridgeServer({
 			log: this.opts.log,
 			token: opts.token,
@@ -77,7 +96,7 @@ export class PermissionGate {
 			maxHoldMs: opts.hookDeadlineMs + 60_000,
 			conversationId: opts.conversationId,
 			handle: (req) => this.handleHookRequest(req),
-			onConnectionLost: (key) => this.onConnectionLost(key),
+			onConnectionLost: (conversationId, stepIdx) => this.onConnectionLost(conversationId, stepIdx),
 		});
 	}
 
@@ -115,6 +134,19 @@ export class PermissionGate {
 		toolCall: { name: string; args: Record<string, unknown> };
 	}): Promise<BridgeReply> {
 		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() };
+		// No turn, no answer to give: the client cancelled it (its prompt is `cancelled` already), or
+		// agy exited mid-turn while a hook process of its own was still alive. Either way asking would
+		// put a dialog on screen that nothing can close, so the hook is refused with the reason instead.
+		const running = this.opts.currentTurn();
+		if (this.cancelledAtTurn === this.opts.turnCount()) {
+			// Nothing has run since the cancel: this request belongs to the turn that was called off.
+			this.opts.log(`permission: ${req.toolCall.name} denied (the turn was cancelled)`);
+			return { decision: "deny", reason: cancelledReason() };
+		}
+		if (!running) {
+			this.opts.log(`permission: ${req.toolCall.name} denied (no turn in flight)`);
+			return { decision: "deny", reason: sessionEndedReason() };
+		}
 		const { name, args } = req.toolCall;
 		const roots = this.workspaceRoots();
 		const policy = decidePolicy({
@@ -132,18 +164,18 @@ export class PermissionGate {
 		}
 		if (policy.kind === "allow") {
 			this.opts.log(`permission: ${name} auto-allowed (mode ${this.mode})`);
-			this.reportHookArgs(req, false); // rewritten-args detection applies to auto-allowed calls too
+			this.stream.report(req, false); // rewritten-args detection applies to auto-allowed calls too
 			return { decision: "allow" };
 		}
 		const key = grantKeyOf(name, args, this.opts.cwd);
 		if (this.grants.has(key)) {
 			this.opts.log(`permission: ${name} covered by an allow-always grant (${key})`);
-			this.reportHookArgs(req, false);
+			this.stream.report(req, false);
 			return { decision: "allow" };
 		}
-		// Ask the client (subagent calls too: the per-session token is the boundary). reportHookArgs
+		// Ask the client (subagent calls too: the per-session token is the boundary). StreamCalls.report
 		// is conversation-guarded - our stream records describe main-conversation steps only.
-		this.reportHookArgs(req, true); // in_progress update: the hook's args + the pending metadata
+		this.stream.report(req, true); // in_progress update: the hook's args + the pending metadata
 		const outcome = await this.askClient(req.stepIdx, name, args, req.conversationId);
 		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() }; // a disposed session is not a user reject
 		switch (outcome) {
@@ -155,24 +187,21 @@ export class PermissionGate {
 				return { decision: "allow" };
 			case "deadline":
 				return { decision: "deny", reason: deadlineReason(Math.round(this.opts.clientDeadlineMs / 1000)) };
+			case "cancelled":
+				return { decision: "deny", reason: cancelledReason() };
+			case "ended":
+				return { decision: "deny", reason: sessionEndedReason() };
 			default:
 				return { decision: "deny", reason: rejectReason() };
 		}
 	}
 
-	/** The client's answer for one call; aborted pending asks resolve as a reject. */
-	private askClient(
-		stepIdx: number,
-		name: string,
-		args: Record<string, unknown>,
-		conversationId: string,
-	): Promise<"allow" | "allow-always" | "deadline" | "reject"> {
-		let resolveAbort: () => void = () => {};
-		const abortP = new Promise<void>((r) => (resolveAbort = r));
-		// Keyed per conversation: a subagent's step index may equal a main one, and a stray
-		// abort must not kill the other conversation's ask.
-		const key = `${conversationId}:${stepIdx}`;
-		this.pending.set(key, { abort: () => resolveAbort() });
+	/** The client's answer for one call; aborted pending asks resolve as the reason they were aborted. */
+	private askClient(stepIdx: number, name: string, args: Record<string, unknown>, conversationId: string): Promise<AskOutcome> {
+		let resolveAbort: (kind: AskAbort) => void = () => {};
+		const abortP = new Promise<AskAbort>((r) => (resolveAbort = r));
+		const ask: PendingAsk = { abort: (kind) => resolveAbort(kind), conversationId, stepIdx };
+		this.asks.set(ask);
 		const clientP = this.opts
 			.request(
 				"session/request_permission",
@@ -197,69 +226,39 @@ export class PermissionGate {
 				this.opts.log(`permission: client request failed: ${err.message}`);
 				return /timed out/i.test(err.message) ? "deadline" : "reject";
 			});
-		return Promise.race([clientP, abortP.then(() => "reject" as const)]).finally(() => {
-			this.pending.delete(key);
-		});
+		// The abort race decides the deny reason; the client's own answer wins whatever arrives first.
+		return Promise.race([clientP, abortP]).finally(() => this.asks.release(ask));
 	}
 
 	/** The hook went away before its answer: stop asking the client for it. */
-	private onConnectionLost(key: string): void {
-		const pending = this.pending.get(key);
-		if (pending) {
-			this.opts.log(`permission: hook connection lost (${key}) - aborting the client ask`);
-			pending.abort();
-		}
+	private onConnectionLost(conversationId: string, stepIdx: number): void {
+		this.asks.abort(conversationId, stepIdx, "reject", "permission: hook connection lost");
 	}
 
 	/** A turn ended (result, or a mid-turn child exit): the recorded stream steps were for it. */
 	onTurnEnd(): void {
-		if (this.streamCalls.size > 0) this.streamCalls.clear();
+		this.stream.clear();
 	}
 
-	/** The stream's ACTIVE for a tool step: record its parameters - the hook that follows runs
-	 * on them, so a difference between the two is a rewrite (reported when the hook arrives). */
+	/** The stream's ACTIVE for a tool step: the args our hook will be asked about (see stream-calls.ts). */
 	onStreamActive(stepIdx: number, name: string, parameters: Record<string, unknown> | undefined): void {
-		this.streamCalls.set(stepIdx, { name, parameters });
+		this.stream.noteActive(stepIdx, name, parameters);
 	}
 
-	/** One hook request vs the recorded stream parameters: a difference is a rewrite (the tool
-	 * runs with the hook's args). For an ask the in_progress update also carries the pending
-	 * permission metadata; the client sees the hook's args in its request. */
-	private reportHookArgs(
-		req: { stepIdx: number; conversationId: string; toolCall: { name: string; args: Record<string, unknown> } },
-		asking: boolean,
-	): void {
-		// A subagent step (a different conversation id): its tool call is not in our stream, and its
-		// low-restarting step index would otherwise collide with a recorded main step (spurious update).
-		if (req.conversationId !== (this.opts.conversationId() ?? "")) return;
-		const rec = this.streamCalls.get(req.stepIdx);
-		if (!rec) return; // a step that never went ACTIVE in our stream
-		const id = toolCallIdOf(this.opts.conversationId() ?? "", req.stepIdx);
-		const rewritten = argsDifferFrom(rec.parameters, req.toolCall.args);
-		if (!asking && !rewritten) return;
-		if (rewritten) {
-			this.opts.log(
-				`permission: args rewritten before our hook saw them (step ${req.stepIdx}, ${req.toolCall.name}): the tool runs with the args the hook evaluated`,
-			);
-		}
-		const meta: Record<string, unknown> = {};
-		if (asking) meta.permission = { state: "pending", deadlineMs: this.opts.clientDeadlineMs, sinceMs: Date.now() };
-		if (rewritten) meta.argsRewritten = true;
-		this.opts.notify({
-			sessionUpdate: "tool_call_update",
-			toolCallId: id,
-			status: "in_progress",
-			rawInput: req.toolCall.args,
-			...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
-		});
+	/** The number of unanswered permission requests (the heartbeat's `waiting_permission` state). */
+	pendingAsks(): number {
+		return this.asks.size();
 	}
 
-	/** Deny every pending request (cancel, a child exit, dispose). */
-	abortPending(why: string): void {
-		if (this.pending.size === 0) return;
-		this.opts.log(`permission: denying ${this.pending.size} pending request(s) (${why})`);
-		for (const p of this.pending.values()) p.abort();
-		this.pending.clear();
+	/**
+	 * Deny every pending request (a cancel, a child exit, a dispose) with the reason that matches
+	 * the `kind`, and settle each ask for the client that is still holding it.
+	 */
+	abortPending(why: string, kind: AskAbort = "ended"): void {
+		// Remembering *which* turn was cancelled is what makes the next hook's reason the cancel's own
+		// words rather than a generic "session ended" - and only for as long as no turn has run since.
+		if (kind === "cancelled") this.cancelledAtTurn = this.opts.turnCount();
+		this.asks.denyAll(why, kind);
 	}
 
 	/** Deny pendings and remove the bridge dir and socket. Idempotent. */

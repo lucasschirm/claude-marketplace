@@ -23,6 +23,16 @@
 //
 // `--version` prints the fixture's agy version (FAKE_AGY_VERSION overrides it, for the
 // untested/strict version-gate tests).
+//
+// Issue #54 (the process lifecycle) adds four knobs, all off by default so the replay suites
+// above are untouched:
+//   FAKE_AGY_IGNORE_SIGNALS    ignore SIGINT/SIGTERM/SIGHUP: the agy that has to be escalated
+//   FAKE_AGY_GROUP_CHILD=SEC   spawn `sleep SEC` in this process group and write its pid to
+//                              FAKE_AGY_CHILD_PID_FILE: the tool command a cancel must reach
+//   FAKE_AGY_ALLOW_RESUME=1    accept a --conversation the record never saw, but only with this
+//                              fixture's conversation id (noted in FAKE_AGY_RESUME_SEEN_FILE)
+//   FAKE_AGY_IDLE_EXIT_MS=N    exit N ms after start, once a turn boundary is reached: the child
+//                              that dies between turns, as a real agy dies on its own timeout
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -41,6 +51,9 @@ interface FakeMeta {
 }
 
 const argv = process.argv.slice(2);
+// The resume flag as the driver passed it, checked against the fixture's conversation id below.
+let resumeFlag: string | null = null;
+const allowResume = process.env.FAKE_AGY_ALLOW_RESUME === "1";
 
 function die(message: string, code: number): never {
 	process.stderr.write(`${message}\n`);
@@ -95,6 +108,24 @@ const inputLines: string[] = meta.inputLines ?? [];
 const initDelayMs = Number(process.env.FAKE_AGY_INIT_DELAY_MS ?? 20);
 const lineGapMs = Number(process.env.FAKE_AGY_LINE_GAP_MS ?? 8);
 const chunkGapMs = Number(process.env.FAKE_AGY_CHUNK_GAP_MS ?? 2);
+
+if (process.env.FAKE_AGY_IGNORE_SIGNALS) {
+	// The agy that does not stop (issue #54): only the escalation ladder's SIGKILL gets rid of it.
+	// SIGINT is swallowed by the handler below, before the fixture's interrupt replay can run.
+	for (const signal of ["SIGTERM", "SIGHUP"] as const) {
+		process.on(signal, () => process.stderr.write(`fake-agy: ignoring ${signal}\n`));
+	}
+}
+
+// A real process the fake leaves in its own process group: the tool command a cancelled agy may or
+// may not take with it. The test reads the pid file and asserts what the ladder did to it.
+if (process.env.FAKE_AGY_GROUP_CHILD) {
+	// Not detached on purpose: it must stay in this process group, which is what a cancel sweeps.
+	const kid = spawn("sleep", [process.env.FAKE_AGY_GROUP_CHILD], { stdio: "ignore" });
+	const pidFile = process.env.FAKE_AGY_CHILD_PID_FILE;
+	if (pidFile && kid.pid !== undefined) fs.writeFileSync(pidFile, `${kid.pid}\n`);
+	process.stderr.write(`fake-agy: group child ${kid.pid} (sleep ${process.env.FAKE_AGY_GROUP_CHILD})\n`);
+}
 
 /** The driver's per-session bridge dir (an extra --add-dir carrying .agents/hooks.json), if any. */
 let bridgeDir: string | null = null;
@@ -165,6 +196,13 @@ const conversationId = (() => {
 	const m = i >= 0 ? lines[i].match(/"conversation_id":"([^"]*)"/) : null;
 	return m ? m[1] : "";
 })();
+if (resumeFlag !== null && resumeFlag !== conversationId) {
+	// The point of the ALLOW_RESUME knob: a respawn that brings back a different conversation is not
+	// a resume, it is a second agent with the client's context lost.
+	die(`fake-agy: resumed the wrong conversation (--conversation ${resumeFlag}, expected ${conversationId})`, 1);
+}
+if (resumeFlag !== null && process.env.FAKE_AGY_RESUME_SEEN_FILE)
+	fs.writeFileSync(process.env.FAKE_AGY_RESUME_SEEN_FILE, `${resumeFlag}\n`);
 const modelName = (() => {
 	const i = lines.findIndex((l) => l.includes('"event":"init"'));
 	const m = i >= 0 ? lines[i].match(/"model":"([^"]*)"/) : null;
@@ -489,6 +527,12 @@ function hasUsableUserContent(line: string): boolean {
 // ------------------------------------------------------------------ signals
 
 process.on("SIGINT", () => {
+	if (process.env.FAKE_AGY_IGNORE_SIGNALS) {
+		// Installed after the knob's own handlers on purpose: the fixture's SIGINT behaviour has to be
+		// the one that gets switched off, or "ignoring SIGINT" would still interrupt the turn.
+		process.stderr.write("fake-agy: ignoring SIGINT\n");
+		return;
+	}
 	if (settled) return;
 	if (waitingForSignal) {
 		waitingForSignal = false;
@@ -544,7 +588,8 @@ function assertNoDrift(got: FlagSet, want: FlagSet): void {
 	// --add-dir and the forced --dangerously-skip-permissions), tolerated only when the extra
 	// add-dir really is a bridge dir (it carries .agents/hooks.json).
 	for (const key of got.values.keys())
-		if (!want.values.has(key) && key !== "--log-file" && key !== "--add-dir") die(`fake-agy: unexpected flag ${key}`, 2);
+		if (!want.values.has(key) && key !== "--log-file" && key !== "--add-dir" && !(key === "--conversation" && allowResume))
+			die(`fake-agy: unexpected flag ${key}`, 2);
 	for (const flag of got.flags)
 		if (flag !== "-p=" && !want.flags.has(flag) && !(flag === "--dangerously-skip-permissions" && bridgeDir !== null))
 			die(`fake-agy: unexpected flag ${flag}`, 2);
@@ -578,6 +623,8 @@ function checkRecordedArgs(got: FlagSet): void {
 	if (extra.length > 0 && bridge === undefined)
 		die(`fake-agy: extra --add-dir ${extra.join(", ")} is not a bridge dir (no .agents/hooks.json)`, 2);
 	bridgeDir = bridge ?? null;
+	// A respawn carries the conversation it resumes; the id itself is checked once the fixture's is known.
+	if (allowResume) resumeFlag = got.values.get("--conversation")?.[0] ?? null;
 	for (const [key, values] of want.values) {
 		if (key === "--log-file" || key === "--add-dir") continue; // --log-file is not passed; --add-dir handled above
 		const gotValues = got.values.get(key) ?? [];
@@ -798,6 +845,20 @@ function syntheticDenyLine(step: StepInfo, reason: string): string {
 			},
 		},
 	});
+}
+
+// The child that dies between turns (issue #54). Polled, not a plain timeout, because it must wait
+// for a turn boundary: dying mid-turn would test the wrong thing.
+const idleExitMs = Number(process.env.FAKE_AGY_IDLE_EXIT_MS ?? 0);
+if (idleExitMs > 0) {
+	const startedAt = Date.now();
+	const idle = setInterval(() => {
+		if (settled || !started || !(awaitingUser || done) || Date.now() - startedAt < idleExitMs) return;
+		clearInterval(idle);
+		process.stderr.write(`fake-agy: idle exit after ${idleExitMs} ms\n`);
+		settle();
+	}, 50);
+	idle.unref();
 }
 
 /** Run the configured hook for one tool step; the deny reason to stage, or undefined (allow). */

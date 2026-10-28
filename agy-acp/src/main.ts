@@ -10,6 +10,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, AGY_ACP_VERSION, PROTOCOL_VERSION } from "./server.ts";
 import { cleanupStaleBridges } from "./bridge-cleanup.ts";
+import { createShutdown } from "./shutdown.ts";
+import { lifecycleConfigFromEnv } from "./config.ts";
 export { AGY_ACP_VERSION, PROTOCOL_VERSION };
 
 const USAGE = `agy-acp ${AGY_ACP_VERSION} - an ACP server for Google's agy CLI
@@ -20,7 +22,11 @@ Usage:
   agy-acp --help       print this help
 
 Environment:
-  AGY_ACP_LOG          append diagnostics to this file instead of stderr
+  AGY_ACP_LOG                append diagnostics to this file instead of stderr
+  AGY_ACP_COMMAND            the agy binary to launch (default: agy on PATH)
+  AGY_ACP_CANCEL_ESCALATE_MS SIGINT -> process-group SIGTERM/SIGKILL window (default 5000)
+  AGY_ACP_HEARTBEAT_MS       heartbeat interval during a turn (default 15000, 0 disables)
+  AGY_ACP_SHUTDOWN_TIMEOUT_MS  exit deadline after a hang-up or signal (default 10000)
 `;
 
 function createLogger(): (line: string) => void {
@@ -65,9 +71,19 @@ export function main(args: string[]): void {
 	// Stale bridge dirs (a previous run crashed before its cleanup) are removed before the first
 	// session; the failure is logged, never fatal - a session must not die over hygiene.
 	cleanupStaleBridges(log).catch((err: Error) => log(`stale bridge cleanup failed: ${err.message}`));
-	startAgyAcpServer({ input: process.stdin, output: process.stdout, log });
-	// stdin EOF ends the event loop on its own (the connection closes, the sessions are disposed,
-	// and their child process groups are killed); nothing else keeps a handle open.
+	// The exit path (issue #54): a client hang-up or a signal cancels every turn, denies every
+	// pending request, disposes every child and removes every bridge dir before the process exits -
+	// under a deadline, so a wedged child cannot turn a hang-up into a process to kill by hand.
+	const exit = createShutdown({
+		log,
+		timeoutMs: lifecycleConfigFromEnv().shutdownTimeoutMs,
+		cleanup: async () => {
+			await server.disposeSessions();
+			await cleanupStaleBridges(log); // the dirs of any session whose teardown could not finish
+		},
+	});
+	const server = startAgyAcpServer({ input: process.stdin, output: process.stdout, log, onClose: (reason) => void exit.begin(reason) });
+	exit.installSignals(); // after the server exists: the cleanup disposes its sessions
 }
 
 const thisFile = fileURLToPath(import.meta.url);
