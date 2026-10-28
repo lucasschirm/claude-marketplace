@@ -122,13 +122,13 @@ async function readChecks(prNumber, cwd) {
 }
 
 /**
- * The PR's mergeability, from `gh pr view --json mergeable,mergeableState`. A failed call is no
+ * The PR's mergeability, from `gh pr view --json mergeable,mergeStateStatus`. A failed call is no
  * information (the snapshot still answers with CI and conversations), and GitHub's UNKNOWN - it
  * recomputes after every push - classifies as nothing too.
  */
 async function readMergeability(prNumber, cwd) {
 	try {
-		const { stdout } = await execFileAsync("gh", ["pr", "view", String(prNumber), "--json", "mergeable,mergeableState"], {
+		const { stdout } = await execFileAsync("gh", ["pr", "view", String(prNumber), "--json", "mergeable,mergeStateStatus"], {
 			cwd,
 			timeout: GH_TIMEOUT_MS,
 		});

@@ -11,7 +11,7 @@
 //      mergeability on pushes to the base and the head, so this goes back and forth)
 //  T5  BEHIND is announced (the base moved; the PR needs a rebase/merge before it can land)
 //  T6  GitHub's transient UNKNOWN (recompute in flight) announces nothing and keeps the state
-//  T7  the observe_pr tool result carries mergeable/mergeableState, and a PR that already
+//  T7  the observe_pr tool result carries mergeable/mergeStateStatus, and a PR that already
 //      conflicts when the tool starts it is not announced a second time by the first poll
 import "./gh-fast-env.ts";
 import ext from "../extensions/observe-pr.ts";
@@ -76,18 +76,18 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   target="$3"
   if [ "$target" = "branch-alpha" ] || [ "$target" = "101" ]; then
     if [ -f "$GH_STATE_DIR/conflicting" ]; then
-      MERGEABLE='"mergeable": "CONFLICTING", "mergeableState": "DIRTY"'
+      MERGEABLE='"mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"'
     elif [ -f "$GH_STATE_DIR/behind" ]; then
-      MERGEABLE='"mergeable": "MERGEABLE", "mergeableState": "BEHIND"'
+      MERGEABLE='"mergeable": "MERGEABLE", "mergeStateStatus": "BEHIND"'
     elif [ -f "$GH_STATE_DIR/recompute" ]; then
-      MERGEABLE='"mergeable": "UNKNOWN", "mergeableState": "UNKNOWN"'
+      MERGEABLE='"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"'
     else
-      MERGEABLE='"mergeable": "MERGEABLE", "mergeableState": "CLEAN"'
+      MERGEABLE='"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"'
     fi
     echo '{"number": 101, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": [], '"$MERGEABLE"' }'
     exit 0
   elif [ "$target" = "202" ]; then
-    echo '{"number": 202, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": [], "mergeable": "CONFLICTING", "mergeableState": "DIRTY"}'
+    echo '{"number": 202, "state": "OPEN", "isDraft": false, "comments": [], "statusCheckRollup": [], "mergeable": "CONFLICTING", "mergeStateStatus": "DIRTY"}'
     exit 0
   else
     echo "no pull requests found" >&2
@@ -211,7 +211,7 @@ exit 0
 			const res = await tools["observe_pr"].execute("call-1", { pr_number: 202 }, undefined, undefined, mockCtx);
 			assert(res.content[0].text.includes("Starting observing 202."), `T7: unexpected tool text: ${res.content[0].text}`);
 			assert(
-				res.details.mergeable === "CONFLICTING" && res.details.mergeableState === "DIRTY",
+				res.details.mergeable === "CONFLICTING" && res.details.mergeStateStatus === "DIRTY",
 				`T7: tool result lacks mergeability: ${JSON.stringify(res.details)}`,
 			);
 			await pollRound();
@@ -219,7 +219,7 @@ exit 0
 				!sentMessages.some((m) => m.includes("PR 202") && (m.includes("conflicts") || m.includes("moved ahead"))),
 				"T7: the first poll re-announced the conflict the tool result already reported",
 			);
-			console.log("✓ T7: the tool result carries mergeable/mergeableState and the conflict is not re-announced");
+			console.log("✓ T7: the tool result carries mergeable/mergeStateStatus and the conflict is not re-announced");
 
 			console.log("✓ All observe-pr mergeability tests passed!");
 			fs.rmSync(tmpDir, { recursive: true, force: true });

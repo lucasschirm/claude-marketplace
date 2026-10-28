@@ -16,10 +16,26 @@ request's CI verdict and its review conversations, and closes conversations it h
 Everything is read from GitHub on each call, so a listing is never stale. `pr_number` selects a pull
 request; without it the current branch's PR is used.
 
-**There is no background watcher in this plugin.** `observe_pr` is a snapshot - call it again to
-refresh. Continuous monitoring with push notifications is what the Pi extensions in this repository
-(`extensions/observe-pr.ts`, `extensions/pr-tasks.ts`) do; the `Stop` hook here (`hooks.json`) is a
-fail-open placeholder that never blocks a session from ending.
+**There is no background watcher in this plugin's MCP server.** `observe_pr` is a snapshot - call it
+again to refresh. Continuous monitoring with push notifications is what the Pi extensions in this
+repository (`extensions/observe-pr.ts`, `extensions/pr-tasks.ts`) do. What this plugin ships instead
+are lifecycle hooks (`hooks.json`, local Devin sessions only; best-effort and fail-open by design):
+
+- **SessionStart** (`scripts/session-init.mjs`) - initializes the session's watch state (per session
+  and repository, under `PLUGIN_DATA` or the system temp dir) and sweeps state older than a week.
+- **PostToolUse** (`scripts/notify-changes.mjs`) - after tool calls, at most once a minute, diffs the
+  branch's PR (mergeability + CI) against the last snapshot and injects transitions into the agent's
+  context (`additionalContext`): a conflict appearing, the base moving ahead, CI failing or passing.
+- **Stop** (`scripts/check-settle.mjs`) - the watcher. While the PR cannot land (conflict, BEHIND,
+  failing CI, CI still running) it holds the stop: actionable problems block with the reason as the
+  news; CI running sleeps in bounded chunks and re-arms with a heartbeat ("stop again to keep
+  waiting"). Merged/closed/landable PRs allow the stop. The user is never trapped: Esc cancels the
+  agent, and the total watch time is capped (4 h, carried across re-arms).
+
+The hooks share the vendored engine with the MCP server (same classification logic), run with Node
+builtins only, and log every decision and failure as JSON lines to `hooks.log` in the state
+directory. Review conversations are deliberately out of scope for the hooks - the MCP tools and the
+AGENTS.md rule own those.
 
 ## Requirements
 

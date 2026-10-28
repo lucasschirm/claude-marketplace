@@ -10,3 +10,7 @@ When working on a branch with a GitHub pull request:
   writes the suggestion, which it only does after that suggestion was shown to you.
 - When a conversation needs a human decision, `pr_task_blocked` posts the reason and holds it.
 - Do not conclude your work while unresolved conversations remain.
+- The plugin's Stop hook holds your stop while the PR cannot land (conflict, base ahead, failing or
+  running CI) and injects PR transitions after tool calls. When the stop is blocked with a
+  "still running" heartbeat, end your turn again without starting other work; when it is blocked
+  with a problem (conflict, failing CI), act on it. The user can always press Esc to end the wait.

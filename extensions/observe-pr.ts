@@ -38,7 +38,7 @@ interface PrViewPayload {
 	isDraft?: boolean | null;
 	/** GitHub answers UNKNOWN while it recomputes (after a push to the head or the base). */
 	mergeable?: string | null;
-	mergeableState?: string | null;
+	mergeStateStatus?: string | null;
 	headRefOid?: string | null;
 	closed?: string | null;
 	mergedAt?: string | null;
@@ -1028,7 +1028,7 @@ export default async function (pi: ExtensionAPI) {
 				"view",
 				String(prNumber),
 				"--json",
-				"state,isDraft,closed,mergedAt,mergeable,mergeableState,comments,statusCheckRollup,headRefOid",
+				"state,isDraft,closed,mergedAt,mergeable,mergeStateStatus,comments,statusCheckRollup,headRefOid",
 			],
 			{ cwd: pr.cwd, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
 		);
@@ -1903,7 +1903,7 @@ export default async function (pi: ExtensionAPI) {
 			// Check PR state and draft status using gh
 			const view = await runJson<PrViewPayload>(
 				"gh",
-				["pr", "view", String(prNumber), "--json", "state,isDraft,number,mergeable,mergeableState,comments,statusCheckRollup"],
+				["pr", "view", String(prNumber), "--json", "state,isDraft,number,mergeable,mergeStateStatus,comments,statusCheckRollup"],
 				{ cwd: ctx.cwd, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
 			);
 			let prData: PrViewPayload;
@@ -2000,7 +2000,7 @@ export default async function (pi: ExtensionAPI) {
 					state,
 					isDraft,
 					mergeable: prData.mergeable ?? undefined,
-					mergeableState: prData.mergeableState ?? undefined,
+					mergeStateStatus: prData.mergeStateStatus ?? undefined,
 					...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
 				},
 			);

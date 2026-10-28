@@ -5,37 +5,39 @@ import { classifyMergeability, mergeabilityAnnouncement } from "../extensions/li
 
 test("a conflicting PR is classified, from either field", () => {
 	assert.strictEqual(classifyMergeability({ mergeable: "CONFLICTING" }), "conflicting");
-	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "DIRTY" }), "conflicting");
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeStateStatus: "DIRTY" }), "conflicting");
 	// Both fields, the shape the poll actually asks for.
-	assert.strictEqual(classifyMergeability({ mergeable: "CONFLICTING", mergeableState: "DIRTY" }), "conflicting");
+	assert.strictEqual(classifyMergeability({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }), "conflicting");
 });
 
 test("BEHIND is reported, but a conflict is the harder problem and wins", () => {
-	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "BEHIND" }), "behind");
-	assert.strictEqual(classifyMergeability({ mergeable: "CONFLICTING", mergeableState: "BEHIND" }), "conflicting");
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeStateStatus: "BEHIND" }), "behind");
+	assert.strictEqual(classifyMergeability({ mergeable: "CONFLICTING", mergeStateStatus: "BEHIND" }), "conflicting");
 });
 
 test("a landable PR is mergeable", () => {
-	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "CLEAN" }), "mergeable");
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }), "mergeable");
 	// A required check failing or a branch protection rule is not a mergeability problem: the PR
 	// merges cleanly once CI passes / approvals land, and CI has its own announcer.
-	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "UNSTABLE" }), "mergeable");
-	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "BLOCKED" }), "mergeable");
-	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "HAS_HOOKS" }), "mergeable");
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeStateStatus: "UNSTABLE" }), "mergeable");
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }), "mergeable");
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeStateStatus: "HAS_HOOKS" }), "mergeable");
 	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE" }), "mergeable");
-	assert.strictEqual(classifyMergeability({ mergeableState: "CLEAN" }), "mergeable");
+	assert.strictEqual(classifyMergeability({ mergeStateStatus: "CLEAN" }), "mergeable");
 });
 
 test("UNKNOWN and missing fields carry no information (the caller keeps its last-seen state)", () => {
 	// GitHub answers UNKNOWN while it recomputes after every push to the head or the base; reading
 	// that as a transition would announce a phantom conflict or clear a real one.
-	assert.strictEqual(classifyMergeability({ mergeable: "UNKNOWN", mergeableState: "UNKNOWN" }), undefined);
+	assert.strictEqual(classifyMergeability({ mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }), undefined);
 	assert.strictEqual(classifyMergeability({}), undefined);
-	assert.strictEqual(classifyMergeability({ mergeable: null, mergeableState: null }), undefined);
+	assert.strictEqual(classifyMergeability({ mergeable: null, mergeStateStatus: null }), undefined);
 	assert.strictEqual(classifyMergeability(undefined), undefined);
 	assert.strictEqual(classifyMergeability(null), undefined);
 	// An older gh, or a payload of the wrong shape entirely: still no information.
-	assert.strictEqual(classifyMergeability({ mergeable: 3, mergeableState: true } as never), undefined);
+	assert.strictEqual(classifyMergeability({ mergeable: 3, mergeStateStatus: true } as never), undefined);
+	// The REST-style alias is accepted too, though gh never emits it.
+	assert.strictEqual(classifyMergeability({ mergeable: "MERGEABLE", mergeableState: "BEHIND" }), "behind");
 });
 
 test("the announcements name the state and what to do about it", () => {
