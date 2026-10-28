@@ -781,15 +781,22 @@ test("connection close disposes the sessions: no fake agy survives", async () =>
 	await waitFor("the fake agy to be gone", 8000, () => fakeAgyPids().every((p) => before.has(p)));
 });
 
-/** The pids of live processes running the fakes (a /proc scan; empty when /proc is unavailable). */
+/**
+ * The pids of live fake-agy children of *this* test process (a /proc scan; empty when /proc is
+ * unavailable). The parent filter is not cosmetic: `node --test` runs suite files in parallel, and an
+ * unfiltered scan would count another suite's children as a leak of ours - a wait for "all my fakes
+ * are gone" that another suite's timing decides.
+ */
 function fakeAgyPids(): number[] {
 	if (!fs.existsSync("/proc")) return [];
 	const out: number[] = [];
 	for (const entry of fs.readdirSync("/proc")) {
 		if (!/^\d+$/.test(entry)) continue;
 		try {
-			const cmdline = fs.readFileSync(`/proc/${entry}/cmdline`, "utf8");
-			if (cmdline.includes("fake-agy.ts")) out.push(Number(entry));
+			if (!fs.readFileSync(`/proc/${entry}/cmdline`, "utf8").includes("fake-agy.ts")) continue;
+			// pid (comm) state ppid ... - comm may contain spaces, so split after the last ") ".
+			const stat = fs.readFileSync(`/proc/${entry}/stat`, "utf8");
+			if (stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[1] === String(process.pid)) out.push(Number(entry));
 		} catch {
 			// the process went away while we were scanning - that is what we expect at the end
 		}

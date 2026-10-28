@@ -217,6 +217,10 @@ export function deadlineReason(seconds: number): string {
 export function sessionEndedReason(): string {
 	return "denied by agy-acp: the session ended before this permission request could be answered. Do not retry this call.";
 }
+/** The cancel denial (session/cancel): the word "cancelled" is the reason the client asked for. */
+export function cancelledReason(): string {
+	return "denied by agy-acp: the turn was cancelled. Do not retry this call.";
+}
 
 // ---------------------------------------------------------------- allow-always grants
 
