@@ -12,6 +12,7 @@ import { JsonRpcConnection } from "./jsonrpc.ts";
 import { lifecycleConfigFromEnv } from "./config.ts";
 import { checkAgyVersion, type AgyVersionStatus } from "./agy-driver.ts";
 import { AgySession } from "./session.ts";
+import { SessionRegistry } from "./session-registry.ts";
 import { AGY_ACP_MODES } from "./permission.ts";
 
 // Keep in sync with agy-acp/package.json (test-package.ts asserts it).
@@ -242,54 +243,4 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	});
 
 	return { disposeSessions: () => registry.disposeAll() };
-}
-
-/**
- * The session table; disposeAll() runs when the connection closes, so no child outlives the
- * server. The closed flag closes a race: a session/new whose start() (the probe takes seconds
- * on a real agy) completes after disposeAll() ran would otherwise register a session nothing
- * ever disposes - a late add disposes the session instead, and the in-flight dispose is tracked
- * so a concurrent disposeAll() waits for it.
- */
-export class SessionRegistry {
-	private readonly sessions = new Map<string, AgySession>();
-	private readonly log: (line: string) => void;
-	private closed = false;
-	private readonly pendingDisposes: Promise<void>[] = [];
-
-	constructor(log: (line: string) => void) {
-		this.log = log;
-	}
-
-	add(sessionId: string, session: AgySession): void {
-		if (this.closed) {
-			this.log(`session ${sessionId} started after the connection closed - disposing it`);
-			this.pendingDisposes.push(
-				session.dispose().catch((err: Error) => {
-					this.log(`session ${sessionId} dispose failed: ${err.message}`);
-				}),
-			);
-			return;
-		}
-		this.sessions.set(sessionId, session);
-	}
-
-	get(sessionId: string): AgySession | undefined {
-		return this.sessions.get(sessionId);
-	}
-
-	async disposeAll(): Promise<void> {
-		this.closed = true;
-		const entries = [...this.sessions.values()];
-		this.sessions.clear();
-		for (const session of entries) {
-			this.log(`disposing session ${session.id}`);
-			try {
-				await session.dispose();
-			} catch (err) {
-				this.log(`session ${session.id} dispose failed: ${(err as Error).message}`);
-			}
-		}
-		await Promise.all(this.pendingDisposes.splice(0));
-	}
 }

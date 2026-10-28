@@ -843,6 +843,42 @@ test("the gate: after dispose, a request is a session-ended denial (not a client
 	}
 });
 
+test("the gate: a request that arrives after a cancel is denied with the cancel reason, and never asked", async () => {
+	// The window this covers: the cancel settles the prompt, and agy still has to die - and it can fire
+	// a hook in between. That ask has no client left to answer it (its turn answered `cancelled`), so
+	// opening one would put a dialog on screen for a turn that no longer exists.
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelask-")));
+	try {
+		const file = path.join(workspace, "a.txt");
+		fs.writeFileSync(file, "x");
+		const h = await startGateHarness({ cwd: workspace });
+		h.gate.abortPending("the client cancelled the turn", "cancelled");
+		const reply = await h.ask(7, "write_file", { Path: file });
+		assert.strictEqual(reply.decision, "deny");
+		assert.match(reply.reason ?? "", /the turn was cancelled/i, "the cancel reason, not the session-ended one");
+		assert.strictEqual(h.requests.length, 0, "no dialog opened for a turn that is already answered");
+		await h.gate.dispose();
+	} finally {
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+test("the gate: the next turn asks again (a cancel does not outlive its own turn)", async () => {
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelnext-")));
+	try {
+		const file = path.join(workspace, "a.txt");
+		fs.writeFileSync(file, "x");
+		const h = await startGateHarness({ cwd: workspace });
+		h.gate.abortPending("the client cancelled the turn", "cancelled");
+		h.gate.onTurnStart(); // the respawned turn: the previous one's cancel conditions nothing here
+		assert.deepStrictEqual(await h.ask(1, "write_file", { Path: file }), { decision: "allow" });
+		assert.strictEqual(h.requests.length, 1, "the new turn's tool call asks the client as usual");
+		await h.gate.dispose();
+	} finally {
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
 test("the gate: the stream's ACTIVE records the parameters; a hook request reports rewritten args, and an ask carries the pending metadata", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-rewrite-")));
 	try {

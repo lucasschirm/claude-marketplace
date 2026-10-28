@@ -8,7 +8,9 @@
 // < AGY_ACP_HOOK_DEADLINE_MS (the hook's own timer) < the hooks.json timeout (agy's timer).
 // While a request is pending, the tool_call carries _meta.permission so a client watchdog can
 // see the state. On a cancel, a child exit or a dispose every pending request is denied - with the
-// cancel reason on a cancel - and the client's ask is settled (see pending-asks.ts).
+// cancel reason on a cancel - and the client's ask is settled (see pending-asks.ts). A cancelled
+// turn is denied forward too: an ask arriving between the cancel and the child's death has no client
+// left to answer it, so it never becomes one.
 //
 // Rewritten args: a repo hook may overwrite the args before our hook runs (the hook chain is
 // ordered by file path). We evaluate and display the args the hook received; when the stream's
@@ -65,6 +67,7 @@ export class PermissionGate {
 	private readonly streamCalls = new Map<number, StreamCallRecord>();
 	private readonly asks: PendingAsks;
 	private disposedFlag = false;
+	private cancelledTurn = false;
 
 	constructor(opts: PermissionGateOptions) {
 		this.opts = opts;
@@ -115,6 +118,12 @@ export class PermissionGate {
 		toolCall: { name: string; args: Record<string, unknown> };
 	}): Promise<BridgeReply> {
 		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() };
+		// A cancelled turn cannot be asked about: its prompt is answered already, so there is no dialog
+		// left to open - and agy can fire a hook between our cancel and the death it causes.
+		if (this.cancelledTurn) {
+			this.opts.log(`permission: ${req.toolCall.name} denied (the turn was cancelled)`);
+			return { decision: "deny", reason: cancelledReason() };
+		}
 		const { name, args } = req.toolCall;
 		const roots = this.workspaceRoots();
 		const policy = decidePolicy({
@@ -256,7 +265,15 @@ export class PermissionGate {
 	 * the `kind`, and settle each ask for the client that is still holding it.
 	 */
 	abortPending(why: string, kind: AskAbort = "ended"): void {
+		// A cancel outlives this call: between it and the child's death agy can still ask, and that ask
+		// has no client left to answer it (see handleHookRequest). The next turn clears it.
+		if (kind === "cancelled") this.cancelledTurn = true;
 		this.asks.denyAll(why, kind);
+	}
+
+	/** A turn is starting: the previous one's cancel no longer conditions anything. */
+	onTurnStart(): void {
+		this.cancelledTurn = false;
 	}
 
 	/** Deny pendings and remove the bridge dir and socket. Idempotent. */

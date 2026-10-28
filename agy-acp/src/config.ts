@@ -17,7 +17,11 @@ export const DEFAULT_HEARTBEAT_MS = 15_000;
 /** The most the exit path may take before the process exits anyway. */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
-/** A positive integer from the environment; anything else (unset, blank, `0x5`, `-3`, `NaN`) is the fallback. */
+/**
+ * A non-negative integer from the environment. `0` is a value, not a typo: it is how the heartbeat and
+ * the escalate window are documented to switch themselves off. Anything else - unset, blank, `0x5`,
+ * `-3`, `NaN`, or a number too large to count milliseconds - is the fallback.
+ */
 export function envInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
 	const raw = env[name];
 	if (raw === undefined || raw.trim() === "") return fallback;

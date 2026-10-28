@@ -52,21 +52,32 @@ export function createShutdown(options: ShutdownOptions): Shutdown {
 		log(`shutdown: ${reason} - cancelling turns, denying pending requests, disposing children`);
 		let forced = false;
 		let timer: NodeJS.Timeout | null = null;
-		if (options.timeoutMs > 0) {
-			// Ref'd on purpose: the deadline is what keeps the loop alive while a child is being killed.
-			timer = setTimeout(() => {
-				forced = true;
-				log(`shutdown: cleanup exceeded ${options.timeoutMs} ms - exiting anyway (anything still running is an orphan)`);
-			}, options.timeoutMs);
-		}
-		try {
-			await options.cleanup();
-		} catch (err) {
+		const doing = options.cleanup().catch((err: Error) => {
 			forced = true;
-			log(`shutdown: cleanup failed: ${(err as Error).message}`);
-		}
+			log(`shutdown: cleanup failed: ${err.message}`);
+		});
+		// The deadline races the cleanup instead of watching it: a cleanup that never resolves (the
+		// wedged child this path exists for) must not hold the process past the deadline. The timer is
+		// ref'd on purpose - it is what keeps the loop alive until the deadline says otherwise.
+		const done = doing.then(() => "done" as const);
+		const outcome =
+			options.timeoutMs > 0
+				? await Promise.race([
+						done,
+						new Promise<"timeout">((resolve) => {
+							timer = setTimeout(() => resolve("timeout"), options.timeoutMs);
+						}),
+					])
+				: await done;
 		if (timer) clearTimeout(timer);
-		if (!forced) log(`shutdown: cleanup finished in ${Date.now() - started} ms`);
+		if (outcome === "timeout") {
+			forced = true;
+			log(
+				`shutdown: cleanup still unfinished at ${options.timeoutMs} ms - exiting anyway. Whatever it had not reached (agy children, bridge dirs) is an orphan now; the next start sweeps the dirs.`,
+			);
+		} else if (!forced) {
+			log(`shutdown: cleanup finished in ${Date.now() - started} ms`);
+		}
 		await flush();
 		exit(forced ? EXIT_FORCED : EXIT_CLEAN);
 	};

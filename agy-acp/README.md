@@ -69,7 +69,9 @@ The deadline ladder, lowest to highest: the client deadline (default 10 min, a d
 reason) < `AGY_ACP_HOOK_DEADLINE_MS` (the hook's own timer) < the `hooks.json` timeout
 (720 s, agy's timer). While a request is pending the `tool_call` update carries
 `_meta.permission` (state, deadline) for a client watchdog; on cancel, a child exit or
-dispose every pending request is denied.
+dispose every pending request is denied - and a cancelled turn is denied forward, so a hook that
+fires between the cancel and the child's death is refused with the cancel reason instead of opening
+a dialog nobody is waiting for any more.
 
 agy emits a tool step's `ACTIVE` stream event **before** running the `PreToolUse` hook, so
 the `tool_call` is created from the stream's parameters and the hook's args arrive as an
@@ -89,7 +91,10 @@ logged rather than answered with an error) does four things, in the order a clie
 
 1. every pending `session/request_permission` of this session is denied with the cancellation
    reason, so the hook is released with the same words the client sees - and the `tool_call_update`
-   that closes the dialog goes out with `_meta.permission.state: "cancelled"`;
+   that closes the dialog goes out with `_meta.permission.state: "cancelled"`. The turn is denied
+   **forward** too: `agy` can fire a hook between the cancel and the death it causes, and that ask
+   has no client left to answer it, so it is denied with the same reason instead of opening a dialog
+   for a turn that has already been answered. The next turn clears it;
 2. the in-flight `session/prompt` answers `{ "stopReason": "cancelled" }` **at once**, with its
    still-`ACTIVE` tools reported failed: a client that asked to stop is never made to wait for an
    `agy` that may take seconds to die (a `result` that arrives afterwards is ignored);
@@ -125,9 +130,10 @@ has to parse content to prove liveness. The interval is `AGY_ACP_HEARTBEAT_MS` (
 **When agy-acp itself goes away** - the client closes stdin (ACP's hang-up), or `SIGTERM`, `SIGINT`
 or `SIGHUP` arrives - all three run one exit path: cancel every turn, deny every pending request,
 dispose every child, remove every bridge dir, flush the protocol channel, and only then exit. The
-path has a deadline (`AGY_ACP_SHUTDOWN_TIMEOUT_MS`, default 10 000): past it the process exits
-anyway with the leftovers named in the log, because a wedged child must not turn a hang-up into a
-process somebody has to kill by hand. A second signal skips the remaining politeness. Exit code 0
+path has a deadline (`AGY_ACP_SHUTDOWN_TIMEOUT_MS`, default 10 000) that **races** the cleanup rather
+than watches it: past it the process exits with the cleanup abandoned mid-flight and what is being
+left named in the log, because a wedged child must not turn a hang-up into a process somebody has to
+kill by hand. A second signal skips the remaining politeness. Exit code 0
 when the cleanup finished inside the deadline, 1 when it was forced.
 
 Two residuals, both from being killed rather than told to leave:
