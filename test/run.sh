@@ -20,7 +20,7 @@ cd "$(dirname "$0")/.."
 UNIT_TESTS="test/test-compaction-fail-recovery.ts test/test-devin-bash-guard.ts test/test-devin-permissions.ts test/test-devin-tui-safety.ts test/test-pr-observer-mcp.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-exec.ts test/test-orca-status.ts test/test-nonblocking.ts test/test-git-repo.ts test/test-worktree-safety.ts"
 
 # agy-acp is a standalone package: its tests run under plain `node --test`, not inside Pi.
-AGY_ACP_TESTS="agy-acp/test/test-jsonrpc.ts agy-acp/test/test-contract.ts agy-acp/test/test-process.ts agy-acp/test/test-main.ts agy-acp/test/test-package.ts agy-acp/test/test-sessions.ts agy-acp/test/test-permission-policy.ts agy-acp/test/test-bridge.ts agy-acp/test/test-permission-integration.ts"
+AGY_ACP_TESTS="agy-acp/test/test-jsonrpc.ts agy-acp/test/test-contract.ts agy-acp/test/test-process.ts agy-acp/test/test-main.ts agy-acp/test/test-package.ts agy-acp/test/test-sessions.ts agy-acp/test/test-permission-policy.ts agy-acp/test/test-bridge.ts agy-acp/test/test-permission-integration.ts agy-acp/test/test-lifecycle.ts"
 
 ALL_SUITES="typecheck lint format check quality-fixtures manifest unit agy-acp compaction-recovery observe-pr observe-pr-gh-failure observe-pr-branch-scan branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools devin-queue"
 

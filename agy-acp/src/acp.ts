@@ -156,7 +156,35 @@ export interface AcpCurrentModeUpdate {
 	sessionUpdate: "current_mode_update";
 	currentModeId: string;
 }
-export type AcpSessionUpdate = AcpAgentMessageChunk | AcpToolCall | AcpToolCallUpdate | AcpUsageUpdate | AcpCurrentModeUpdate;
+/**
+ * agy-acp extension: the heartbeat of a running turn (issue #54). agy goes silent while a hook
+ * blocks or a long command runs, so a client with a stall watchdog cannot tell a stall from a
+ * wait. The frame carries no content at all - everything is in `_meta`, so a client that does not
+ * know this update ignores it and one that does reads `heartbeat`.
+ */
+export interface AcpHeartbeat {
+	/** 1-based, restarting every turn: a client can assert it never goes backwards. */
+	seq: number;
+	/** Wall-clock time of the emission (`Date.now()`). */
+	atMs: number;
+	/** Milliseconds since this turn started. */
+	turnMs: number;
+	/** `waiting_permission` while a `session/request_permission` of this turn is unanswered. */
+	state: "running" | "waiting_permission";
+	/** How many permission requests of this turn are outstanding. */
+	pendingPermissions: number;
+}
+export interface AcpHeartbeatUpdate {
+	sessionUpdate: "heartbeat";
+	_meta: { heartbeat: AcpHeartbeat };
+}
+export type AcpSessionUpdate =
+	| AcpAgentMessageChunk
+	| AcpToolCall
+	| AcpToolCallUpdate
+	| AcpUsageUpdate
+	| AcpCurrentModeUpdate
+	| AcpHeartbeatUpdate;
 export interface AcpSessionUpdateParams {
 	sessionId: string;
 	update: AcpSessionUpdate;

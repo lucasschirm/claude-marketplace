@@ -552,8 +552,16 @@ function countStdioWrites() {
 // main.ts may answer --version/--help before serving. console.log is never legitimate in server
 // sources - it is exactly how a stray debug line corrupts the stream. bridge-hook.ts is the one
 // other writer: it is a separate child process (spawned by agy as a PreToolUse hook), and its
-// stdout is the hook's decision channel - the one JSON line agy reads, by design.
-const AGY_STDOUT_ALLOWED = new Set(["agy-acp/src/jsonrpc.ts", "agy-acp/src/main.ts", "agy-acp/src/bridge-hook.ts"]);
+// stdout is the hook's decision channel - the one JSON line agy reads, by design. flush-stdout.ts is
+// the third: it writes no frame at all, only the zero-length write that means "everything buffered
+// is out", because the exit path ends in process.exit() - a file of its own so the grant covers that
+// one call instead of opening the shutdown path to stdout writes.
+const AGY_STDOUT_ALLOWED = new Set([
+	"agy-acp/src/jsonrpc.ts",
+	"agy-acp/src/main.ts",
+	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/flush-stdout.ts",
+]);
 
 function countAgyStdoutViolations() {
 	const hits = [];

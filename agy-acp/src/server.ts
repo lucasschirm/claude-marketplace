@@ -9,6 +9,7 @@ import * as path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { JsonRpcConnection } from "./jsonrpc.ts";
+import { lifecycleConfigFromEnv } from "./config.ts";
 import { checkAgyVersion, type AgyVersionStatus } from "./agy-driver.ts";
 import { AgySession } from "./session.ts";
 import { AGY_ACP_MODES } from "./permission.ts";
@@ -39,6 +40,10 @@ export interface AgyLaunchOptions {
 	probeTimeoutMs?: number;
 	graceMs?: number;
 	termMs?: number;
+	/** The SIGINT -> process-group escalation window of session/cancel (default 5 s, env-configurable). */
+	cancelEscalateMs?: number;
+	/** The heartbeat interval of a running turn (default 15 s, 0 disables; env-configurable). */
+	heartbeatMs?: number;
 }
 
 export interface AgyAcpServerOptions {
@@ -46,6 +51,9 @@ export interface AgyAcpServerOptions {
 	output: Writable;
 	log?: (line: string) => void;
 	agy?: AgyLaunchOptions;
+	/** Called once when the connection closes (after the sessions are disposed). This is what lets
+	 * main.ts turn "the client hung up" into a bounded exit instead of an idle process. */
+	onClose?: (reason: string) => void;
 }
 
 export interface AgyAcpServer {
@@ -87,9 +95,19 @@ function handleInitialize(params: unknown): unknown {
 	};
 }
 
+/** The launch options with the environment's defaults underneath them (an explicit option wins). */
+function withEnvDefaults(launch: AgyLaunchOptions): AgyLaunchOptions {
+	const env = lifecycleConfigFromEnv();
+	const out: AgyLaunchOptions = { ...launch };
+	out.command = launch.command ?? env.command;
+	out.cancelEscalateMs = launch.cancelEscalateMs ?? env.cancelEscalateMs;
+	out.heartbeatMs = launch.heartbeatMs ?? env.heartbeatMs;
+	return out;
+}
+
 export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	const log = options.log ?? (() => {});
-	const launch = options.agy ?? {};
+	const launch = withEnvDefaults(options.agy ?? {});
 	const connection = new JsonRpcConnection({ input: options.input, output: options.output, log });
 	const registry = new SessionRegistry(log);
 	const checkVersion = makeVersionGate(launch);
@@ -97,11 +115,48 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	connection.registerMethod("initialize", handleInitialize);
 	connection.registerMethod("session/new", (params) => handleSessionNew(params));
 	connection.registerMethod("session/prompt", (params) => handleSessionPrompt(params));
-	connection.onNotification((method) => log(`ignored notification: ${method}`));
+	// Notification ordering (the reason this queues): the connection defers every request handler by
+	// a microtask, so a notification handled inline would overtake the request in front of it - a
+	// client that writes session/cancel straight after its session/prompt would cancel the turn before
+	// that one started, i.e. the wrong one (or none). Queued the same way, frames are handled in the
+	// order the client sent them.
+	connection.onNotification((method, params) => {
+		void Promise.resolve()
+			.then(() => handleNotification(method, params))
+			.catch((err: Error) => log(`notification "${method}" failed: ${err.message}`));
+	});
+
+	function handleNotification(method: string, params: unknown): void {
+		if (method === "session/cancel") cancelSession(params);
+		else log(`ignored notification: ${method}`);
+	}
 	connection.onClose((reason) => {
 		log(`connection closed: ${reason}`);
-		void registry.disposeAll();
+		void registry.disposeAll().finally(() => options.onClose?.(reason));
 	});
+
+	/**
+	 * session/cancel (issue #54). ACP sends it as a notification, so there is no response that
+	 * could report a problem: an unknown or already-gone session is logged and dropped, and a
+	 * failing cancel is logged too - a cancel nobody could act on must never take the server down.
+	 */
+	function cancelSession(params: unknown): void {
+		const sessionId = typeof params === "object" && params !== null ? (params as Record<string, unknown>).sessionId : undefined;
+		if (typeof sessionId !== "string") {
+			log("session/cancel without a usable sessionId - ignored");
+			return;
+		}
+		const session = registry.get(sessionId);
+		if (!session) {
+			log(`session/cancel for unknown sessionId ${sessionId} - ignored`);
+			return;
+		}
+		try {
+			session.cancel();
+		} catch (err) {
+			log(`session ${sessionId}: session/cancel failed: ${(err as Error).message}`);
+		}
+	}
 
 	/** The session/new params: an object with an absolute cwd and an optional mcpServers array. */
 	function parseSessionNew(params: unknown): { cwd: string; mcpServers: unknown[] | undefined } {

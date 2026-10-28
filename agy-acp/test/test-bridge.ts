@@ -270,8 +270,8 @@ test("an unauthenticated or early-dropped connection does not abort a legitimate
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
 		handle: () => new Promise(() => {}), // never answers, so the legit ask stays pending
-		onConnectionLost: (key) => {
-			lost.push(key);
+		onConnectionLost: (conversationId, stepIdx) => {
+			lost.push(`${conversationId}:${stepIdx}`);
 		},
 	});
 	await server.start();
@@ -424,8 +424,8 @@ test("maxHoldMs cuts a never-answering ask: the connection dies and onConnection
 		maxHoldMs: 300,
 		conversationId: () => "conv-1",
 		handle: () => new Promise(() => {}),
-		onConnectionLost: (key) => {
-			lost = key;
+		onConnectionLost: (conversationId, stepIdx) => {
+			lost = `${conversationId}:${stepIdx}`;
 		},
 	});
 	await server.start();
@@ -494,13 +494,18 @@ test("cleanupStaleBridges: a 2h-old dir whose socket still answers is live, not 
 	try {
 		await cleanupStaleBridges((l) => logs.push(l), Date.now());
 		assert.ok(fs.existsSync(live), "the live dir (old mtime, answering socket) stays");
-		assert.strictEqual(logs.length, 0, "no removal logged");
+		// Scoped to this test's own root: the sweep also walks os.tmpdir(), where another suite - or an
+		// interrupted run - may leave a stale dir for it to remove. That is the sweep doing its job.
+		assert.ok(!logs.some((l) => l.includes(root)), `the live dir must not be reported as stale: ${logs.join(" | ")}`);
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 		fs.utimesSync(live, past, past); // the socket is dead now
 		await cleanupStaleBridges((l) => logs.push(l), Date.now());
 		assert.ok(!fs.existsSync(live), "after the socket dies, the same old dir is removed");
-		assert.match(logs.join("\n"), /removed stale/, "the removal was logged");
+		assert.match(logs.join("\n"), new RegExp(`removed stale .*${path.basename(live)}`), "the removal was logged");
 	} finally {
+		// Closed here rather than inline: an assertion that throws must not leave a listening server
+		// behind, or the process outlives its own tests.
+		await new Promise<void>((resolve) => server.close(() => resolve()));
 		if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
 		else process.env.XDG_RUNTIME_DIR = saved;
 		fs.rmSync(root, { recursive: true, force: true });

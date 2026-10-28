@@ -6,6 +6,10 @@
 // step still ACTIVE when the turn ends is reported failed (no tool runs forever). A child
 // exit without a `result` is handled by the session (which marks it needsRespawn) with the
 // same failActiveTools + error pattern.
+//
+// The one exception to "never an error" runs the other way (issue #54): session/cancel settles the
+// turn itself, `cancelled`, without waiting for agy to agree - settleCancelled below is what the
+// session calls, and the `result` that arrives afterwards is simply ignored.
 
 import type { AcpPromptResult, AcpSessionUpdate } from "./acp.ts";
 import { INTERNAL_ERROR, RpcError } from "./errors.ts";
@@ -22,8 +26,6 @@ export interface PendingTurn {
 /** The turn state the settle machinery reads; the session is a structural implementation. */
 export interface TurnSettleHost {
 	pending: PendingTurn | null;
-	/** Sub-issue 54 (cancel) will set this; until it lands it is never true. */
-	cancelRequested: boolean;
 	activeTools: Set<string>;
 	emit(update: AcpSessionUpdate): void;
 }
@@ -35,8 +37,27 @@ export interface RunTurnHost extends TurnSettleHost {
 
 /** One user turn: send the text to the live child and wait for its `result`. */
 export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromptResult> {
-	const driver = await host.ensureDriver();
+	// Pending before the child is chosen: a session/cancel that lands during a multi-second respawn
+	// has a prompt to answer, and an absent `host.pending` below is how this turn learns of it.
 	const promise = new Promise<AcpPromptResult>((resolve, reject) => (host.pending = { resolve, reject, settled: false }));
+	let driver: AgyProcess;
+	try {
+		driver = await host.ensureDriver();
+	} catch (err) {
+		const starting = host.pending;
+		if (starting && !starting.settled) {
+			starting.settled = true;
+			host.pending = null;
+			starting.reject(err instanceof Error ? err : new Error(String(err)));
+		}
+		return promise;
+	}
+	if (!host.pending) {
+		// Cancelled while its child was being chosen: the prompt is answered already, so the turn never
+		// starts - and the process that was just launched is put away rather than left to the next one.
+		await driver.dispose();
+		return promise;
+	}
 	host.activeTools.clear();
 	try {
 		driver.send(text);
@@ -49,6 +70,23 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
 		}
 	}
 	return promise;
+}
+
+/**
+ * Settle the in-flight turn as `cancelled` (issue #54): what session/cancel answers with, and what
+ * a dispose settles an interrupted turn with. Returns false when there is nothing to settle (the
+ * turn already ended), which is why every teardown path can call it without checking first.
+ */
+export function settleCancelled(host: TurnSettleHost, reason: string): boolean {
+	const pending = host.pending;
+	if (!pending || pending.settled) return false;
+	pending.settled = true;
+	host.pending = null;
+	failActiveTools(host, reason);
+	// The result is exactly what session/cancel promises: a stopReason and nothing else. A cancelled
+	// turn's usage is not reported (agy's own counters for an interrupted turn are partial).
+	pending.resolve({ stopReason: "cancelled" });
+	return true;
 }
 
 /** Fail every tool still ACTIVE: a client must never show a tool running forever. */
@@ -79,9 +117,6 @@ export function settleTurn(host: TurnSettleHost, e: Extract<AgyDriverEvent, { ev
 			meta.deniedActions = denied;
 		}
 		pending.resolve({ stopReason: "end_turn", _meta: meta });
-	} else if (host.cancelRequested && (e.result.error === "interrupted" || e.result.error === "cancelled")) {
-		// Sub-issue 54: an interruption we caused is a cancellation, not an error.
-		pending.resolve({ stopReason: "cancelled" });
 	} else {
 		pending.reject(
 			new RpcError(INTERNAL_ERROR, `agy turn failed: ${e.result.error ?? "unknown error"}`, {

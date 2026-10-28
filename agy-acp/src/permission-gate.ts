@@ -7,7 +7,8 @@
 // Deadline ladder, lowest to highest: the client deadline (default 10 min, a deny with reason)
 // < AGY_ACP_HOOK_DEADLINE_MS (the hook's own timer) < the hooks.json timeout (agy's timer).
 // While a request is pending, the tool_call carries _meta.permission so a client watchdog can
-// see the state. On cancel or a child exit, every pending request is denied.
+// see the state. On a cancel, a child exit or a dispose every pending request is denied - with the
+// cancel reason on a cancel - and the client's ask is settled (see pending-asks.ts).
 //
 // Rewritten args: a repo hook may overwrite the args before our hook runs (the hook chain is
 // ordered by file path). We evaluate and display the args the hook received; when the stream's
@@ -22,6 +23,7 @@ import { BridgeServer, type BridgeReply } from "./bridge-server.ts";
 import {
 	AGY_ACP_MODE_IDS,
 	argsDifferFrom,
+	cancelledReason,
 	decidePolicy,
 	deadlineReason,
 	grantKeyOf,
@@ -30,6 +32,7 @@ import {
 	rejectReason,
 	sessionEndedReason,
 } from "./permission.ts";
+import { PendingAsks, type AskAbort, type AskOutcome, type PendingAsk } from "./pending-asks.ts";
 import { toolCallIdOf, toolKindOf, toolTitleOf } from "./update-map.ts";
 
 export interface PermissionGateOptions {
@@ -54,21 +57,18 @@ interface StreamCallRecord {
 	parameters: Record<string, unknown> | undefined;
 }
 
-interface PendingAsk {
-	abort: () => void;
-}
-
 export class PermissionGate {
 	private readonly opts: PermissionGateOptions;
 	private readonly bridge: BridgeServer;
 	private mode = "default";
 	private readonly grants = new Set<string>();
 	private readonly streamCalls = new Map<number, StreamCallRecord>();
-	private readonly pending = new Map<string, PendingAsk>();
+	private readonly asks: PendingAsks;
 	private disposedFlag = false;
 
 	constructor(opts: PermissionGateOptions) {
 		this.opts = opts;
+		this.asks = new PendingAsks({ log: opts.log, notify: opts.notify });
 		this.bridge = new BridgeServer({
 			log: this.opts.log,
 			token: opts.token,
@@ -77,7 +77,7 @@ export class PermissionGate {
 			maxHoldMs: opts.hookDeadlineMs + 60_000,
 			conversationId: opts.conversationId,
 			handle: (req) => this.handleHookRequest(req),
-			onConnectionLost: (key) => this.onConnectionLost(key),
+			onConnectionLost: (conversationId, stepIdx) => this.onConnectionLost(conversationId, stepIdx),
 		});
 	}
 
@@ -155,24 +155,21 @@ export class PermissionGate {
 				return { decision: "allow" };
 			case "deadline":
 				return { decision: "deny", reason: deadlineReason(Math.round(this.opts.clientDeadlineMs / 1000)) };
+			case "cancelled":
+				return { decision: "deny", reason: cancelledReason() };
+			case "ended":
+				return { decision: "deny", reason: sessionEndedReason() };
 			default:
 				return { decision: "deny", reason: rejectReason() };
 		}
 	}
 
-	/** The client's answer for one call; aborted pending asks resolve as a reject. */
-	private askClient(
-		stepIdx: number,
-		name: string,
-		args: Record<string, unknown>,
-		conversationId: string,
-	): Promise<"allow" | "allow-always" | "deadline" | "reject"> {
-		let resolveAbort: () => void = () => {};
-		const abortP = new Promise<void>((r) => (resolveAbort = r));
-		// Keyed per conversation: a subagent's step index may equal a main one, and a stray
-		// abort must not kill the other conversation's ask.
-		const key = `${conversationId}:${stepIdx}`;
-		this.pending.set(key, { abort: () => resolveAbort() });
+	/** The client's answer for one call; aborted pending asks resolve as the reason they were aborted. */
+	private askClient(stepIdx: number, name: string, args: Record<string, unknown>, conversationId: string): Promise<AskOutcome> {
+		let resolveAbort: (kind: AskAbort) => void = () => {};
+		const abortP = new Promise<AskAbort>((r) => (resolveAbort = r));
+		const ask: PendingAsk = { abort: (kind) => resolveAbort(kind), conversationId, stepIdx };
+		this.asks.set(ask);
 		const clientP = this.opts
 			.request(
 				"session/request_permission",
@@ -197,18 +194,13 @@ export class PermissionGate {
 				this.opts.log(`permission: client request failed: ${err.message}`);
 				return /timed out/i.test(err.message) ? "deadline" : "reject";
 			});
-		return Promise.race([clientP, abortP.then(() => "reject" as const)]).finally(() => {
-			this.pending.delete(key);
-		});
+		// The abort race decides the deny reason; the client's own answer wins whatever arrives first.
+		return Promise.race([clientP, abortP]).finally(() => this.asks.release(ask));
 	}
 
 	/** The hook went away before its answer: stop asking the client for it. */
-	private onConnectionLost(key: string): void {
-		const pending = this.pending.get(key);
-		if (pending) {
-			this.opts.log(`permission: hook connection lost (${key}) - aborting the client ask`);
-			pending.abort();
-		}
+	private onConnectionLost(conversationId: string, stepIdx: number): void {
+		this.asks.abort(conversationId, stepIdx, "reject", "permission: hook connection lost");
 	}
 
 	/** A turn ended (result, or a mid-turn child exit): the recorded stream steps were for it. */
@@ -254,12 +246,17 @@ export class PermissionGate {
 		});
 	}
 
-	/** Deny every pending request (cancel, a child exit, dispose). */
-	abortPending(why: string): void {
-		if (this.pending.size === 0) return;
-		this.opts.log(`permission: denying ${this.pending.size} pending request(s) (${why})`);
-		for (const p of this.pending.values()) p.abort();
-		this.pending.clear();
+	/** The number of unanswered permission requests (the heartbeat's `waiting_permission` state). */
+	pendingAsks(): number {
+		return this.asks.size();
+	}
+
+	/**
+	 * Deny every pending request (a cancel, a child exit, a dispose) with the reason that matches
+	 * the `kind`, and settle each ask for the client that is still holding it.
+	 */
+	abortPending(why: string, kind: AskAbort = "ended"): void {
+		this.asks.denyAll(why, kind);
 	}
 
 	/** Deny pendings and remove the bridge dir and socket. Idempotent. */

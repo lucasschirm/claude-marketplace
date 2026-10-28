@@ -50,8 +50,9 @@ export interface BridgeServerOptions {
 	/** The conversation id a request must carry (null before the probe). */
 	conversationId: () => string | null;
 	handle: (req: BridgeRequest) => Promise<BridgeReply>;
-	/** The hook went away (connection lost) before its request was answered. */
-	onConnectionLost: (key: string) => void;
+	/** The hook went away (connection lost) before its request was answered. The pair identifies the
+	 * ask (the gate owns that identity - the socket layer never composes keys of its own). */
+	onConnectionLost: (conversationId: string, stepIdx: number) => void;
 	/** The chmod implementation (a test injects a failure to exercise the partial-start cleanup). */
 	chmod?: (p: string, mode: number) => Promise<void>;
 }
@@ -125,7 +126,9 @@ export class BridgeServer {
 
 	/** One hook connection: one request line in, one reply line out, then closed. */
 	private handleConnection(conn: Socket): void {
-		let lostKey = ""; // conversation-scoped pending-ask key, set after auth
+		// The pending ask this connection owns, set only after auth: an unauthenticated close must
+		// not abort a legitimate ask that happens to carry the same step index.
+		let lost: { conversationId: string; stepIdx: number } | null = null;
 		let answered = false;
 		const hold = setTimeout(() => {
 			this.opts.log(`bridge: connection held beyond ${this.opts.maxHoldMs} ms - closing`);
@@ -133,9 +136,9 @@ export class BridgeServer {
 		}, this.opts.maxHoldMs).unref();
 		conn.on("close", () => {
 			clearTimeout(hold);
-			if (!answered && lostKey !== "") {
+			if (!answered && lost !== null) {
 				try {
-					this.opts.onConnectionLost(lostKey);
+					this.opts.onConnectionLost(lost.conversationId, lost.stepIdx);
 				} catch (err) {
 					this.opts.log(`bridge: connection-lost handler failed: ${(err as Error).message}`);
 				}
@@ -174,7 +177,7 @@ export class BridgeServer {
 				return;
 			}
 			// after auth: an unauthenticated close must not abort a legitimate pending ask
-			lostKey = `${req.conversationId}:${req.stepIdx}`;
+			lost = { conversationId: req.conversationId, stepIdx: req.stepIdx };
 			void this.opts.handle(req).then(
 				(reply) => {
 					answered = true;
