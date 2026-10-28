@@ -1,0 +1,46 @@
+name: Plugin version bump
+
+# A merge to the default branch (or dev) that changed files under plugins/<name>/ bumps that
+# plugin's minor version in both manifest layouts, so installed plugin caches re-fetch. The
+# bump commit itself touches only the manifests, which the bump script filters out - the
+# workflow's own push is a no-op and the loop ends there.
+on:
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-bump-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # A branch push (before = the zero sha) has no base to diff against.
+    if: github.event.before != '0000000000000000000000000000000000000000'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Bump the minor version of every plugin this push changed
+        run: node scripts/bump-plugin-versions.mjs '${{ github.event.before }}' '${{ github.event.after }}'
+
+      - name: Commit and push the bump
+        run: |
+          if git diff --quiet; then
+            echo "No version bumps to commit."
+            exit 0
+          fi
+          git -c user.name "github-actions[bot]" -c user.email "41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -am "chore(plugins): bump versions after ${{ github.sha }}"
+          git push

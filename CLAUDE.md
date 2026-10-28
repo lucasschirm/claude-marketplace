@@ -19,6 +19,7 @@ plugins/<plugin-name>/
 test/<name>.ts | test/<name>.sh     # tests; `bash test/run.sh` runs the CI suites
 scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
 .github/workflows/ci.yml            # CI: manifests, unit tests, Pi extension suites
+.github/workflows/plugin-version-bump.yml  # bumps a plugin's minor version when a merge to main/dev touches its files
 ```
 
 - `agy-acp/` is a standalone Node >= 23.6 package (an ACP server for Google's `agy` CLI), not a Pi extension and not a plugin: it has its own `package.json` (`bin: agy-acp -> src/main.ts`, zero runtime dependencies) and is typechecked, linted and invariant-gated like `extensions/`. Its tests live in `agy-acp/test/` and run as the `agy-acp` suite in `test/run.sh`.
@@ -54,4 +55,5 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
   fails is an invariant that measures nothing, and four of them did when first written.
 - `npm test` (`bash test/run.sh`) runs every CI suite; `bash test/run.sh --list` lists suite names and `npm run test:unit` runs only the standalone `node --test` files. Node >= 23.6 is required (it runs TypeScript directly).
 - CI (`.github/workflows/ci.yml`) runs on every pull request, on pushes to `main`, and manually: a manifests + unit-test job, plus a matrix job per Pi extension suite (`observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`). It installs Pi from npm and needs no model credentials — the suites mock `gh`/Pi APIs and run `--offline`.
+- `.github/workflows/plugin-version-bump.yml` runs on every push to `main`/`dev`: it diffs the push, and any plugin whose files changed gets its minor version bumped in both manifest layouts (`.devin-plugin` and `.claude-plugin`), committed and pushed by the bot. The bump commit touches only the manifests, which `scripts/bump-plugin-versions.mjs` filters out, so the automation cannot bump itself. A merge that changes no plugin files bumps nothing.
 - To smoke-test a plugin locally in Claude Code, add this repo as a marketplace (`/plugin marketplace add <path-to-this-repo>`) and install the plugin to confirm skills/agents load correctly.
