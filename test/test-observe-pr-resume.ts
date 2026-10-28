@@ -55,6 +55,12 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   if [ -f "${tmpDir}/rollup_42" ]; then
     rollup='[{"detailsUrl":"https://x/actions/runs/42"}]'
   fi
+  # Mergeability comes from a marker file (R7); absent, the fields are omitted entirely - the
+  # shape an older gh or a payload without them has, which must classify as no information.
+  mergeable=""
+  if [ -f "${tmpDir}/conflicting" ]; then
+    mergeable=',"mergeable":"CONFLICTING","mergeableState":"DIRTY"'
+  fi
   if [ "$3" = "feat" ] || [ "$3" = "branch" ] || [ "$3" = "feat2" ]; then
     n=$(cat "${tmpDir}/branch_pr" 2>/dev/null || echo 7)
     if [ "$3" = "feat2" ]; then
@@ -64,7 +70,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     if [ "$n" = "8" ]; then
       echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":'$rollup'}'
     else
-      echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup'}'
+      echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup''$mergeable'}'
     fi
     exit 0
   fi
@@ -76,7 +82,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     echo '{"number":8,"state":"OPEN","isDraft":false,"comments":[],"statusCheckRollup":'$rollup'}'
     exit 0
   fi
-  echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup'}'
+  echo '{"number":7,"state":"OPEN","isDraft":false,"comments":[{"url":"https://x/pull/7#issuecomment-1","body":"b1","updatedAt":"t1"}],"statusCheckRollup":'$rollup''$mergeable'}'
   exit 0
 fi
 exit 1
@@ -364,6 +370,112 @@ exit 1
 			handlers.agent_start();
 			assert(observed()?.get(60)?.announced === true, "R6f: 60 must be marked announced after delivery");
 			console.log("✓ R6 Passed: a notice deferred in after the attached-notice snapshot survives to the next input.");
+
+			// ---- R7: the mergeability classification survives a resume - a conflict already
+			// announced before the session ended must not re-announce on the first poll after the
+			// restore - and an old state entry written before mergeability was tracked announces
+			// on the first poll that sees the conflict, then persists the classification.
+			// (PR 60 stays in the entries: R6 left feat2 checked out, and a restore without it
+			// would have the startup branch check re-detect 60 as unannounced - deferring its
+			// notice and suppressing every update this test wants to observe.)
+			sent.length = 0;
+			appended.length = 0;
+			fs.rmSync(path.join(tmpDir, "rollup_42"), { force: true });
+			setBranchPr(7);
+			fs.writeFileSync(path.join(tmpDir, "conflicting"), "1");
+			handlers.session_start(
+				{ type: "session_start", reason: "resume" },
+				makeCtx([
+					stateEntry({
+						v: 1,
+						observed: [
+							{
+								prNumber: 7,
+								cwd: tmpDir,
+								activeRuns: [],
+								seenRuns: [],
+								failedRuns: [],
+								completedRuns: [],
+								knownComments: [],
+								allPassedReported: false,
+								mergeState: "conflicting",
+								announced: true,
+							},
+							{
+								prNumber: 60,
+								cwd: tmpDir,
+								activeRuns: [],
+								seenRuns: [],
+								failedRuns: [],
+								completedRuns: [],
+								knownComments: [],
+								allPassedReported: false,
+								announced: true,
+							},
+						],
+						stopped: [],
+					}),
+				]),
+			);
+			await sleep(1500);
+			assert(
+				observed()?.get(7)?.mergeState === "conflicting",
+				`R7a: the restored classification must survive the poll, got ${observed()?.get(7)?.mergeState}`,
+			);
+			assert(
+				sent.every((m) => !m.content.includes("conflicts with its base")),
+				`R7a: a restored conflict must not re-announce, got ${JSON.stringify(sent.map((m) => m.content))}`,
+			);
+			console.log("✓ R7a Passed: a restored conflict does not re-announce.");
+
+			// An entry from before mergeability was tracked (no mergeState): the first poll that
+			// sees the conflict announces it, and the classification is persisted for the next resume.
+			sent.length = 0;
+			appended.length = 0;
+			handlers.session_start(
+				{ type: "session_start", reason: "resume" },
+				makeCtx([
+					stateEntry({
+						v: 1,
+						observed: [
+							{
+								prNumber: 7,
+								cwd: tmpDir,
+								activeRuns: [],
+								seenRuns: [],
+								failedRuns: [],
+								completedRuns: [],
+								knownComments: [],
+								allPassedReported: false,
+								announced: true,
+							},
+							{
+								prNumber: 60,
+								cwd: tmpDir,
+								activeRuns: [],
+								seenRuns: [],
+								failedRuns: [],
+								completedRuns: [],
+								knownComments: [],
+								allPassedReported: false,
+								announced: true,
+							},
+						],
+						stopped: [],
+					}),
+				]),
+			);
+			await sleep(1500);
+			assert(
+				sent.some((m) => m.content.includes("conflicts with its base") && m.content.includes("PR 7")),
+				`R7b: a conflict seen on the first poll after an old-state restore must announce, got ${JSON.stringify(sent.map((m) => m.content))}`,
+			);
+			assert(
+				lastState()?.observed?.[0]?.mergeState === "conflicting",
+				`R7b: the announced classification must be persisted, got ${JSON.stringify(lastState()?.observed?.[0])}`,
+			);
+			fs.rmSync(path.join(tmpDir, "conflicting"));
+			console.log("✓ R7b Passed: an old-state restore announces the conflict and persists it.");
 
 			console.log("✓ All observe-pr resume tests passed successfully!");
 			try {

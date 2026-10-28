@@ -37,25 +37,37 @@
     "extensions/lib/gh-health.ts": 308,
     "extensions/lib/git-repo.ts": 164,
     "extensions/lib/github-review-threads.ts": 638,
+    "extensions/lib/mergeability.ts": 47,
     "extensions/lib/nonblocking.ts": 494,
     "extensions/lib/orca-client.ts": 615,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 2133,
+    "extensions/observe-pr.ts": 2192,
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 627,
+    "agy-acp/src/acp.ts": 164,
     "agy-acp/src/agy-driver.ts": 38,
     "agy-acp/src/agy/args.ts": 51,
     "agy-acp/src/agy/contract.ts": 289,
     "agy-acp/src/agy/events.ts": 31,
     "agy-acp/src/agy/process.ts": 298,
     "agy-acp/src/agy/version.ts": 91,
+    "agy-acp/src/bridge-cleanup.ts": 50,
+    "agy-acp/src/bridge-hook.ts": 121,
+    "agy-acp/src/bridge-server.ts": 292,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/framing.ts": 81,
     "agy-acp/src/jsonrpc.ts": 296,
     "agy-acp/src/lib/child-process.ts": 40,
-    "agy-acp/src/main.ts": 105
+    "agy-acp/src/main.ts": 86,
+    "agy-acp/src/permission-gate.ts": 286,
+    "agy-acp/src/permission.ts": 274,
+    "agy-acp/src/prompt.ts": 53,
+    "agy-acp/src/server.ts": 241,
+    "agy-acp/src/session.ts": 300,
+    "agy-acp/src/turn.ts": 94,
+    "agy-acp/src/update-map.ts": 152
   },
   "notes": [
     {
@@ -226,8 +238,22 @@
       "changes": [
         "extensions/lib/orca-client.ts: 615 lines > baseline 578 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-28",
+      "reason": "issue 69: observe-pr.ts polls mergeable/mergeableState and announces CONFLICTING/BEHIND transitions on an observed PR; the classification itself lives in the new extensions/lib/mergeability.ts (46 lines, unit-tested).",
+      "changes": [
+        "extensions/observe-pr.ts: 2172 lines > baseline 2133 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-28",
+      "reason": "review fixes on the mergeability work: a transition announced while the startup notice suppresses updates is deferred instead of dropped, and the observe_pr seed is persisted; both close review findings on PR 71.",
+      "changes": [
+        "extensions/observe-pr.ts: 2192 lines > baseline 2172 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "c48c99f",
+  "generatedFrom": "e4eaf60",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }
