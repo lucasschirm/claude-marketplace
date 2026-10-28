@@ -76,6 +76,9 @@ try {
 		prNumber: snap.prNumber,
 		mergeState: snap.mergeState,
 		ciVerdict: snap.ci.verdict,
+		// Distinguished from "running": a failed `gh pr checks` call also lands as verdict
+		// "unknown", and reporting that as "CI is running again" would be false news.
+		ciUnreadable: snap.ci.ghFailed,
 		at: new Date().toISOString(),
 	};
 
@@ -93,13 +96,16 @@ try {
 	const news = [];
 	if (previous.mergeState !== snapshot.mergeState) {
 		if (snapshot.mergeState === "conflicting") news.push(`PR #${snap.prNumber} now conflicts with its base branch (mergeable: CONFLICTING); rebase or merge the base into it before it can land.`);
-		else if (snapshot.mergeState === "behind") news.push(`The base branch of PR #${snap.prNumber} has moved ahead (mergeableState: BEHIND); rebase or merge the base into it before it can land.`);
+		else if (snapshot.mergeState === "behind") news.push(`The base branch of PR #${snap.prNumber} has moved ahead (mergeStateStatus: BEHIND); rebase or merge the base into it before it can land.`);
 		else if (previous.mergeState === "conflicting" || previous.mergeState === "behind") news.push(`PR #${snap.prNumber} is mergeable again (the conflict or BEHIND state cleared).`);
 	}
 	if (previous.ciVerdict !== snapshot.ciVerdict) {
 		if (snapshot.ciVerdict === "failed") news.push(`CI for PR #${snap.prNumber} failed; investigate the failing checks.`);
 		else if (snapshot.ciVerdict === "passed") news.push(`All CI passed for PR #${snap.prNumber}.`);
-		else if (previous.ciVerdict === "passed" || previous.ciVerdict === "failed") news.push(`CI for PR #${snap.prNumber} is running again (a new push or re-run).`);
+		else if ((previous.ciVerdict === "passed" || previous.ciVerdict === "failed") && !snapshot.ciUnreadable) {
+			news.push(`CI for PR #${snap.prNumber} is running again (a new push or re-run).`);
+		}
+		// (an unreadable checks call is no news: the next check retries and reports the real verdict)
 	}
 
 	persist(snapshot);

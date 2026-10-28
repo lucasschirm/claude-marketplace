@@ -56,6 +56,9 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+  if [ -f "$STATE.cibroken" ]; then
+    exit 1
+  fi
   if [ -f "$STATE.cifail" ]; then
     echo '[{"name":"build","bucket":"fail","state":"FAILURE"},{"name":"lint","bucket":"pass","state":"SUCCESS"}]'
     exit 1
@@ -212,6 +215,8 @@ test("stop hook: CI running holds the stop, re-arms with a heartbeat, and allows
 	const state = readStateFile(fx, "s-watch-");
 	assert.ok(state?.watchStartedAt, "the watch start is persisted for the re-arms");
 	assert.equal(state.reArms, 1);
+	// (notify-changes keys its PR-gone/PR-changed news on this: the snapshot must carry the number)
+	assert.equal(state.lastSnapshot?.prNumber, 7, "the persisted snapshot carries the PR number");
 
 	// CI passes: the next stop is allowed.
 	fs.rmSync(`${fx.ghState}.cipending`);
@@ -282,6 +287,32 @@ test("notify hook: baseline is silent, transitions inject, no-change stays silen
 	fs.writeFileSync(`${fx.ghState}.cifail`, "1");
 	res = await runHook("notify-changes.mjs", { session_id: "s-notify", tool_name: "exec" }, env);
 	out = JSON.parse(res.stdout);
+	assert.match(out.hookSpecificOutput.additionalContext, /CI for PR #7 failed/);
+});
+
+test("notify hook: an unreadable checks call is not reported as 'CI running again'", async () => {
+	const fx = fixture("ciunreadable");
+	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
+	const env = { ...fx.env, PR_OBSERVER_HOOK_MIN_NOTIFY_MS: "0" };
+
+	// Baseline: CI passed.
+	let res = await runHook("notify-changes.mjs", { session_id: "s-cu", tool_name: "exec" }, env);
+	assert.equal(res.stdout, "");
+
+	// The checks call breaks (exit 1, no rows): verdict "unknown", but that is a failed call,
+	// not CI running - no news, and the snapshot records the difference.
+	fs.writeFileSync(`${fx.ghState}.cibroken`, "1");
+	res = await runHook("notify-changes.mjs", { session_id: "s-cu", tool_name: "exec" }, env);
+	assert.equal(res.code, 0);
+	assert.equal(res.stdout, "", "an unreadable checks call must not inject 'CI is running again'");
+	const state = readStateFile(fx, "s-cu-");
+	assert.equal(state?.lastSnapshot?.ciUnreadable, true);
+
+	// The real verdict after recovery is still reported.
+	fs.rmSync(`${fx.ghState}.cibroken`);
+	fs.writeFileSync(`${fx.ghState}.cifail`, "1");
+	res = await runHook("notify-changes.mjs", { session_id: "s-cu", tool_name: "exec" }, env);
+	const out = JSON.parse(res.stdout);
 	assert.match(out.hookSpecificOutput.additionalContext, /CI for PR #7 failed/);
 });
 

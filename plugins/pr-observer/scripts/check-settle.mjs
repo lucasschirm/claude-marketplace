@@ -80,7 +80,7 @@ try {
 	}
 	if (snap.mergeState === "behind") {
 		block(
-			`The base branch of PR #${prNumber} has moved ahead (mergeableState: BEHIND). Rebase or merge the base into the PR branch before it can land. ` +
+			`The base branch of PR #${prNumber} has moved ahead (mergeStateStatus: BEHIND). Rebase or merge the base into the PR branch before it can land. ` +
 				"To end the session anyway, press Esc to cancel.",
 		);
 	}
@@ -136,7 +136,7 @@ try {
 			block(`PR #${prNumber} began conflicting with its base branch while CI ran (mergeable: CONFLICTING). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`);
 		}
 		if (next.mergeState === "behind") {
-			block(`The base branch of PR #${prNumber} moved ahead while CI ran (mergeableState: BEHIND). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`);
+			block(`The base branch of PR #${prNumber} moved ahead while CI ran (mergeStateStatus: BEHIND). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`);
 		}
 		if (next.ci.verdict === "failed") {
 			const names = next.ci.failedNames.slice(0, 5).join(", ");
@@ -154,7 +154,8 @@ try {
 		prNumber,
 		watchStartedAt,
 		reArms: (Number.isFinite(state.reArms) ? state.reArms : 0) + 1,
-		lastSnapshot: { mergeState: snap.mergeState, ciVerdict: snap.ci.verdict, at: new Date().toISOString() },
+		// (prNumber is part of the snapshot: notify-changes keys its PR-gone/PR-changed news on it)
+		lastSnapshot: { prNumber, mergeState: snap.mergeState, ciVerdict: snap.ci.verdict, at: new Date().toISOString() },
 	});
 	if (!persisted) logLine(SCRIPT, sessionId, "warn", "could not persist the watch state; the next re-arm restarts the watch clock");
 

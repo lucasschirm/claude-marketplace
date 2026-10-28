@@ -71,7 +71,9 @@ export function readStdinJson() {
 }
 
 export function writeHookOutput(payload) {
-	process.stdout.write(`${JSON.stringify(payload)}\n`);
+	// fd 1 synchronously: a plain process.stdout.write followed by process.exit can truncate the
+	// buffered write, and a truncated `decision: block` is silently no block at all.
+	fs.writeSync(1, `${JSON.stringify(payload)}\n`);
 }
 
 /** The JSON-lines log. Never throws: a full or unwritable disk must not break the hook. */
@@ -106,7 +108,12 @@ export function writeState(key, state) {
 	try {
 		const dir = stateDir();
 		fs.mkdirSync(dir, { recursive: true });
-		fs.writeFileSync(path.join(dir, `state-${key}.json`), JSON.stringify(state, null, 2));
+		// Temp file + rename: a rename is atomic on POSIX, so a concurrent hook read never sees a
+		// half-written state file (the hooks read-modify-write the same file).
+		const target = path.join(dir, `state-${key}.json`);
+		const tmp = `${target}.${process.pid}.tmp`;
+		fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+		fs.renameSync(tmp, target);
 		return true;
 	} catch (err) {
 		return false;
@@ -200,7 +207,7 @@ export async function readPrSnapshot(engine, cwd) {
 	const number = Number(pr.number);
 	const mergeState = engine.classifyMergeability(pr) ?? null;
 
-	const checks = await ghJson(["pr", "checks", String(number), "--json", "bucket,state"], cwd);
+	const checks = await ghJson(["pr", "checks", String(number), "--json", "name,bucket,state"], cwd);
 	let ci = { verdict: "none", failedNames: [], pendingCount: 0, ghFailed: false };
 	if (checks.failed) {
 		// `gh pr checks` exits non-zero when checks fail - stdout may still carry the rows.
