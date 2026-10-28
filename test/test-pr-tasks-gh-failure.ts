@@ -9,6 +9,7 @@
 //  T5  after recovery the background sync resumes and a retried mutation succeeds
 import "./gh-fail-env.ts";
 import ext from "../extensions/pr-tasks.ts";
+import { ghHealth } from "../extensions/lib/gh-health.ts";
 import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -33,6 +34,58 @@ export default function (pi: any) {
 
 	let activeToolList: string[] = [];
 
+	// --------------------------------------------------------------------------- diagnostics
+	// "expected >= 3 paced attempts, got 1" is the whole message a failure gives today, and at least
+	// three different faults produce it: a retry timer that was never scheduled (something reset the
+	// shared health state), one scheduled far out (the env shim above did not reach the singleton),
+	// and one that fired while its single slot was refused by another caller. The gh-call log cannot
+	// tell them apart, so the health object is wrapped for the run and the trace is printed whenever
+	// the suite fails. The wrappers only observe - no timing decision is changed.
+	const startedAt = Date.now();
+	let outageStartedAt = 0;
+	const rel = () => `+${Date.now() - (outageStartedAt || startedAt)}ms${outageStartedAt ? "" : " (pre-outage)"}`;
+	const healthTrace: string[] = [];
+	const eventTrace: string[] = [];
+	for (const method of ["acquireSlot", "release", "recordFailure", "recordSuccess", "reset"] as const) {
+		const original = (ghHealth as any)[method].bind(ghHealth);
+		(ghHealth as any)[method] = (...args: unknown[]) => {
+			const result = original(...args);
+			healthTrace.push(
+				`${rel()} ${method}(${args.map((a) => JSON.stringify(a)).join(",")}) -> ${JSON.stringify(result)} ` +
+					`[status=${ghHealth.status} failures=${ghHealth.consecutiveFailures} nextRetryIn=${ghHealth.nextRetryInMs()}ms]`,
+			);
+			return result;
+		};
+	}
+	// The timer is the thing a starvation looks like from outside: was one scheduled, with what delay,
+	// and did it actually fire?
+	const scheduleOriginal = (ghHealth as any).schedule;
+	(ghHealth as any).schedule = (ms: number, fn: () => void) => {
+		const handle = scheduleOriginal(ms, () => {
+			healthTrace.push(`${rel()} timer FIRED (delay was ${ms} ms)`);
+			fn();
+		});
+		healthTrace.push(`${rel()} timer scheduled (${ms} ms)`);
+		return handle;
+	};
+	const unscheduleOriginal = (ghHealth as any).unschedule;
+	(ghHealth as any).unschedule = (handle: unknown) => {
+		healthTrace.push(`${rel()} timer unscheduled`);
+		return unscheduleOriginal(handle);
+	};
+	// A hook of the test's own: it proves the timer's fan-out happened even when every consumer's
+	// acquireSlot was refused, which is what #63 starvation looks like.
+	ghHealth.registerRetryHook(() => healthTrace.push(`${rel()} retry hooks fired (test observer, no slot asked)`));
+
+	// The pi event log, because "nothing retried" is also what "nothing ever asked again" looks like
+	// when the turn ended and the extension's drivers stopped.
+	function tracedOn(event: string, handler: any) {
+		return pi.on(event, async (...args: unknown[]) => {
+			eventTrace.push(`${rel()} ${event}`);
+			return handler(...args);
+		});
+	}
+
 	const mockUI = {
 		setStatus(_key: string, _text: string | undefined) {},
 		notify(msg: string, type?: string) {
@@ -45,7 +98,7 @@ export default function (pi: any) {
 		on(event: string, handler: any) {
 			if (!eventHandlers[event]) eventHandlers[event] = [];
 			eventHandlers[event].push(handler);
-			return pi.on(event, handler);
+			return tracedOn(event, handler);
 		},
 		registerTool(t: any) {
 			tools[t.name] = t;
@@ -185,6 +238,33 @@ process.exit(0);
 		if (!cond) throw new Error(msg);
 	}
 
+	/** Everything a pacing failure can be caused by, in the order the assertions read it. */
+	function dumpDiagnostics() {
+		console.log("--- diagnostics: gh calls (relative to the outage, with the subcommand) ---");
+		const logFile = path.join(stateDir, "gh-calls.log");
+		if (fs.existsSync(logFile)) {
+			for (const line of fs
+				.readFileSync(logFile, "utf8")
+				.split("\n")
+				.filter((l) => l.trim())) {
+				const [ts, ...rest] = line.trim().split(" ");
+				const at = Number.parseInt(ts, 10);
+				console.log(`  ${outageStartedAt ? `+${at - outageStartedAt}ms` : `+${at - startedAt}ms (pre-outage)`} ${rest.join(" ")}`);
+			}
+		} else {
+			console.log("  (the mock gh was never called)");
+		}
+		console.log(`--- diagnostics: ghHealth trace (${healthTrace.length} entries, last 80) ---`);
+		for (const line of healthTrace.slice(-80)) console.log(`  ${line}`);
+		console.log(`--- diagnostics: pi events (${eventTrace.length}, last 25) ---`);
+		for (const line of eventTrace.slice(-25)) console.log(`  ${line}`);
+		console.log(
+			`--- diagnostics: env PI_GH_HEALTH_FAST_MS=${process.env.PI_GH_HEALTH_FAST_MS} ` +
+				`PI_GH_HEALTH_FAST_RETRIES=${process.env.PI_GH_HEALTH_FAST_RETRIES} PI_GH_HEALTH_SLOW_MS=${process.env.PI_GH_HEALTH_SLOW_MS} ` +
+				`| singleton fast=${(ghHealth as any).fastIntervalMs} retries=${(ghHealth as any).fastRetries} slow=${(ghHealth as any).slowIntervalMs} ---`,
+		);
+	}
+
 	function readCallTimestamps(): number[] {
 		const file = path.join(stateDir, "gh-calls.log");
 		if (!fs.existsSync(file)) return [];
@@ -211,6 +291,7 @@ process.exit(0);
 			// Start the outage, then a settle attempt (its sync hits the outage)
 			fs.writeFileSync(path.join(stateDir, "offline"), "1");
 			const outageStart = Date.now();
+			outageStartedAt = outageStart;
 			console.log("— GitHub outage started");
 			const settleStart = Date.now();
 			for (const h of eventHandlers["agent_before_settle"] || []) {
@@ -314,6 +395,7 @@ process.exit(0);
 			process.exit(0);
 		} catch (err: any) {
 			console.log("Test failed:", err);
+			dumpDiagnostics();
 			try {
 				fs.rmSync(tmpDir, { recursive: true, force: true });
 			} catch {}
