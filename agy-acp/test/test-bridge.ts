@@ -618,6 +618,8 @@ async function startGateHarness(opts: {
 	requestImpl?: (m: string, p: Record<string, unknown>, ms: number) => Promise<unknown>;
 	/** The prompt in flight (its object identifies the turn); a test ends a turn by clearing it. */
 	currentTurn?: () => Promise<unknown> | null;
+	/** How many prompts the session has started; the mutable one below is how a test runs a turn. */
+	turnCount?: () => number;
 }): Promise<GateHarness> {
 	const requests: Array<true> = [];
 	const updates: Array<Record<string, unknown>> = [];
@@ -643,6 +645,7 @@ async function startGateHarness(opts: {
 		token: "tok-1",
 		conversationId: () => "conv-1",
 		currentTurn: opts.currentTurn ?? (() => Promise.resolve()),
+		turnCount: opts.turnCount ?? (() => 0),
 	});
 	await gate.start();
 	const ask = async (stepIdx: number, name: string, args: Record<string, unknown>, conversationId = "conv-1") => {
@@ -890,25 +893,35 @@ test("the gate: a hook that outlives an agy that died mid-turn is denied too (th
 	}
 });
 
-test("the gate: the next turn asks again, and an old cancel is not the reason of a later turn's stray hook", async () => {
+test("the gate: the next turn asks again, and a hook-free turn still retires an old cancel", async () => {
+	// Two things a cancel must not do: outlive its turn (the next one asks normally), and keep being
+	// the reason a stray hook is refused after a later turn ran - which is why the retirement counts
+	// prompts rather than watching for hooks. The turn below is genuinely hook-free: nothing in this
+	// test touches the gate during it, and the stray ask afterwards must say "session ended".
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelnext-")));
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
 		let turn: Promise<unknown> | null = Promise.resolve();
-		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
+		let turns = 1;
+		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn, turnCount: () => turns });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
 		turn = null;
-		assert.strictEqual((await h.ask(1, "write_file", { Path: file })).decision, "deny");
-		turn = Promise.resolve(); // the respawned turn: a different prompt, so a different turn
-		assert.deepStrictEqual(await h.ask(2, "write_file", { Path: file }), { decision: "allow" });
-		assert.strictEqual(h.requests.length, 1, "the new turn's tool call asks the client as usual");
-		// And the identity is what scopes the old cancel: this turn ran with no hook of its own, so a
-		// stray hook after it must not be told its turn was cancelled - it was not.
+		const afterCancel = await h.ask(1, "write_file", { Path: file });
+		assert.strictEqual(afterCancel.decision, "deny");
+		assert.match(afterCancel.reason ?? "", /the turn was cancelled/i, "the cancel's own words, while nothing has run since");
+		turn = Promise.resolve();
+		turns++;
+		assert.deepStrictEqual(await h.ask(2, "write_file", { Path: file }), { decision: "allow" }, "the new turn asks as usual");
+		// A second cancel, then a turn that never reaches a hook at all.
+		h.gate.abortPending("the client cancelled the turn", "cancelled");
+		turn = null;
+		turn = Promise.resolve();
+		turns++; // the hook-free turn: the gate sees nothing of it but the count
 		turn = null;
 		const stray = await h.ask(4, "write_file", { Path: file });
 		assert.strictEqual(stray.decision, "deny");
-		assert.match(stray.reason ?? "", /session ended/i, "the later turn's end, not the cancel from two turns back");
+		assert.match(stray.reason ?? "", /session ended/i, "the newest turn's end, not the cancel from a turn back");
 		await h.gate.dispose();
 	} finally {
 		fs.rmSync(workspace, { recursive: true, force: true });

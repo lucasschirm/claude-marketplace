@@ -45,6 +45,7 @@ export class AgySession {
 	private disposed = false;
 	private cumulative: AgyCumulative = { ...ZERO_CUMULATIVE, usage: { ...ZERO_CUMULATIVE.usage } };
 	private turn: Promise<AcpPromptResult> | null = null;
+	private turnCountValue = 0; // the prompts started; the gate scopes a cancel to this number
 	private readonly heartbeat: TurnHeartbeat;
 	// Public (turn.ts, map-steps.ts): the turn machinery settles the pending turn and the still-active tools.
 	pending: PendingTurn | null = null;
@@ -65,6 +66,7 @@ export class AgySession {
 			conversationId: () => (this.idValue === "" ? null : this.idValue),
 			// Derived, not a flag to keep in step: no prompt in flight means no answer to give.
 			currentTurn: () => this.turn,
+			turnCount: () => this.turnCountValue,
 		});
 		this.heartbeat = new TurnHeartbeat((update) => this.emit(update), { pendingPermissions: () => this.gate.pendingAsks() });
 	}
@@ -109,6 +111,7 @@ export class AgySession {
 		const text = flattenPrompt(blocks);
 		if (this.turn) throw new RpcError(TURN_IN_PROGRESS, "turn in progress");
 		// The beat starts before the child is chosen: a respawn is silence a watchdog must read as waiting.
+		this.turnCountValue++; // the gate scopes a cancel to this turn number
 		this.heartbeat.start(this.config.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
 		this.turn = runTurn(this, text).finally(() => {
 			this.turn = null;
@@ -133,13 +136,11 @@ export class AgySession {
 			return;
 		}
 		this.needsRespawnValue = true;
-		// The asks before anything else: a hook holding a tool call is released with our reason, so the
-		// model reads "cancelled" instead of a hook timeout, and the client's dialog closes now.
+		// The asks first: a hook holding a tool call is released with our reason, and the dialog closes now.
 		this.gate.abortPending("the client cancelled the turn", "cancelled");
 		this.gate.onTurnEnd();
-		// Then the turn itself, answered now rather than whenever agy gets round to dying: a client
-		// that asked to stop is never made to wait out the ladder below (this fails the tools still
-		// ACTIVE too, so nothing keeps spinning). Whatever agy sends afterwards is ignored.
+		// Then the turn itself, answered now rather than whenever agy gets round to dying: a client that
+		// asked to stop never waits out the ladder below (this fails the tools still ACTIVE too).
 		settleCancelled(this, CANCELLED_TOOL_REASON);
 		// The SIGINT -> process-group window is AGY_ACP_CANCEL_ESCALATE_MS (default 5 s).
 		const escalateMs = this.config.cancelEscalateMs ?? DEFAULT_CANCEL_ESCALATE_MS;
@@ -178,8 +179,7 @@ export class AgySession {
 		const resume = this.needsRespawn;
 		if (current && !current.exited) {
 			// The child we are replacing is still dying (a cancel escalates asynchronously and the next
-			// prompt can arrive first). Awaiting the driver's bounded ladder is what keeps a session
-			// from ending up with a child nobody owns any more.
+			// prompt can arrive first): awaiting its bounded ladder keeps no child unowned.
 			this.config.log(`session ${this.id}: waiting for the dying agy child before respawning`);
 			this.driver = null;
 			this.live = false;

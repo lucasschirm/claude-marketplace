@@ -57,11 +57,16 @@ export interface PermissionGateOptions {
 	 * The `session/prompt` in flight, or null. A hook is a question about the turn that is running, so
 	 * when none is there is nothing left to carry the answer: the request is denied rather than turned
 	 * into a dialog nobody can close (and that a client would have to wait out). Derived, deliberately
-	 * - a flag the session has to remember to clear is a lockout waiting to happen. The promise object
-	 * identifies the turn, which is how a cancel from an earlier turn stops being reported as the
-	 * reason for a later one.
+	 * - a flag the session has to remember to clear is a lockout waiting to happen.
 	 */
 	currentTurn: () => Promise<unknown> | null;
+	/**
+	 * How many prompts this session has started, counted whether or not any of them reached a hook.
+	 * That is what retires a cancel: the gate only ever looks at the session when a hook arrives, so a
+	 * later turn that never asks would otherwise leave an old cancel reading as the newest thing that
+	 * happened, and a stray hook would be told its turn was cancelled when it was not.
+	 */
+	turnCount: () => number;
 }
 
 export class PermissionGate {
@@ -72,8 +77,7 @@ export class PermissionGate {
 	private readonly stream: StreamCalls;
 	private readonly asks: PendingAsks;
 	private disposedFlag = false;
-	private lastTurn: Promise<unknown> | null = null;
-	private cancelledTurn: Promise<unknown> | null = null;
+	private cancelledAtTurn = -1; // the prompt count when a session/cancel ran; -1 = never
 
 	constructor(opts: PermissionGateOptions) {
 		this.opts = opts;
@@ -134,9 +138,8 @@ export class PermissionGate {
 		// agy exited mid-turn while a hook process of its own was still alive. Either way asking would
 		// put a dialog on screen that nothing can close, so the hook is refused with the reason instead.
 		const running = this.opts.currentTurn();
-		if (running) this.lastTurn = running; // the newest turn this gate has seen
-		if (this.cancelledTurn !== null && this.cancelledTurn === this.lastTurn) {
-			// The cancel is the newest turn we know of: this request belongs to a turn already answered.
+		if (this.cancelledAtTurn === this.opts.turnCount()) {
+			// Nothing has run since the cancel: this request belongs to the turn that was called off.
 			this.opts.log(`permission: ${req.toolCall.name} denied (the turn was cancelled)`);
 			return { decision: "deny", reason: cancelledReason() };
 		}
@@ -254,10 +257,7 @@ export class PermissionGate {
 	abortPending(why: string, kind: AskAbort = "ended"): void {
 		// Remembering *which* turn was cancelled is what makes the next hook's reason the cancel's own
 		// words rather than a generic "session ended" - and only for as long as no turn has run since.
-		if (kind === "cancelled") {
-			this.cancelledTurn = this.opts.currentTurn();
-			this.lastTurn = this.cancelledTurn ?? this.lastTurn;
-		}
+		if (kind === "cancelled") this.cancelledAtTurn = this.opts.turnCount();
 		this.asks.denyAll(why, kind);
 	}
 

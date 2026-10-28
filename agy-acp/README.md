@@ -72,8 +72,10 @@ reason) < `AGY_ACP_HOOK_DEADLINE_MS` (the hook's own timer) < the `hooks.json` t
 dispose every pending request is denied. A request that arrives with **no turn in flight** is refused
 outright rather than asked - between a cancel and the child's death, or from a hook that outlived an
 `agy` that died mid-turn, there is no prompt left to carry the answer, so an ask would be a dialog
-nobody can close. The session's live turn is what answers this question (`turnInFlight`), so a new
-turn asks as usual without anything having to be reset.
+nobody can close. The session's live turn is what answers this question (`currentTurn`), so a new
+turn asks as usual without anything having to be reset - and because the gate also counts prompts
+(`turnCount`), a cancel stops being the reason for a refusal as soon as a later turn has run, even a
+turn that never reached a hook.
 
 agy emits a tool step's `ACTIVE` stream event **before** running the `PreToolUse` hook, so
 the `tool_call` is created from the stream's parameters and the hook's args arrive as an
@@ -97,7 +99,7 @@ logged rather than answered with an error) does four things, in the order a clie
    **after** the turn is over is refused with those same words rather than asked: `agy` can fire a
    hook between the cancel and the death it causes, and there is no `session/prompt` left to carry an
    answer to it. The rule is the general one - no turn in flight, no permission request (see
-   `turnInFlight` below) - so a hook that outlives an `agy` that died mid-turn is refused too, with
+   `currentTurn` above) - so a hook that outlives an `agy` that died mid-turn is refused too, with
    the session-ended reason.
 2. the in-flight `session/prompt` answers `{ "stopReason": "cancelled" }` **at once**, with its
    still-`ACTIVE` tools reported failed: a client that asked to stop is never made to wait for an

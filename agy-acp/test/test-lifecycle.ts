@@ -105,6 +105,8 @@ interface Harness {
 	updates: Array<Record<string, unknown>>;
 	logs: string[];
 	permissionRequests: Array<{ id: number; params: Record<string, unknown> }>;
+	/** Ends stdin only - what a client hanging up actually does, with no disposal implied. */
+	hangUp: () => void;
 	close: () => Promise<void>;
 }
 
@@ -239,6 +241,7 @@ async function startHarness(
 		updates,
 		logs,
 		permissionRequests,
+		hangUp: () => input.end(),
 		close: async () => {
 			input.end();
 			await server.disposeSessions();
@@ -488,9 +491,13 @@ test("the connection close hands the teardown to the host before anything is dis
 	try {
 		await newSession(h);
 		await waitFor("the session's child to be live", 8000, () => pidsMatching("fake-agy.ts", process.pid).length > 0);
-		h.close(); // the client hangs up; no one else is disposing anything here
+		// hangUp (not `close`, which also disposes): the client hanging up, and nothing else.
+		h.hangUp();
 		await waitFor("the host to be told", 3000, () => reasons.length > 0);
 		assert.ok(aliveAtClose, `the close is reported first, child still alive (saw ${aliveAtClose})`);
+		// And observed twice, so a server that reported the close *and* disposed on close could not
+		// pass: the close alone leaves the child running - disposal is the host's call to make.
+		assert.ok(pidsMatching("fake-agy.ts", process.pid).length > 0, "nothing was disposed by the close itself, before the host's dispose");
 		await h.server.disposeSessions(); // what the exit path does, inside its deadline
 		await waitFor("the child to be gone once the host disposed", 8000, () => pidsMatching("fake-agy.ts", process.pid).length === 0);
 	} finally {
@@ -515,7 +522,7 @@ test("a host whose close handler throws still has its children disposed", async 
 		await newSession(h);
 		const before = pidsMatching("fake-agy.ts", process.pid);
 		assert.ok(before.length > 0, "the session's child is running");
-		h.close();
+		h.hangUp(); // nothing disposes here but the server's own fallback
 		await waitFor("the failing handler to be logged", 3000, () => h.logs.some((l) => /connection-closed handler failed/.test(l)));
 		await waitFor("the child to die anyway", 8000, () => !before.some(alive));
 	} finally {
