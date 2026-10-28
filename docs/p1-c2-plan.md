@@ -437,3 +437,101 @@ Two coverage caveats a reviewer should weigh rather than infer:
   fixed 1 s announcement timer the test itself comments on. Tracked as #62, not fixed inside #48: a suite that
   needs a design change does not belong in a revert-boundary PR about subprocesses - but it does mean a green
   CI run on this branch is partly luck, and a red one is not automatically this branch's fault.
+
+## C2.3: the remainder, decided from measurement (`main` = `2e0d08a`)
+
+PR A landed the door and left four long-lived children and nine inbound parses outside it. Those are not
+stragglers, they are different problems, and three decisions were taken from evidence rather than from
+preference.
+
+### The inventory, as measured
+
+| child | what it retains today |
+|---|---|
+| `observe-pr.ts:842` `gh run watch --compact` | stdout **and** stderr share one `65536`-byte tail, rebuilt per chunk as `(output + chunk).slice(-cap)`; the tail only feeds a substring heuristic on close, so a chatty stderr silently evicts the stdout it is searching |
+| `observe-pr.ts:1122` `gh pr checks --watch` | `lineBuffer += chunk.toString()` with **no cap at all** - bounded only by the child deigning to write a newline. Measured with `/tmp/ram2.mjs`: a 20 MB stream that uses `\r` progress and never `\n` retains **20 971 520 bytes** where a 64 KB cap retains 65 536 - 32 000x. (The cap is not free: eager flattening cost 61 ms vs 8 ms on the same 20 MB, which is the honest trade - RAM for CPU.) |
+| `orca-client.ts:254` `spawn(cmd, ["orchestration", …])` | returns a raw `ChildProcess`; no cap, no `error` handler at the spawn site - each caller improvises one |
+| `acp-client.ts:67` `spawn("devin", ["acp"], detached)` | readline over stdout; every frame and every stderr chunk appended to a session log with **no rotation**; `stdin.on("error", () => {})` is deliberate and its comment says why: "an unhandled 'error' event would crash the host pi process" |
+
+Two hand-written identity guards per watch path (`… !== child` in the data handler and the close handler)
+exist because a killed-then-replaced watcher must not mutate the live entry. That is the door's job, not the
+caller's.
+
+### D9 - the door owns long-lived children: `runSupervised`
+
+`runSupervised(cmd, args, { onLine, onExit, restart, retention, classify })` replaces all four sites.
+
+- **A byte budget, not an accumulation habit.** Per-stream ring of chunks (never `s += chunk`), joined only on
+  demand; separate stdout and stderr budgets so one stream cannot evict the other's evidence; a module-wide
+  retention budget (1 MB across all supervised children, each child getting a fair slice) and a `droppedBytes`
+  counter, so hitting the cap is visible instead of being a silent truncation of the heuristics that read it.
+- **No unbounded line assembly.** A line longer than `lineMaxBytes` (default 64 KB) flushes truncated and
+  increments `oversizedLines`. This is the specific fix for `checks --watch`: it is the only one of the four
+  that can currently grow without limit.
+- **Restart is policy, not folklore per call site.** `{ maxRetries, backoffMs, cooldownHealthyMs, classify }`
+  where `classify` maps an exit code or error to `crash | availability | success`; `ghHealth` plugs in as the
+  classifier so a GitHub outage paces restarts (both watch paths already agree this matters - one of them
+  carries a comment warning that 1 s restart would be a respawn loop).
+- **`stop()` really stops**: kill the process group (`acp-client` already spawns `detached` for tree kill),
+  clear timers, remove listeners, drop buffers. Acceptance: active handles and timers return to the baseline
+  measured before the first spawn.
+- **Identity lives in the handle**, so the four hand-written guards disappear rather than being re-derived
+  correctly four more times.
+
+`DEVIN_COMMAND` (D6) folds in here: the hard-coded `spawn("devin", …)` at `acp-client.ts:67` moves through the
+door, so the injection point is created by the same change that needs it.
+
+### D10 - shape validation is optional and configurable; a rejected parse keeps its pointer
+
+Plugins change JSON shapes. Today a shape mismatch is a hard `BAD_SCHEMA`, which means the cheapest way to
+"fix" an outage is to delete the schema - the outcome this whole design should be robust against.
+
+- `PI_SCHEMA_STRICTNESS = off | warn | fail` (**default `warn`**) plus per-call `strict: boolean`. In `warn` a
+  rejection still yields the payload and an observable reject record; in `fail` it is the coded failure PR A
+  returns. Unknown keys stay accepted in every mode, because a routine field addition is not a mismatch.
+- **A reject record maps back without storing the payload**: `{ at, source, path, expected, actual, bytes,
+  digest: sha256(text).slice(0, 12), correlation: { sessionId?, requestId?, toolCallId?, prNumber?, runId? } }`.
+  The digest plus `sessionId` plus timestamp finds the original Devin message in the ACP session log, which
+  already appends every frame - so we can reconstruct "which Devin message had a `number` where `id` should be
+  a string" without ever holding payloads that may contain tokens.
+- Ring of the last 64 records, a `schemaRejects` counter, and **one log line per `(source, path)`** the first
+  time it drifts: loud once, not 500 times.
+- The static `INBOUND_PARSE_ALLOWLIST` stays exact-filename. "Configurable" applies to *runtime validation*,
+  not to which files may call `JSON.parse` at all - making the allowlist configurable is how it stops being an
+  invariant, and D8 depends on it. If the intent was "third-party plugins can add a file", the honest version
+  of that is a PR here, not a config value.
+- `readJsonFile()` joins the door family so state-file parses stop being raw `JSON.parse`; ACP frames stay
+  explicit in `acp-client.ts` because their framing *is* the protocol.
+
+### D11 - no unhandled exception reaches the UI, proven statically where possible and by fixture otherwise
+
+Measured first: **tools are already protected.** `pi-agent-core/dist/agent-loop.js:574-584` wraps
+`tool.execute` in try/catch and converts a throw into an error result. So the gate must target what is *not*
+covered, which is everything that runs outside a tool call:
+
+- floating promises (only `observe-pr.ts` has `guardAsync`; the other extensions improvise),
+- stream `error` events - understood at `acp-client.ts:89-91`, handled by hand, one missing handler away from
+  killing the host,
+- sync throws inside `child.stdout.on("data")`, `rl.on("line")`, `setTimeout`/`setInterval` callbacks.
+
+Gate `unboundedAsync` in `check-quality.mjs`: an async call in a timer or stream callback must be inside a
+`guard*`; every `.then(` needs a `.catch(`; no bare `void promiseFn()`; and no extension may install
+`process.on("uncaughtException" | "unhandledRejection")` - that hijacks the host for every other extension.
+`guardAsync` generalises out of `observe-pr.ts` into the logging module so there is one boundary with one
+reporting shape.
+
+Fixtures are Pi-real, in a child process, asserting the host is alive and the next tool call still works after:
+a tool that throws (also serves as the regression test for the Pi guarantee we lean on), a throw inside a
+`data` handler, a floating rejection, a stdin EPIPE.
+
+Honest limit, recorded so nobody over-reads the gate: static analysis cannot prove the absence of unhandled
+exceptions. It proves there is no **unguarded async entry point**, and the fixtures prove the guard holds.
+
+### C2.3 split, in order
+
+| PR | content | why this position |
+|---|---|---|
+| **C** | `lib/git-repo.ts`: one `repoRoot()` / `currentBranch()` / `prForBranch()` replacing the four copies; entry files shrink | mechanical, no behaviour change, and it shrinks the three files D then touches |
+| **D** | `runSupervised` + all four long-lived children + `DEVIN_COMMAND`; RAM and handle-leak fixtures | the memory decision is the largest and the riskiest; it needs the smaller entry files from C |
+| **E** | configurable strictness + reject provenance + `readJsonFile`; `jsonParseLocation` 9 → 0 with D8 zero-drop fixtures | reject records want the correlation ids D's handle carries |
+| **F** | `console.*` → `extensions/lib/extension-log.ts`, flip `noConsole` to `error` in the same commit; `unboundedAsync` gate + crash fixtures | its bite depends on door coverage, so it lands after D and E |

@@ -283,12 +283,25 @@ export function isGhAvailabilityError(err: unknown): boolean {
 }
 
 /**
+ * gh's own wording for "there is no pull request here". Matched on the noun, not on the verb: `gh`
+ * also says "could not resolve" about a *repository* - a renamed repo, a lost permission, a typo in a
+ * remote - and that is a broken lookup, not an empty one.
+ */
+const NO_PR_PATTERNS = /no pull requests|could not resolve to a pull\s*request|pull request .{0,32}(?:not found|does not exist)/i;
+
+/**
  * Whether a failed `gh pr view` is the ordinary "this branch has no pull request" rather than gh being
  * broken. Exposed because two callers need to stay quiet for exactly this case and no other - a branch
  * scan and a Devin turn run it constantly, and a warning per un-PR'd branch is noise that buries the
  * failure it is trying to surface - so the pattern lives with the other gh-error matching instead of
  * being re-typed, and re-loosened, per file.
+ *
+ * It was looser once (`/Could not resolve|not found/`), and the looseness was a bug rather than a
+ * style problem: "could not resolve to a Repository" and "HTTP 404: Not Found" both matched, so a
+ * caller that stays quiet for a missing PR stayed quiet while gh could not see the repository at all -
+ * silence about the one case that is worth a line. Narrowed to the noun, with the repository wording
+ * asserted false below so it cannot drift back out.
  */
 export function isNoPullRequestFailure(text: string): boolean {
-	return /no pull requests|Could not resolve|not found/i.test(text);
+	return NO_PR_PATTERNS.test(text);
 }

@@ -1,10 +1,10 @@
 {
   "metrics": {
     "execLocation": 2,
-    "execTimeout": 12,
+    "execTimeout": 5,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
-    "jsonParseLocation": 9,
+    "jsonParseLocation": 8,
     "noStdioWrites": 0,
     "agyStdoutFramesOnly": 0,
     "emptyCatch": 47,
@@ -13,18 +13,18 @@
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.style/useTemplate": 7,
-    "biome.complexity/noExcessiveCognitiveComplexity": 53,
+    "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
-    "biome.suspicious/noExplicitAny": 153,
+    "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noConsole": 10,
-    "biome.correctness/noUnusedFunctionParameters": 1,
-    "biome.correctness/noUnusedImports": 1
+    "biome.correctness/noUnusedImports": 1,
+    "biome.correctness/noUnusedFunctionParameters": 1
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2685,
+    "extensions/devin-delegate.ts": 2670,
     "extensions/lib/acp-client.ts": 320,
     "extensions/lib/ci-verdict.ts": 142,
     "extensions/lib/devin-bash-guard.ts": 277,
@@ -34,21 +34,22 @@
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
-    "extensions/lib/gh-health.ts": 295,
+    "extensions/lib/gh-health.ts": 308,
+    "extensions/lib/git-repo.ts": 164,
     "extensions/lib/github-review-threads.ts": 638,
     "extensions/lib/nonblocking.ts": 494,
-    "extensions/lib/orca-client.ts": 569,
+    "extensions/lib/orca-client.ts": 615,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 2138,
+    "extensions/observe-pr.ts": 2133,
     "extensions/orca-orchestration.ts": 1734,
-    "extensions/pr-tasks.ts": 1510,
+    "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 627,
     "agy-acp/src/agy-driver.ts": 38,
     "agy-acp/src/agy/args.ts": 51,
     "agy-acp/src/agy/contract.ts": 289,
     "agy-acp/src/agy/events.ts": 31,
-    "agy-acp/src/agy/process.ts": 299,
+    "agy-acp/src/agy/process.ts": 298,
     "agy-acp/src/agy/version.ts": 91,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/framing.ts": 81,
@@ -210,8 +211,23 @@
       "changes": [
         "biome.jsonc changed since these numbers were recorded (26e8dcbbf3b6c1b0 -> 32be8dcbbc1d0ce8): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
       ]
+    },
+    {
+      "at": "2026-10-27",
+      "reason": "comments naming the three-state answer and why a failed gh lookup must fail closed",
+      "changes": [
+        "extensions/lib/gh-health.ts: 308 lines > baseline 295 (files may only shrink)",
+        "extensions/lib/orca-client.ts: 578 lines > baseline 569 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-27",
+      "reason": "orca-client's deletion verdict now bounds and classifies each git comparison, comments included",
+      "changes": [
+        "extensions/lib/orca-client.ts: 615 lines > baseline 578 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "91fd35d",
+  "generatedFrom": "c48c99f",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

@@ -3,7 +3,6 @@ import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
-import { type ExecFailure, runJson } from "./lib/exec.ts";
 import {
 	fetchReviewThreads,
 	getRepoCoordinates,
@@ -15,6 +14,7 @@ import {
 	FETCH_TIMEOUT_MS,
 	type GitHubCommentNode,
 } from "./lib/github-review-threads.ts";
+import { prForCurrentBranch } from "./lib/git-repo.ts";
 import { ghHealth, isGhAvailabilityError, isGhAuthError } from "./lib/gh-health.ts";
 import { ok, err, capList } from "./lib/tool-result.ts";
 import { logError } from "./lib/extension-log.ts";
@@ -296,29 +296,28 @@ export default function (pi: ExtensionAPI) {
 		return [];
 	}
 
+	/**
+	 * The PR for this folder's branch. The lookup is `lib/git-repo.ts`'s; the policy stays here - one
+	 * slot per GitHub window, and health judged from the raw cause, since `ghHealth` matches Node error
+	 * codes and stderr text rather than the door's category names.
+	 */
 	async function detectCurrentBranchPR(cwd: string): Promise<number | undefined> {
 		if (!ghHealth.acquireSlot()) return undefined;
-		let failure: ExecFailure | undefined;
-		let number: number | undefined;
 		try {
-			const res = await runJson<{ number?: number | null }>("gh", ["pr", "view", "--json", "number"], {
-				cwd,
-				timeoutMs: FETCH_TIMEOUT_MS,
-				// Only that it is an object with a number in it: a payload that is not that is a failed call
-				// about as far as this lookup is concerned, and there is nothing downstream to salvage.
-				schema: { type: "object", properties: { number: { anyOf: [{ type: "number" }, { type: "null" }] } } },
-			});
-			if (res.ok) number = res.data.number ?? undefined;
-			else failure = res;
+			const res = await prForCurrentBranch(cwd, { timeoutMs: FETCH_TIMEOUT_MS });
+			if (res.found) {
+				ghHealth.recordSuccess();
+				return res.pr.number;
+			}
+			// "No PR here" is gh answering a question, so it counts as a healthy call. Anything else is
+			// either an availability failure - which paces every caller - or a payload that said nothing,
+			// which is left out of the health picture entirely.
+			if (res.reason === "no-pr") ghHealth.recordSuccess();
+			else if (isGhAvailabilityError(res.failure.cause)) ghHealth.recordFailure();
+			return undefined;
 		} finally {
-			// Health is classified from the raw error the door kept, because `ghHealth` matches Node error
-			// codes and stderr text and the door's category names are not those. A payload that was not the
-			// promised object is left out of the health picture: it says nothing about reachability.
-			if (failure === undefined) ghHealth.recordSuccess();
-			else if (isGhAvailabilityError(failure.cause)) ghHealth.recordFailure();
 			ghHealth.release();
 		}
-		return number;
 	}
 
 	async function getTargetPRs(cwd: string, explicitPr?: number): Promise<SyncTarget[]> {

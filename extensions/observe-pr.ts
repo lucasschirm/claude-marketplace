@@ -3,6 +3,7 @@ import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { spawn, type ChildProcess } from "node:child_process";
 import { type ExecFailure, failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./lib/exec.ts";
+import { checkedOutBranch, repoRoot } from "./lib/git-repo.ts";
 import type { Schema } from "./lib/exec-payload.ts";
 import { ghHealth, isGhAvailabilityError, isGhAuthError, isNoPullRequestFailure } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
@@ -1324,31 +1325,25 @@ export default async function (pi: ExtensionAPI) {
 		persistState();
 	}
 
-	async function getRepoRoot(cwd: string): Promise<string | undefined> {
-		// This call had no timeout at all, so a git that hung - a locked index, a dying filesystem - held
-		// the branch-check chain open indefinitely.
-		const res = await runText("git", ["rev-parse", "--show-toplevel"], { cwd, timeoutMs: GH_TIMEOUT_MS });
-		return res.ok && res.data ? res.data : undefined;
-	}
-
+	/**
+	 * Where this folder's repository is, and what branch it has checked out.
+	 *
+	 * Both lookups live in `lib/git-repo.ts` now - the same question is asked by `pr-tasks`,
+	 * `devin-delegate` and `orca-client`, and this site was the one that had no deadline at all: a git
+	 * with a locked index held the branch-check chain open indefinitely. The policy that is specific to
+	 * the observer stays here, which is why this returns `undefined` rather than a failure:
+	 *
+	 *   - not a repository at all → nothing to track, so no entry;
+	 *   - a repository whose branch lookup failed → keep the resolved root and report an empty branch,
+	 *     because the caller only commits a non-empty branch after its generation check.
+	 */
 	async function recordCurrentBranch(cwd: string): Promise<{ repoRoot: string; branch: string } | undefined> {
-		try {
-			const repoRoot = (await getRepoRoot(cwd)) || cwd;
-			try {
-				const res = await runText("git", ["branch", "--show-current"], { cwd, timeoutMs: GH_TIMEOUT_MS });
-				if (!res.ok) throw new Error(failureText(res));
-				// Read-only: the caller commits the branch to trackedBranchesByRepo only after its
-				// generation check, so a stale check cannot inject into a reset session.
-				return { repoRoot, branch: res.data };
-			} catch {
-				// The branch command can fail (transient git error) in a valid repo: keep the
-				// resolved repoRoot so the caller can proceed; an empty branch is not committed.
-				return { repoRoot, branch: "" };
-			}
-		} catch {
-			// Ignore if not a git repository
-			return undefined;
-		}
+		const root = await repoRoot(cwd, { timeoutMs: GH_TIMEOUT_MS });
+		if (!root.ok) return undefined; // not a git repository
+		const branch = await checkedOutBranch(cwd, { timeoutMs: GH_TIMEOUT_MS });
+		// Read-only: the caller commits the branch to trackedBranchesByRepo only after its generation
+		// check, so a stale check cannot inject into a reset session.
+		return { repoRoot: root.value || cwd, branch: branch.ok ? branch.value || "" : "" };
 	}
 
 	async function checkTrackedBranches(cwd: string, deferAnnouncements = false, signal?: AbortSignal) {
