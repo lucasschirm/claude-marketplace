@@ -17,8 +17,9 @@ concurrency:
 
 jobs:
   bump:
-    # A branch push (before = the zero sha) has no base to diff against.
-    if: github.event.before != '0000000000000000000000000000000000000000'
+    # A branch push (before = the zero sha) has no base to diff against, and a branch deletion
+    # (after = the zero sha) has no tree to check out - neither can bump anything.
+    if: github.event.before != '0000000000000000000000000000000000000000' && github.event.after != '0000000000000000000000000000000000000000'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -36,6 +37,8 @@ jobs:
         run: node scripts/bump-plugin-versions.mjs '${{ github.event.before }}' '${{ github.event.after }}'
 
       - name: Commit and push the bump
+        # The ref can advance between checkout and push (another merge landed): rebase the bump
+        # onto the new head and retry, so a lost race retries instead of failing the job.
         run: |
           if git diff --quiet; then
             echo "No version bumps to commit."
@@ -43,4 +46,14 @@ jobs:
           fi
           git -c user.name "github-actions[bot]" -c user.email "41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "chore(plugins): bump versions after ${{ github.sha }}"
-          git push
+          for attempt in 1 2 3; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; the ref moved - rebasing onto it and retrying."
+            git fetch origin '${{ github.ref_name }}'
+            git -c user.name "github-actions[bot]" -c user.email "41898282+github-actions[bot]@users.noreply.github.com" \
+              rebase "origin/${{ github.ref_name }}"
+          done
+          echo "The push kept losing the race; giving up (the next push to the branch retries the bump)."
+          exit 1

@@ -57,16 +57,25 @@ test("bumpManifestFile rewrites the version in place and preserves the layout", 
 		fs.writeFileSync(file, '{\n  "name": "pr-observer",\n  "version": "1.1.0",\n  "description": "d"\n}\n');
 		const result = bumpManifestFile(file);
 		assert.deepEqual(result, { from: "1.1.0", to: "1.2.0" });
-		const raw = fs.readFileSync(file, "utf8");
-		assert.match(raw, /"version": "1\.2\.0"/);
 		assert.equal(
-			raw,
+			fs.readFileSync(file, "utf8"),
 			'{\n  "name": "pr-observer",\n  "version": "1.2.0",\n  "description": "d"\n}\n',
 			"the 2-space layout and trailing newline are preserved",
 		);
 		// Idempotent at the file level: bumping again answers a new version (the caller's
 		// manifest filter is what prevents the second call, not the file).
 		assert.deepEqual(bumpManifestFile(file), { from: "1.2.0", to: "1.3.0" });
+
+		// A differently laid-out manifest (the repo's claude-basics ships 4-space, no newline)
+		// must not be reformatted by a bump.
+		const fourSpace = path.join(dir, "four.json");
+		fs.writeFileSync(fourSpace, '{\n    "name": "x",\n    "version": "1.1.0"\n}');
+		assert.deepEqual(bumpManifestFile(fourSpace), { from: "1.1.0", to: "1.2.0" });
+		assert.equal(
+			fs.readFileSync(fourSpace, "utf8"),
+			'{\n    "name": "x",\n    "version": "1.2.0"\n}',
+			"indent width and the missing trailing newline survive",
+		);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
@@ -88,16 +97,23 @@ test("bumpManifestFile skips missing files, unparseable JSON and unparseable ver
 	}
 });
 
-test("the real manifests are parseable and in the shape the automation expects", () => {
-	// Not a fixture: the actual plugin manifests. The automation writes them with
-	// JSON.stringify(,2)+newline, so the committed layout must round-trip byte-stable.
-	for (const name of ["pr-observer"]) {
-		for (const manifest of [".devin-plugin/plugin.json", ".claude-plugin/plugin.json"]) {
-			const file = path.join(REPO, "plugins", name, manifest);
-			const raw = fs.readFileSync(file, "utf8");
-			const json = JSON.parse(raw);
-			assert.match(String(json.version), /^\d+\.\d+\.\d+$/);
-			assert.equal(raw, `${JSON.stringify(json, null, 2)}\n`, `${name}/${manifest} must be 2-space JSON with a trailing newline`);
-		}
+test("every real plugin manifest is parseable and in the shape the automation expects", () => {
+	// Not a fixture: the actual manifests on disk, discovered rather than hardcoded, so a new
+	// plugin is covered the moment it ships one. Layouts differ across plugins (indent width,
+	// trailing newline) and bumpManifestFile preserves each file's own - so only the content
+	// shape is asserted here.
+	const pluginsDir = path.join(REPO, "plugins");
+	const discovered = fs
+		.readdirSync(pluginsDir)
+		.flatMap((name) =>
+			[".devin-plugin/plugin.json", ".claude-plugin/plugin.json"]
+				.map((manifest) => path.join(pluginsDir, name, manifest))
+				.filter((file) => fs.existsSync(file)),
+		);
+	assert.ok(discovered.length >= 2, "the discovery itself must find the shipped manifests");
+	for (const file of discovered) {
+		const json = JSON.parse(fs.readFileSync(file, "utf8"));
+		assert.match(String(json.version), /^\d+\.\d+\.\d+$/);
+		assert.equal(typeof json.name, "string");
 	}
 });

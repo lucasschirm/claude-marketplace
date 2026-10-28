@@ -45,15 +45,23 @@ export function bumpVersion(version) {
 }
 
 /**
- * Bumps one manifest file in place, preserving the 2-space JSON layout. Answers
- * `{ from, to }`, or undefined when there was nothing to do (missing file, unparseable
- * JSON or version, already bumped).
+ * Bumps one manifest file in place, preserving the file's own layout (indent width and trailing
+ * newline are detected from the raw text - the repo's manifests do not agree on either, and a
+ * version bump must not reformat a file it touches). Answers `{ from, to }`, or undefined when
+ * there was nothing to do (missing file, unparseable JSON or version, already bumped).
  */
 export function bumpManifestFile(file) {
 	if (!fs.existsSync(file)) return undefined;
+	let raw;
+	try {
+		raw = fs.readFileSync(file, "utf8");
+	} catch (err) {
+		console.warn(`skip ${path.relative(ROOT, file)}: unreadable (${err.message})`);
+		return undefined;
+	}
 	let json;
 	try {
-		json = JSON.parse(fs.readFileSync(file, "utf8"));
+		json = JSON.parse(raw);
 	} catch (err) {
 		console.warn(`skip ${path.relative(ROOT, file)}: unparseable JSON (${err.message})`);
 		return undefined;
@@ -66,7 +74,11 @@ export function bumpManifestFile(file) {
 	const from = json.version;
 	if (to === from) return undefined;
 	json.version = to;
-	fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
+	// The indent is the first line's leading whitespace that is not the first line (the opening
+	// brace is never indented); a file with no indented lines gets the conventional two spaces.
+	const indent = /^\s+/m.exec(raw)?.[0] ?? "  ";
+	const trailingNewline = raw.endsWith("\n");
+	fs.writeFileSync(file, `${JSON.stringify(json, null, indent)}${trailingNewline ? "\n" : ""}`);
 	return { from, to };
 }
 
