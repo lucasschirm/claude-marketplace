@@ -8,6 +8,7 @@ import type { Schema } from "./lib/exec-payload.ts";
 import { ghHealth, isGhAvailabilityError, isGhAuthError, isNoPullRequestFailure } from "./lib/gh-health.ts";
 import { ok, err, capList, parseEnvKeys } from "./lib/tool-result.ts";
 import { bookkeepingAtHead, CI_CHECK_ROWS, evaluateCiVerdict, type ObservedRun } from "./lib/ci-verdict.ts";
+import { classifyMergeability, mergeabilityAnnouncement } from "./lib/mergeability.ts";
 import { logError } from "./lib/extension-log.ts";
 import { commandExists, createTaskScope, mapLimited, reportBudgetViolation } from "./lib/nonblocking.ts";
 
@@ -35,6 +36,9 @@ interface PrViewPayload {
 	number?: number;
 	state?: string | null;
 	isDraft?: boolean | null;
+	/** GitHub answers UNKNOWN while it recomputes (after a push to the head or the base). */
+	mergeable?: string | null;
+	mergeableState?: string | null;
 	headRefOid?: string | null;
 	closed?: string | null;
 	mergedAt?: string | null;
@@ -97,6 +101,12 @@ interface ObservedPR {
 	knownComments: Map<string, CommentInfo>;
 	allPassedReported?: boolean;
 	/**
+	 * The last-seen mergeability classification (lib/mergeability.ts). Undefined until the first
+	 * poll that carried the fields lands; kept across GitHub's transient UNKNOWN. Persisted so a
+	 * resume does not re-announce a conflict that was already reported.
+	 */
+	mergeState?: string;
+	/**
 	 * A CI evaluation is in flight for this PR. Not persisted: it describes a live await, and a
 	 * restored observation starts with none. See checkAllCIPassed.
 	 */
@@ -137,6 +147,8 @@ interface PersistedObservedPR {
 	// still works after a restore (pollPR tolerates a missing body on the stored entry).
 	knownComments: Array<{ id: string; number: string; updatedAt?: string }>;
 	allPassedReported: boolean;
+	/** Optional on purpose: entries written before mergeability was tracked still restore. */
+	mergeState?: string;
 	announced: boolean;
 }
 
@@ -512,6 +524,7 @@ export default async function (pi: ExtensionAPI) {
 						updatedAt: c.updatedAt,
 					})),
 					allPassedReported: Boolean(p.allPassedReported),
+					mergeState: p.mergeState,
 					announced: Boolean(p.announced),
 				})),
 				stopped: Array.from(stoppedPRs),
@@ -639,6 +652,7 @@ export default async function (pi: ExtensionAPI) {
 					]),
 				),
 				allPassedReported: Boolean(p.allPassedReported),
+				mergeState: typeof p.mergeState === "string" ? p.mergeState : undefined,
 				announced: Boolean(p.announced),
 			};
 
@@ -994,7 +1008,13 @@ export default async function (pi: ExtensionAPI) {
 
 		const poll = await runJson<PrViewPayload>(
 			"gh",
-			["pr", "view", String(prNumber), "--json", "state,isDraft,closed,mergedAt,comments,statusCheckRollup,headRefOid"],
+			[
+				"pr",
+				"view",
+				String(prNumber),
+				"--json",
+				"state,isDraft,closed,mergedAt,mergeable,mergeableState,comments,statusCheckRollup,headRefOid",
+			],
 			{ cwd: pr.cwd, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
 		);
 		// A stop or a resume-restore during the gh await must not let this stale poll mutate
@@ -1034,6 +1054,18 @@ export default async function (pi: ExtensionAPI) {
 			// first poll lands it again, and until then the fallback has nothing to compare against and
 			// stays silent, which is the correct answer rather than a stale one.
 			if (typeof data.headRefOid === "string" && data.headRefOid !== "") pr.headSha = data.headRefOid;
+
+			// Mergeability: GitHub recomputes it on every push to the head and to the base, so a
+			// conflict can appear (or clear) at any point of an observation. Every transition into
+			// a cannot-land-as-is state is announced; becoming mergeable again is silent but
+			// recorded, so a later conflict announces again instead of being swallowed by the
+			// last-seen state. An unusable answer (UNKNOWN, fields missing) changes nothing.
+			const mergeState = classifyMergeability(data);
+			if (mergeState !== undefined && mergeState !== pr.mergeState) {
+				pr.mergeState = mergeState;
+				if (mergeState !== "mergeable") sendAgentMessage(mergeabilityAnnouncement(prNumber, mergeState));
+				persistState();
+			}
 
 			// Check for newly triggered runs via statusCheckRollup
 			if (Array.isArray(data.statusCheckRollup)) {
@@ -1856,7 +1888,7 @@ export default async function (pi: ExtensionAPI) {
 			// Check PR state and draft status using gh
 			const view = await runJson<PrViewPayload>(
 				"gh",
-				["pr", "view", String(prNumber), "--json", "state,isDraft,number,comments,statusCheckRollup"],
+				["pr", "view", String(prNumber), "--json", "state,isDraft,number,mergeable,mergeableState,comments,statusCheckRollup"],
 				{ cwd: ctx.cwd, timeoutMs: GH_TIMEOUT_MS, schema: PR_VIEW_SCHEMA },
 			);
 			let prData: PrViewPayload;
@@ -1932,6 +1964,11 @@ export default async function (pi: ExtensionAPI) {
 			// (the observation started through this explicit path: the pending
 			// auto-start, if any, must not start it a second time on the next slot)
 			pendingAutoStart.delete(prNumber);
+			// Seed the last-seen mergeability from the pre-check, so the first poll does not
+			// re-announce a conflict the tool result is about to report anyway.
+			const mergeState = classifyMergeability(prData);
+			const startedPr = observedPRs.get(prNumber);
+			if (startedPr && mergeState !== undefined) startedPr.mergeState = mergeState;
 
 			return ok(
 				`Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
@@ -1942,6 +1979,8 @@ export default async function (pi: ExtensionAPI) {
 					result: "observing",
 					state,
 					isDraft,
+					mergeable: prData.mergeable ?? undefined,
+					mergeableState: prData.mergeableState ?? undefined,
 					...capList("observedPrs", Array.from(observedPRs.keys()).map(String)),
 				},
 			);

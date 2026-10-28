@@ -17,12 +17,12 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
-UNIT_TESTS="test/test-compaction-fail-recovery.ts test/test-devin-bash-guard.ts test/test-devin-permissions.ts test/test-devin-tui-safety.ts test/test-pr-observer-mcp.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-exec.ts test/test-orca-status.ts test/test-nonblocking.ts test/test-git-repo.ts test/test-worktree-safety.ts"
+UNIT_TESTS="test/test-compaction-fail-recovery.ts test/test-devin-bash-guard.ts test/test-devin-permissions.ts test/test-devin-tui-safety.ts test/test-pr-observer-mcp.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-mergeability.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-exec.ts test/test-orca-status.ts test/test-nonblocking.ts test/test-git-repo.ts test/test-worktree-safety.ts"
 
 # agy-acp is a standalone package: its tests run under plain `node --test`, not inside Pi.
 AGY_ACP_TESTS="agy-acp/test/test-jsonrpc.ts agy-acp/test/test-contract.ts agy-acp/test/test-process.ts agy-acp/test/test-main.ts agy-acp/test/test-package.ts agy-acp/test/test-sessions.ts agy-acp/test/test-permission-policy.ts agy-acp/test/test-bridge.ts agy-acp/test/test-permission-integration.ts"
 
-ALL_SUITES="typecheck lint format check quality-fixtures manifest unit agy-acp compaction-recovery observe-pr observe-pr-gh-failure observe-pr-branch-scan branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools devin-queue"
+ALL_SUITES="typecheck lint format check quality-fixtures manifest unit agy-acp compaction-recovery observe-pr observe-pr-gh-failure observe-pr-mergeability observe-pr-branch-scan branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools devin-queue"
 
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
@@ -81,6 +81,9 @@ run_suite() {
       ;;
     observe-pr-gh-failure)
       pi -ne -e test/test-observe-pr-gh-failure.ts --offline -p "test"
+      ;;
+    observe-pr-mergeability)
+      pi -ne -e test/test-observe-pr-mergeability.ts --offline -p "test"
       ;;
     observe-pr-branch-scan)
       pi -ne -e test/test-observe-pr-branch-scan.ts --offline -p "test"
