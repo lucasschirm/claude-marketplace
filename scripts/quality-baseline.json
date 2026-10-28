@@ -15,8 +15,8 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
-    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noExplicitAny": 151,
+    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
@@ -42,7 +42,7 @@
     "extensions/lib/orca-client.ts": 615,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
-    "extensions/observe-pr.ts": 2172,
+    "extensions/observe-pr.ts": 2192,
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 627,
@@ -245,8 +245,15 @@
       "changes": [
         "extensions/observe-pr.ts: 2172 lines > baseline 2133 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-10-28",
+      "reason": "review fixes on the mergeability work: a transition announced while the startup notice suppresses updates is deferred instead of dropped, and the observe_pr seed is persisted; both close review findings on PR 71.",
+      "changes": [
+        "extensions/observe-pr.ts: 2192 lines > baseline 2172 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "cb44f16",
+  "generatedFrom": "e4eaf60",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

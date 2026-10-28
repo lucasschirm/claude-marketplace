@@ -503,6 +503,21 @@ export default async function (pi: ExtensionAPI) {
 		return `The PR ${prNumber} is now being observed and you will get all updates for the PR. Calling the "observe_pr" tool will stop the tracking for the PR and automatic updates`;
 	}
 
+	// A mergeability transition that lands while the startup notice is still pending must not be
+	// lost: sendAgentMessage no-ops under suppression while the state was already persisted, so a
+	// plain send would drop the announcement forever. It defers like a tracking notice instead,
+	// riding the next plain message (appended to an existing notice for the same PR, which the
+	// input handler joins with a blank line anyway).
+	function announceMergeability(prNumber: number, state: "conflicting" | "behind") {
+		const text = mergeabilityAnnouncement(prNumber, state);
+		if (suppressUpdates) {
+			const existing = deferredAnnouncements.get(prNumber);
+			deferredAnnouncements.set(prNumber, existing ? `${existing}\n\n${text}` : text);
+			return;
+		}
+		sendAgentMessage(text);
+	}
+
 	// Persist the full observer state as a session custom entry (last entry wins on restore).
 	// Never participates in LLM context; degrades to in-process-only state if the append fails.
 	function persistState() {
@@ -1063,7 +1078,7 @@ export default async function (pi: ExtensionAPI) {
 			const mergeState = classifyMergeability(data);
 			if (mergeState !== undefined && mergeState !== pr.mergeState) {
 				pr.mergeState = mergeState;
-				if (mergeState !== "mergeable") sendAgentMessage(mergeabilityAnnouncement(prNumber, mergeState));
+				if (mergeState !== "mergeable") announceMergeability(prNumber, mergeState);
 				persistState();
 			}
 
@@ -1965,10 +1980,15 @@ export default async function (pi: ExtensionAPI) {
 			// auto-start, if any, must not start it a second time on the next slot)
 			pendingAutoStart.delete(prNumber);
 			// Seed the last-seen mergeability from the pre-check, so the first poll does not
-			// re-announce a conflict the tool result is about to report anyway.
+			// re-announce a conflict the tool result is about to report anyway. Persisted here:
+			// a session ending before the next poll would otherwise restore without it and
+			// re-announce on the first poll after the resume.
 			const mergeState = classifyMergeability(prData);
 			const startedPr = observedPRs.get(prNumber);
-			if (startedPr && mergeState !== undefined) startedPr.mergeState = mergeState;
+			if (startedPr && mergeState !== undefined) {
+				startedPr.mergeState = mergeState;
+				persistState();
+			}
 
 			return ok(
 				`Starting observing ${prNumber}. You will receive a message whenever the CI failed or finished. To stop the observation use the same tool again.`,
