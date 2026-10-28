@@ -15,6 +15,7 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
+
     "biome.suspicious/noExplicitAny": 151,
     "biome.suspicious/noGlobalIsNan": 8,
     "biome.style/noNonNullAssertion": 5,
@@ -37,7 +38,7 @@
     "extensions/lib/gh-health.ts": 308,
     "extensions/lib/git-repo.ts": 164,
     "extensions/lib/github-review-threads.ts": 638,
-    "extensions/lib/mergeability.ts": 47,
+    "extensions/lib/mergeability.ts": 49,
     "extensions/lib/nonblocking.ts": 494,
     "extensions/lib/orca-client.ts": 615,
     "extensions/lib/pr-tasks-manager.ts": 849,
@@ -261,6 +262,13 @@
       "reason": "review fixes on the mergeability work: a transition announced while the startup notice suppresses updates is deferred instead of dropped, and the observe_pr seed is persisted; both close review findings on PR 71.",
       "changes": [
         "extensions/observe-pr.ts: 2192 lines > baseline 2172 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-28",
+      "reason": "mergeability.ts grows two lines: the real gh field is mergeStateStatus (mergeableState was rejected by gh as an unknown field - caught by the hook work's smoke test against real gh), so the payload carries the alias and the classifier reads both.",
+      "changes": [
+        "extensions/lib/mergeability.ts: 49 lines > baseline 47 (files may only shrink)"
       ]
     },
     {

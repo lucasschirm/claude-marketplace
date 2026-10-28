@@ -5,9 +5,11 @@
  */
 export type MergeabilityState = "conflicting" | "behind" | "mergeable";
 
-/** The parsed `mergeable`/`mergeableState` of `gh pr view --json mergeable,mergeableState`. */
+/** The parsed `mergeable`/`mergeStateStatus` of `gh pr view --json mergeable,mergeStateStatus`. */
 export interface MergeabilityPayload {
 	mergeable?: string | null;
+	/** gh's field name. `mergeableState` is accepted as an alias (REST-style naming) but gh never emits it. */
+	mergeStateStatus?: string | null;
 	mergeableState?: string | null;
 }
 
@@ -20,7 +22,7 @@ export interface MergeabilityPayload {
  */
 export function classifyMergeability(payload: MergeabilityPayload | undefined | null): MergeabilityState | undefined {
 	const mergeable = String(payload?.mergeable ?? "").toUpperCase();
-	const state = String(payload?.mergeableState ?? "").toUpperCase();
+	const state = String(payload?.mergeStateStatus ?? payload?.mergeableState ?? "").toUpperCase();
 	// DIRTY is the mergeableState of a conflicting PR, so it is checked before BEHIND: a PR whose
 	// base moved and whose merge now conflicts is reported as the conflict, the harder problem.
 	if (mergeable === "CONFLICTING" || state === "DIRTY") return "conflicting";
@@ -40,7 +42,7 @@ export function mergeabilityAnnouncement(prNumber: number, state: Exclude<Mergea
 		);
 	}
 	return (
-		`The base branch of the PR ${prNumber} has moved ahead (mergeableState: BEHIND). ` +
+		`The base branch of the PR ${prNumber} has moved ahead (mergeStateStatus: BEHIND). ` +
 		"Rebase or merge the base into the PR branch before it can land."
 	);
 }

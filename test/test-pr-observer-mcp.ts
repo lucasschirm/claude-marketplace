@@ -41,7 +41,7 @@ const out = (payload) => process.stdout.write(JSON.stringify(payload) + "\\n");
 
 function main() {
   if (argv[0] === "repo" && argv[1] === "view") return out({ owner: { login: state.owner }, name: state.repo });
-  if (argv[0] === "pr" && argv[1] === "view") return out({ number: state.pr, mergeable: state.mergeable, mergeableState: state.mergeableState });
+  if (argv[0] === "pr" && argv[1] === "view") return out({ number: state.pr, mergeable: state.mergeable, mergeStateStatus: state.mergeStateStatus });
   if (argv[0] === "pr" && argv[1] === "checks") {
     if (state.checksFailed) return process.exit(1);
     return out(state.checks);
@@ -501,26 +501,26 @@ test("observe_pr never calls an unreadable CI status a pass", async () => {
 });
 
 test("observe_pr reports a conflicting PR as unlandable", async () => {
-	const gh = fakeGh({ ...BASE_STATE, mergeable: "CONFLICTING", mergeableState: "DIRTY" });
+	const gh = fakeGh({ ...BASE_STATE, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
 	const server = connectedServer(gh);
 	await server.call("initialize", {});
 	const seen = server.text(await server.call("tools/call", { name: "observe_pr", arguments: { pr_number: 7 } }));
 	assert.match(seen, /Mergeability: CONFLICTING/);
 	assert.ok(
-		gh.calls().some((call) => call.includes("mergeable,mergeableState")),
+		gh.calls().some((call) => call.includes("mergeable,mergeStateStatus")),
 		"the mergeability must come from GitHub, not be assumed",
 	);
 	server.close();
 });
 
 test("observe_pr reports a BEHIND PR and stays silent on a clean one", async () => {
-	const gh = fakeGh({ ...BASE_STATE, mergeable: "MERGEABLE", mergeableState: "BEHIND" });
+	const gh = fakeGh({ ...BASE_STATE, mergeable: "MERGEABLE", mergeStateStatus: "BEHIND" });
 	const server = connectedServer(gh);
 	await server.call("initialize", {});
 	assert.match(server.text(await server.call("tools/call", { name: "observe_pr", arguments: { pr_number: 7 } })), /Mergeability: BEHIND/);
 	server.close();
 
-	const clean = fakeGh({ ...BASE_STATE, mergeable: "MERGEABLE", mergeableState: "CLEAN" });
+	const clean = fakeGh({ ...BASE_STATE, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" });
 	const cleanServer = connectedServer(clean);
 	await cleanServer.call("initialize", {});
 	// (a clean PR adds no mergeability line: CI and approvals have their own reporting)
