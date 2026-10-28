@@ -41,7 +41,7 @@ const GH_TIMEOUT_MS = 60_000;
 
 // ------------------------------------------------------------------ the vendored engine
 
-const ENGINE_FILES = ["pr-tasks-manager.ts", "github-review-threads.ts", "ci-verdict.ts"];
+const ENGINE_FILES = ["pr-tasks-manager.ts", "github-review-threads.ts", "ci-verdict.ts", "mergeability.ts"];
 
 let loading;
 
@@ -51,7 +51,7 @@ let loading;
  */
 function engine() {
 	loading ??= (async () => {
-		const [tasks, gh, ci] = await Promise.all(
+		const [tasks, gh, ci, mg] = await Promise.all(
 			ENGINE_FILES.map((file) => import(pathToFileURL(path.join(LIB_DIR, file)).href)),
 		);
 		return {
@@ -68,6 +68,7 @@ function engine() {
 			describeGhError: gh.describeGhError,
 			isStaleNodeError: gh.isStaleNodeError,
 			evaluateCiVerdict: ci.evaluateCiVerdict,
+			classifyMergeability: mg.classifyMergeability,
 		};
 	})().catch((err) => {
 		loading = undefined; // a later call may find a newer Node or a repaired plugin cache
@@ -118,6 +119,23 @@ async function readChecks(prNumber, cwd) {
 		// (falls through: unparseable output tells nothing, whatever the exit code said)
 	}
 	return { checks: null, ghFailed: true };
+}
+
+/**
+ * The PR's mergeability, from `gh pr view --json mergeable,mergeableState`. A failed call is no
+ * information (the snapshot still answers with CI and conversations), and GitHub's UNKNOWN - it
+ * recomputes after every push - classifies as nothing too.
+ */
+async function readMergeability(prNumber, cwd) {
+	try {
+		const { stdout } = await execFileAsync("gh", ["pr", "view", String(prNumber), "--json", "mergeable,mergeableState"], {
+			cwd,
+			timeout: GH_TIMEOUT_MS,
+		});
+		return JSON.parse(stdout);
+	} catch {
+		return undefined;
+	}
 }
 
 // ------------------------------------------------------------------ task state
@@ -290,7 +308,11 @@ const VERDICT_TEXT = {
 async function observePR(args, cwd) {
 	const e = await engine();
 	const prNumber = await resolvePrNumber(args?.pr_number, cwd);
-	const [{ checks, ghFailed }, syncResult] = await Promise.all([readChecks(prNumber, cwd), syncPR(prNumber, cwd)]);
+	const [{ checks, ghFailed }, syncResult, mergeability] = await Promise.all([
+		readChecks(prNumber, cwd),
+		syncPR(prNumber, cwd),
+		readMergeability(prNumber, cwd),
+	]);
 	const verdict = e.evaluateCiVerdict({ checks, ghFailed });
 	const counts = e.manager.getCounts(prNumber);
 
@@ -298,6 +320,14 @@ async function observePR(args, cwd) {
 		`PR #${prNumber} (${syncResult.repo}): ${VERDICT_TEXT[verdict]}.`,
 		`Review conversations: ${counts.open} open, ${counts.blocked} blocked, ${counts.stale} stale, ${counts.resolved} resolved.`,
 	];
+	// Only the states that block landing are worth a line: UNSTABLE/BLOCKED are CI and
+	// approvals, which the verdict and the conversations above already cover.
+	const mergeState = e.classifyMergeability(mergeability);
+	if (mergeState === "conflicting") {
+		lines.push("Mergeability: CONFLICTING - the PR conflicts with its base branch; rebase or merge the base into it before it can land.");
+	} else if (mergeState === "behind") {
+		lines.push("Mergeability: BEHIND - the base branch has moved ahead; rebase or merge the base into it before it can land.");
+	}
 	if (syncResult.newTasks.length > 0) {
 		lines.push(`New since the last read: ${syncResult.newTasks.map((t) => t.conversationId).join(", ")}.`);
 	}
