@@ -99,7 +99,6 @@ function runHook(env: Record<string, string>, stdin: string, signalAfterMs?: num
 }
 
 const PAYLOAD = JSON.stringify({ conversationId: "conv-1", stepIdx: 1, toolCall: { name: "run_command", args: { CommandLine: "ls" } } });
-
 test("the layout fits the unix socket path limit (shortening the name, or falling to the next runtime dir)", () => {
 	const mk = (runtimeDirs: string[]) => createBridgeLayout({ runtimeDirs, node: process.execPath, hookFile: HOOK, hookTimeoutSec: 30 });
 	for (const root of [os.tmpdir(), path.join(os.tmpdir(), "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k")]) {
@@ -118,7 +117,6 @@ test("the layout fits the unix socket path limit (shortening the name, or fallin
 	assert.ok(!l2.dir.startsWith(`${longRoot}${path.sep}`), "it fell back to the next runtime dir");
 	assert.ok(Buffer.byteLength(l2.socketPath, "utf8") <= 107);
 });
-
 test("a layout with no fitting root throws (nothing to fall back to)", () => {
 	const longRoot = path.join(os.tmpdir(), `${"a".repeat(150)}`);
 	assert.throws(
@@ -126,7 +124,6 @@ test("a layout with no fitting root throws (nothing to fall back to)", () => {
 		/<= 107/,
 	);
 });
-
 test("a fresh bridge: 0700 dir, the exact hooks.json shape, a 0600 socket, stop removes it", async () => {
 	const logs: string[] = [];
 	const server = new BridgeServer({
@@ -165,7 +162,6 @@ test("a fresh bridge: 0700 dir, the exact hooks.json shape, a 0600 socket, stop 
 	}
 	assert.ok(!fs.existsSync(server.dir), "stop removes the dir");
 });
-
 test("a round trip: token + conversation-id in, one JSON line out, then the connection closes", async () => {
 	const logs: string[] = [];
 	const server = new BridgeServer({
@@ -193,7 +189,6 @@ test("a round trip: token + conversation-id in, one JSON line out, then the conn
 		await server.stop();
 	}
 });
-
 test("a wrong token or an empty conversation-id closes the connection with no reply (the hook fails closed)", async () => {
 	for (const [token, conv] of [
 		["wrong", "conv-1"],
@@ -227,7 +222,6 @@ test("a wrong token or an empty conversation-id closes the connection with no re
 		}
 	}
 });
-
 test("a subagent's own conversation id is accepted (same token; the call still goes through policy + the client)", async () => {
 	const handled: string[] = [];
 	const server = new BridgeServer({
@@ -258,7 +252,6 @@ test("a subagent's own conversation id is accepted (same token; the call still g
 		await server.stop();
 	}
 });
-
 test("an unauthenticated or early-dropped connection does not abort a legitimate pending ask", async () => {
 	const lost: string[] = [];
 	const server = new BridgeServer({
@@ -300,7 +293,6 @@ test("an unauthenticated or early-dropped connection does not abort a legitimate
 		await server.stop();
 	}
 });
-
 test("a null conversation id (before the probe) closes the connection with no reply", async () => {
 	const server = new BridgeServer({
 		log: () => {},
@@ -327,7 +319,6 @@ test("a null conversation id (before the probe) closes the connection with no re
 		await server.stop();
 	}
 });
-
 test("a failed partial start (the socket chmod) removes the dir and closes the listener", async () => {
 	const server = new BridgeServer({
 		log: () => {},
@@ -349,7 +340,6 @@ test("a failed partial start (the socket chmod) removes the dir and closes the l
 	assert.ok(!fs.existsSync(server.socketPath), "the socket file was removed");
 	await server.stop(); // idempotent after a failed start
 });
-
 test("a malformed request line closes the connection with no reply", async () => {
 	const server = new BridgeServer({
 		log: () => {},
@@ -383,7 +373,6 @@ test("a malformed request line closes the connection with no reply", async () =>
 		await server.stop();
 	}
 });
-
 test("a handler failure destroys the connection with no reply (the hook fails closed)", async () => {
 	const server = new BridgeServer({
 		log: () => {},
@@ -412,7 +401,6 @@ test("a handler failure destroys the connection with no reply (the hook fails cl
 		await server.stop();
 	}
 });
-
 test("maxHoldMs cuts a never-answering ask: the connection dies and onConnectionLost names the conversation-scoped ask", async () => {
 	let lost: string | undefined;
 	const server = new BridgeServer({
@@ -446,7 +434,6 @@ test("maxHoldMs cuts a never-answering ask: the connection dies and onConnection
 		await server.stop();
 	}
 });
-
 test("bridgeRuntimeDirs and cleanupStaleBridges: stale dirs go, fresh and unrelated stay", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cleanup-"));
 	const runtime = path.join(root, "agy-acp");
@@ -474,7 +461,6 @@ test("bridgeRuntimeDirs and cleanupStaleBridges: stale dirs go, fresh and unrela
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
-
 test("cleanupStaleBridges: a 2h-old dir whose socket still answers is live, not stale", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cleanup-live-"));
 	const runtime = path.join(root, "agy-acp");
@@ -511,7 +497,6 @@ test("cleanupStaleBridges: a 2h-old dir whose socket still answers is live, not 
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
-
 test("the hook is fail-closed in every failure mode: one JSON deny line, exit 0", async () => {
 	const payload = `${PAYLOAD}\n`;
 	// No socket env at all.
@@ -589,7 +574,6 @@ test("the hook is fail-closed in every failure mode: one JSON deny line, exit 0"
 	assert.strictEqual(r.code, 0);
 	assert.match(r.stdout, /"decision":"deny"/);
 });
-
 test("the hook source is the single-writer design (exactly one stdout write, exactly one exit call)", () => {
 	const src = fs.readFileSync(HOOK, "utf8");
 	assert.strictEqual(src.split("process.stdout.write(").length - 1, 1, "exactly one process.stdout.write call");
@@ -616,7 +600,7 @@ async function startGateHarness(opts: {
 	clientDeadlineMs?: number;
 	outcome?: () => unknown;
 	requestImpl?: (m: string, p: Record<string, unknown>, ms: number) => Promise<unknown>;
-	/** The prompt in flight (its object identifies the turn); a test ends a turn by clearing it. */
+	/** The prompt in flight; a test ends a turn by clearing it and starts one by handing it a promise. */
 	currentTurn?: () => Promise<unknown> | null;
 	/** How many prompts the session has started; the mutable one below is how a test runs a turn. */
 	turnCount?: () => number;
@@ -655,12 +639,16 @@ async function startGateHarness(opts: {
 	};
 	return { gate, requests, updates, logs, ask };
 }
-
 test("the gate: allow-always grants are in-memory, per key (the matching rules, live)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-")));
+	// The harness is disposed in the finally rather than at the end of the try: an assertion that
+	// threw used to skip it, and the bridge socket kept listening - `node --test` then waited for a
+	// test whose failure had already been printed. Disposing is idempotent, so the test that does it
+	// mid-flight on purpose is unaffected.
+	let h: GateHarness | null = null;
 	try {
 		let next: string = "allow_always";
-		const h = await startGateHarness({
+		h = await startGateHarness({
 			cwd: workspace,
 			outcome: () => {
 				const map: Record<string, string> = {
@@ -706,16 +694,16 @@ test("the gate: allow-always grants are in-memory, per key (the matching rules, 
 		assert.strictEqual(denied.decision, "deny", "an unknown option id is a denial");
 		assert.match(denied.reason ?? "", /Do not retry this call/, "the denial does not invite a retry");
 		assert.strictEqual(h.requests.length, 5, "one client ask for it");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: an empty conversation-id is refused at the socket (never a client ask)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-conv-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		const { line } = await askSocket(h.gate.socketPath, {
 			token: "tok-1",
 			conversationId: "",
@@ -724,16 +712,16 @@ test("the gate: an empty conversation-id is refused at the socket (never a clien
 		});
 		assert.strictEqual(line, "", "no reply: the connection is closed");
 		assert.strictEqual(h.requests.length, 0, "no client ask");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: a wrong token is refused at the socket (never a client ask)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-tok-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		const { line } = await askSocket(h.gate.socketPath, {
 			token: "other",
 			conversationId: "conv-1",
@@ -742,32 +730,32 @@ test("the gate: a wrong token is refused at the socket (never a client ask)", as
 		});
 		assert.strictEqual(line, "", "no reply: the connection is closed");
 		assert.strictEqual(h.requests.length, 0, "no client ask");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: abortPending turns a pending ask into a rejection and the reply still reaches the hook", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-abort-")));
+	let h: GateHarness | null = null;
 	try {
 		const never = new Promise(() => {});
-		const h = await startGateHarness({ cwd: workspace, outcome: () => never });
+		h = await startGateHarness({ cwd: workspace, outcome: () => never });
 		const p = h.ask(1, "run_command", { CommandLine: "ls" });
 		await new Promise((r) => setTimeout(r, 100));
 		h.gate.abortPending("the test cancelled the prompt");
 		const reply = await p;
 		assert.strictEqual(reply.decision, "deny", "the hook is told the denial");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: the client deadline is a denial with the deadline reason", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-deadline-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({
+		h = await startGateHarness({
 			cwd: workspace,
 			clientDeadlineMs: 500,
 			outcome: () =>
@@ -778,18 +766,18 @@ test("the gate: the client deadline is a denial with the deadline reason", async
 		assert.ok(Date.now() - t0 < 10000, "the deadline fired");
 		assert.strictEqual(reply.decision, "deny");
 		assert.match(reply.reason ?? "", /did not answer this permission request within/i, "the deadline reason");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: setMode changes the decisions (default asks, accept-edits auto-allows, plan denies)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-mode-")));
+	let h: GateHarness | null = null;
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		// default: the write asks (the client allows it).
 		assert.deepStrictEqual(await h.ask(1, "write_file", { Path: file }), { decision: "allow" });
 		assert.strictEqual(h.requests.length, 1);
@@ -803,18 +791,19 @@ test("the gate: setMode changes the decisions (default asks, accept-edits auto-a
 		assert.strictEqual(denied.decision, "deny");
 		assert.strictEqual(denied.reason, PLAN_DENY_REASON, "the exact plan-mode reason");
 		assert.strictEqual(h.requests.length, 1, "no client ask for a plan-mode denial");
-		// an unknown mode is refused.
-		assert.throws(() => h.gate.setMode("nope"), /unknown mode/);
-		await h.gate.dispose();
+		// an unknown mode is refused (aliased: a closure cannot narrow the nullable `h`).
+		const modes = h.gate;
+		assert.throws(() => modes.setMode("nope"), /unknown mode/);
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: a bridge-dir or socket reference is a denial in every mode, bypass included", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-bref-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		for (const mode of ["default", "accept-edits", "plan", "bypass"]) {
 			h.gate.setMode(mode);
 			const direct = await h.ask(1, "read_file", { Path: path.join(h.gate.dir, ".agents", "hooks.json") });
@@ -823,16 +812,16 @@ test("the gate: a bridge-dir or socket reference is a denial in every mode, bypa
 			const command = await h.ask(2, "run_command", { CommandLine: `cat ${h.gate.socketPath}` });
 			assert.strictEqual(command.decision, "deny", `${mode}: a socket reference is denied`);
 		}
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: after dispose, a request is a session-ended denial (not a client ask)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-ended-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		await h.gate.dispose();
 		const reply = await (
 			h.gate as unknown as { handleHookRequest: (r: unknown) => Promise<{ decision: string; reason?: string }> }
@@ -845,66 +834,67 @@ test("the gate: after dispose, a request is a session-ended denial (not a client
 		assert.match(reply.reason ?? "", /session ended/i, "the session-ended reason");
 		assert.strictEqual(h.requests.length, 0, "no client ask after dispose");
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: a request with no turn in flight is denied, with the cancel's own reason after a cancel", async () => {
 	// The window: the cancel settles the prompt, and agy still has to die - and it can fire a hook in
 	// between. That ask has no `session/prompt` left to carry the answer, so it is refused with the
 	// words the client saw rather than turned into a dialog nothing can close.
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelask-")));
+	let h: GateHarness | null = null;
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
 		let turn: Promise<unknown> | null = Promise.resolve(); // the prompt the session is running
-		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
+		h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
 		turn = null; // the prompt answered `cancelled`; the child is still on its way out
 		const reply = await h.ask(7, "write_file", { Path: file });
 		assert.strictEqual(reply.decision, "deny");
 		assert.match(reply.reason ?? "", /the turn was cancelled/i, "the cancel reason, not the session-ended one");
 		assert.strictEqual(h.requests.length, 0, "no dialog opened for a turn that is already answered");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: a hook that outlives an agy that died mid-turn is denied too (the ended path)", async () => {
 	// Same defect, other trigger: nothing signals a dead agy's process group, its hook can still be
 	// running, and the bridge keeps listening until the respawn - so the no-turn rule must not depend
 	// on there having been a cancel.
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-endedhook-")));
+	let h: GateHarness | null = null;
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
 		let turn: Promise<unknown> | null = Promise.resolve();
-		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
+		h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
 		h.gate.abortPending("agy exited mid turn", "ended");
 		turn = null;
 		const reply = await h.ask(3, "write_file", { Path: file });
 		assert.strictEqual(reply.decision, "deny");
 		assert.match(reply.reason ?? "", /session ended/i, "the session-ended reason, since no cancel happened");
 		assert.strictEqual(h.requests.length, 0, "and again: nobody is holding a prompt to answer");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: the next turn asks again, and a hook-free turn still retires an old cancel", async () => {
 	// Two things a cancel must not do: outlive its turn (the next one asks normally), and keep being
 	// the reason a stray hook is refused after a later turn ran - which is why the retirement counts
 	// prompts rather than watching for hooks. The turn below is genuinely hook-free: nothing in this
 	// test touches the gate during it, and the stray ask afterwards must say "session ended".
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelnext-")));
+	let h: GateHarness | null = null;
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
 		let turn: Promise<unknown> | null = Promise.resolve();
 		let turns = 1;
-		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn, turnCount: () => turns });
+		h = await startGateHarness({ cwd: workspace, currentTurn: () => turn, turnCount: () => turns });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
 		turn = null;
 		const afterCancel = await h.ask(1, "write_file", { Path: file });
@@ -922,16 +912,16 @@ test("the gate: the next turn asks again, and a hook-free turn still retires an 
 		const stray = await h.ask(4, "write_file", { Path: file });
 		assert.strictEqual(stray.decision, "deny");
 		assert.match(stray.reason ?? "", /session ended/i, "the newest turn's end, not the cancel from a turn back");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: the stream's ACTIVE records the parameters; a hook request reports rewritten args, and an ask carries the pending metadata", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-rewrite-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		// Step 1: the hook's args equal the stream's, and the call asks the client.
 		h.gate.onStreamActive(1, "run_command", { CommandLine: "ls" });
 		await h.ask(1, "run_command", { CommandLine: "ls" });
@@ -963,17 +953,17 @@ test("the gate: the stream's ACTIVE records the parameters; a hook request repor
 			undefined,
 			"no pending metadata on an auto-allowed call",
 		);
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: a subagent's pending ask (same step index, sub conversation) is aborted in isolation", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-conv-")));
 	const asks: Array<{ resolve: (v: unknown) => void }> = [];
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({
+		h = await startGateHarness({
 			cwd: workspace,
 			requestImpl: () => new Promise((r) => asks.push({ resolve: r })),
 		});
@@ -990,7 +980,8 @@ test("the gate: a subagent's pending ask (same step index, sub conversation) is 
 		// Drop the subagent's hook connection: only the sub's ask aborts.
 		subConn.destroy();
 		await subClosed;
-		await waitUntil(() => h.logs.some((l) => l.includes("hook connection lost")), 5000, "the hook connection lost log");
+		const lostLogs = h.logs; // aliased: the predicates below run in closures, which cannot narrow `h`
+		await waitUntil(() => lostLogs.some((l) => l.includes("hook connection lost")), 5000, "the hook connection lost log");
 		assert.ok(
 			h.logs.some((l) => /hook connection lost \(conv-1-sub:5\)/.test(l)),
 			"the sub key's loss was logged",
@@ -1002,16 +993,16 @@ test("the gate: a subagent's pending ask (same step index, sub conversation) is 
 		asks[0].resolve({ outcome: { outcome: "selected", optionId: "allow_once" } });
 		const main = await mainP;
 		assert.strictEqual(main?.decision, "allow", "the main ask answered after the sub abort");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: a subagent's auto-allowed call (a colliding step index) does not touch a main-conversation tool call", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-sub-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		// The main conversation's step 3 went ACTIVE (the stream recorded its parameters)...
 		h.gate.onStreamActive(3, "run_command", { CommandLine: "ls" });
 		// ...and a subagent's in-workspace read_file (auto-allowed) lands on the same step index.
@@ -1019,28 +1010,27 @@ test("the gate: a subagent's auto-allowed call (a colliding step index) does not
 		assert.strictEqual(r.decision, "allow", "the subagent's in-workspace read is auto-allowed");
 		assert.strictEqual(h.updates.length, 0, "no tool_call_update for the main step (no bogus in_progress / argsRewritten)");
 		assert.ok(!h.logs.some((l) => l.includes("args rewritten")), "no bogus rewrite log");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("the gate: onTurnEnd forgets the recorded stream steps (a next-turn index collision is not a rewrite)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gate-turn-")));
+	let h: GateHarness | null = null;
 	try {
-		const h = await startGateHarness({ cwd: workspace });
+		h = await startGateHarness({ cwd: workspace });
 		h.gate.onStreamActive(2, "run_command", { CommandLine: "ls" });
 		h.gate.onTurnEnd();
 		const r = await h.ask(2, "run_command", { CommandLine: "pwd" });
 		assert.strictEqual(r.decision, "allow", "the turn's ask is answered normally");
 		assert.strictEqual(h.requests.length, 1, "one client ask");
 		assert.strictEqual(h.updates.length, 0, "no update from a stale record (no bogus argsRewritten)");
-		await h.gate.dispose();
 	} finally {
+		await h?.gate.dispose();
 		fs.rmSync(workspace, { recursive: true, force: true });
 	}
 });
-
 test("AGY_ACP_VERSION is a constant", () => {
 	assert.match(AGY_ACP_VERSION, /^\d+\.\d+\.\d+$/);
 });

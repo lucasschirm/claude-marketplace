@@ -9,7 +9,7 @@
 // While a request is pending, the tool_call carries _meta.permission so a client watchdog can
 // see the state. On a cancel, a child exit or a dispose every pending request is denied - with the
 // cancel reason on a cancel - and the client's ask is settled (see pending-asks.ts). A request that
-// arrives with no turn in flight is refused outright (see `turnInFlight`): between a cancel and the
+// arrives with no turn in flight is refused outright (see `currentTurn`): between a cancel and the
 // child's death, or from a hook that outlived an agy that died mid-turn, there is no prompt left to
 // carry the answer, so it would be a dialog nobody can close.
 //
