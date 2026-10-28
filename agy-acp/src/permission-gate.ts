@@ -54,13 +54,14 @@ export interface PermissionGateOptions {
 	token: string;
 	conversationId: () => string | null;
 	/**
-	 * Is a turn in flight right now? A hook is a question about the turn that is running, so when
-	 * none is, there is no `session/prompt` left to carry the answer: the request is denied rather
-	 * than turned into a dialog nobody will ever be able to answer (and that a client would have to
-	 * wait out). Derived, deliberately - a flag the session has to remember to set is a lockout
-	 * waiting to happen.
+	 * The `session/prompt` in flight, or null. A hook is a question about the turn that is running, so
+	 * when none is there is nothing left to carry the answer: the request is denied rather than turned
+	 * into a dialog nobody can close (and that a client would have to wait out). Derived, deliberately
+	 * - a flag the session has to remember to clear is a lockout waiting to happen. The promise object
+	 * identifies the turn, which is how a cancel from an earlier turn stops being reported as the
+	 * reason for a later one.
 	 */
-	turnInFlight: () => boolean;
+	currentTurn: () => Promise<unknown> | null;
 }
 
 export class PermissionGate {
@@ -71,7 +72,8 @@ export class PermissionGate {
 	private readonly stream: StreamCalls;
 	private readonly asks: PendingAsks;
 	private disposedFlag = false;
-	private cancelSeen = false;
+	private lastTurn: Promise<unknown> | null = null;
+	private cancelledTurn: Promise<unknown> | null = null;
 
 	constructor(opts: PermissionGateOptions) {
 		this.opts = opts;
@@ -131,13 +133,17 @@ export class PermissionGate {
 		// No turn, no answer to give: the client cancelled it (its prompt is `cancelled` already), or
 		// agy exited mid-turn while a hook process of its own was still alive. Either way asking would
 		// put a dialog on screen that nothing can close, so the hook is refused with the reason instead.
-		if (!this.opts.turnInFlight()) {
-			const cancelled = this.cancelSeen;
-			this.opts.log(`permission: ${req.toolCall.name} denied (${cancelled ? "the turn was cancelled" : "no turn in flight"})`);
-			return { decision: "deny", reason: cancelled ? cancelledReason() : sessionEndedReason() };
+		const running = this.opts.currentTurn();
+		if (running) this.lastTurn = running; // the newest turn this gate has seen
+		if (this.cancelledTurn !== null && this.cancelledTurn === this.lastTurn) {
+			// The cancel is the newest turn we know of: this request belongs to a turn already answered.
+			this.opts.log(`permission: ${req.toolCall.name} denied (the turn was cancelled)`);
+			return { decision: "deny", reason: cancelledReason() };
 		}
-		// A turn IS running, so whatever cancel was seen belongs to a turn that is over now.
-		this.cancelSeen = false;
+		if (!running) {
+			this.opts.log(`permission: ${req.toolCall.name} denied (no turn in flight)`);
+			return { decision: "deny", reason: sessionEndedReason() };
+		}
 		const { name, args } = req.toolCall;
 		const roots = this.workspaceRoots();
 		const policy = decidePolicy({
@@ -164,7 +170,7 @@ export class PermissionGate {
 			this.stream.report(req, false);
 			return { decision: "allow" };
 		}
-		// Ask the client (subagent calls too: the per-session token is the boundary). reportHookArgs
+		// Ask the client (subagent calls too: the per-session token is the boundary). StreamCalls.report
 		// is conversation-guarded - our stream records describe main-conversation steps only.
 		this.stream.report(req, true); // in_progress update: the hook's args + the pending metadata
 		const outcome = await this.askClient(req.stepIdx, name, args, req.conversationId);
@@ -246,9 +252,12 @@ export class PermissionGate {
 	 * the `kind`, and settle each ask for the client that is still holding it.
 	 */
 	abortPending(why: string, kind: AskAbort = "ended"): void {
-		// Remembering the cancel is what makes the next hook's reason the cancel's own words rather
-		// than a generic "session ended"; the turn that is gone is what makes it a denial.
-		if (kind === "cancelled") this.cancelSeen = true;
+		// Remembering *which* turn was cancelled is what makes the next hook's reason the cancel's own
+		// words rather than a generic "session ended" - and only for as long as no turn has run since.
+		if (kind === "cancelled") {
+			this.cancelledTurn = this.opts.currentTurn();
+			this.lastTurn = this.cancelledTurn ?? this.lastTurn;
+		}
 		this.asks.denyAll(why, kind);
 	}
 

@@ -63,8 +63,8 @@ export class AgySession {
 			hookTimeoutSec: config.hookTimeoutSec ?? DEFAULT_HOOK_TIMEOUT_SEC,
 			token: this.hookToken,
 			conversationId: () => (this.idValue === "" ? null : this.idValue),
-			// Derived, not a flag the session has to keep in step: no prompt in flight means no answer to give.
-			turnInFlight: () => this.turn !== null,
+			// Derived, not a flag to keep in step: no prompt in flight means no answer to give.
+			currentTurn: () => this.turn,
 		});
 		this.heartbeat = new TurnHeartbeat((update) => this.emit(update), { pendingPermissions: () => this.gate.pendingAsks() });
 	}

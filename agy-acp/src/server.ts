@@ -52,13 +52,21 @@ export interface AgyAcpServerOptions {
 	output: Writable;
 	log?: (line: string) => void;
 	agy?: AgyLaunchOptions;
-	/** Called once when the connection closes (after the sessions are disposed). This is what lets
-	 * main.ts turn "the client hung up" into a bounded exit instead of an idle process. */
+	/**
+	 * Called once when the connection closes, BEFORE anything is disposed: this is what lets main.ts
+	 * turn "the client hung up" into a bounded exit, and the teardown has to happen inside that path
+	 * for the exit deadline to bound it. The host is therefore expected to dispose the sessions (via
+	 * `disposeSessions`) as part of whatever this starts; without a host handler the server disposes
+	 * them itself on close, so no child outlives it either way.
+	 */
 	onClose?: (reason: string) => void;
 }
 
 export interface AgyAcpServer {
-	/** Disposes every live session; the connection close does this on its own. */
+	/**
+	 * Disposes every live session. The connection close leaves this to the host when there is an
+	 * `onClose` handler (the exit path calls it inside the deadline); otherwise the close calls it.
+	 */
 	disposeSessions: () => Promise<void>;
 }
 
@@ -138,8 +146,18 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		// here and reporting the close afterwards would put the whole teardown outside that deadline
 		// - a session dispose that wedges would hang the process on the trigger the deadline exists
 		// for. Without a host (the in-process tests) there is no exit path, so dispose here instead.
-		if (options.onClose) options.onClose(reason);
-		else void registry.disposeAll();
+		if (!options.onClose) {
+			void registry.disposeAll(); // no host to hand this to: nobody else will do it
+			return;
+		}
+		try {
+			options.onClose(reason);
+		} catch (err) {
+			// A host that cannot take the close must not leave children running. Its own exit path is
+			// presumably what failed, so dispose here - outside the deadline, but not never.
+			log(`connection-closed handler failed: ${(err as Error).message} - disposing the sessions here instead`);
+			void registry.disposeAll();
+		}
 	});
 
 	/**

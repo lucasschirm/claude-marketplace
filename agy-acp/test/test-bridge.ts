@@ -616,8 +616,8 @@ async function startGateHarness(opts: {
 	clientDeadlineMs?: number;
 	outcome?: () => unknown;
 	requestImpl?: (m: string, p: Record<string, unknown>, ms: number) => Promise<unknown>;
-	/** Is a turn in flight? The gate derives its answer from this, so a test can end the turn. */
-	turnInFlight?: () => boolean;
+	/** The prompt in flight (its object identifies the turn); a test ends a turn by clearing it. */
+	currentTurn?: () => Promise<unknown> | null;
 }): Promise<GateHarness> {
 	const requests: Array<true> = [];
 	const updates: Array<Record<string, unknown>> = [];
@@ -642,7 +642,7 @@ async function startGateHarness(opts: {
 		hookTimeoutSec: 30,
 		token: "tok-1",
 		conversationId: () => "conv-1",
-		turnInFlight: opts.turnInFlight ?? (() => true),
+		currentTurn: opts.currentTurn ?? (() => Promise.resolve()),
 	});
 	await gate.start();
 	const ask = async (stepIdx: number, name: string, args: Record<string, unknown>, conversationId = "conv-1") => {
@@ -854,10 +854,10 @@ test("the gate: a request with no turn in flight is denied, with the cancel's ow
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
-		let turnInFlight = true;
-		const h = await startGateHarness({ cwd: workspace, turnInFlight: () => turnInFlight });
+		let turn: Promise<unknown> | null = Promise.resolve(); // the prompt the session is running
+		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
-		turnInFlight = false; // the prompt answered `cancelled`; the child is still on its way out
+		turn = null; // the prompt answered `cancelled`; the child is still on its way out
 		const reply = await h.ask(7, "write_file", { Path: file });
 		assert.strictEqual(reply.decision, "deny");
 		assert.match(reply.reason ?? "", /the turn was cancelled/i, "the cancel reason, not the session-ended one");
@@ -876,10 +876,10 @@ test("the gate: a hook that outlives an agy that died mid-turn is denied too (th
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
-		let turnInFlight = true;
-		const h = await startGateHarness({ cwd: workspace, turnInFlight: () => turnInFlight });
+		let turn: Promise<unknown> | null = Promise.resolve();
+		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
 		h.gate.abortPending("agy exited mid turn", "ended");
-		turnInFlight = false;
+		turn = null;
 		const reply = await h.ask(3, "write_file", { Path: file });
 		assert.strictEqual(reply.decision, "deny");
 		assert.match(reply.reason ?? "", /session ended/i, "the session-ended reason, since no cancel happened");
@@ -890,19 +890,25 @@ test("the gate: a hook that outlives an agy that died mid-turn is denied too (th
 	}
 });
 
-test("the gate: the next turn asks again (a denial is scoped to the turn that ended, not the session)", async () => {
+test("the gate: the next turn asks again, and an old cancel is not the reason of a later turn's stray hook", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelnext-")));
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
-		let turnInFlight = true;
-		const h = await startGateHarness({ cwd: workspace, turnInFlight: () => turnInFlight });
+		let turn: Promise<unknown> | null = Promise.resolve();
+		const h = await startGateHarness({ cwd: workspace, currentTurn: () => turn });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
-		turnInFlight = false;
+		turn = null;
 		assert.strictEqual((await h.ask(1, "write_file", { Path: file })).decision, "deny");
-		turnInFlight = true; // the respawned turn (what session.prompt() does to this state)
+		turn = Promise.resolve(); // the respawned turn: a different prompt, so a different turn
 		assert.deepStrictEqual(await h.ask(2, "write_file", { Path: file }), { decision: "allow" });
 		assert.strictEqual(h.requests.length, 1, "the new turn's tool call asks the client as usual");
+		// And the identity is what scopes the old cancel: this turn ran with no hook of its own, so a
+		// stray hook after it must not be told its turn was cancelled - it was not.
+		turn = null;
+		const stray = await h.ask(4, "write_file", { Path: file });
+		assert.strictEqual(stray.decision, "deny");
+		assert.match(stray.reason ?? "", /session ended/i, "the later turn's end, not the cancel from two turns back");
 		await h.gate.dispose();
 	} finally {
 		fs.rmSync(workspace, { recursive: true, force: true });

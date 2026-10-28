@@ -325,7 +325,12 @@ test("SIGINT cancels the turn: interrupted result, exit 1, stderr tail captured"
 });
 
 test("bad model: no init, probe times out with stderr context, exit 1", async () => {
-	const h = startDriver("bad-model-id", { model: "gemini-nonexistent-xyz", probeTimeoutMs: 400 });
+	// 400 ms was a bet that a Node child boots and gets its stderr out within it. Under the parallel
+	// suite - the shape CI runs - that bet lost: the probe timed out with an empty tail, so the
+	// assertion below failed. What this test is about is the context a probe failure carries, not how
+	// fast a fake starts, so the budget is generous now. A bad model never sends init either way: the
+	// child exits before it, or the probe gives up - and both messages carry the stderr tail.
+	const h = startDriver("bad-model-id", { model: "gemini-nonexistent-xyz", probeTimeoutMs: 2500 });
 	try {
 		let probeError: Error | null = null;
 		try {

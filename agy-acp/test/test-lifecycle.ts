@@ -11,7 +11,9 @@
 //   - session/cancel of an agy that ignores SIGINT: the prompt still answers `cancelled` at once,
 //     and the escalation ladder is what finally kills the group;
 //   - the client hanging up (stdin EOF) and a SIGTERM to agy-acp itself: every child dies, every
-//     bridge dir goes, and the process exits;
+//     bridge dir goes, and the process exits - and the hang-up is reported to the host *before*
+//     anything is disposed, since the exit deadline is armed by that report (a host handler that
+//     throws still gets its children disposed);
 //   - a child that dies between turns: the session survives and the next prompt respawns with
 //     `--conversation <id>`, and a cancel that lands during that respawn is answered too - the turn
 //     the client called off is never launched into;
@@ -149,7 +151,14 @@ function recordedAgyFlags(fixture: string): string[] {
 }
 
 /** The real server over an in-memory stdio pair, driving the fake agy. */
-async function startHarness(fixture: string, extraEnv: Record<string, string>, extraLaunch: Partial<AgyLaunchOptions>): Promise<Harness> {
+async function startHarness(
+	fixture: string,
+	extraEnv: Record<string, string>,
+	extraLaunch: Partial<AgyLaunchOptions>,
+	// The server's own options beyond input/output/log/agy - currently `onClose`, which changes who
+	// owns the teardown (the host's exit path, or the server on close).
+	extraServer: Pick<Parameters<typeof startAgyAcpServer>[0], "onClose"> = {},
+): Promise<Harness> {
 	const input = new PassThrough();
 	const output = new PassThrough();
 	const updates: Array<Record<string, unknown>> = [];
@@ -179,7 +188,7 @@ async function startHarness(fixture: string, extraEnv: Record<string, string>, e
 	const effortAt = implied.indexOf("--effort");
 	if (effortAt >= 0) launch.effort = implied[effortAt + 1];
 
-	const server = startAgyAcpServer({ input, output, log: (m) => logs.push(m), agy: launch });
+	const server = startAgyAcpServer({ input, output, log: (m) => logs.push(m), agy: launch, ...extraServer });
 
 	const dispatch = (frame: Record<string, unknown>): void => {
 		if (frame.id !== undefined && frame.method !== undefined) {
@@ -457,6 +466,62 @@ test("a cancel that arrives while the child is being respawned still answers can
 });
 
 // ---------------------------------------------------------------- the heartbeat
+
+test("the connection close hands the teardown to the host before anything is disposed", async () => {
+	// The exit deadline is armed by `onClose`, so a teardown that runs before that call is a teardown
+	// the deadline cannot bound - which is the wedge the exit path exists to survive. The order is
+	// therefore part of the contract: the host is told while the child is alive, and the child dies
+	// because the host's dispose (the exit path's, inside the deadline) asked for it.
+	const reasons: string[] = [];
+	let aliveAtClose: boolean | null = null;
+	const h = await startHarness(
+		"simple-multiturn-textblocks",
+		{},
+		{},
+		{
+			onClose: (reason) => {
+				reasons.push(reason);
+				aliveAtClose = pidsMatching("fake-agy.ts", process.pid).length > 0;
+			},
+		},
+	);
+	try {
+		await newSession(h);
+		await waitFor("the session's child to be live", 8000, () => pidsMatching("fake-agy.ts", process.pid).length > 0);
+		h.close(); // the client hangs up; no one else is disposing anything here
+		await waitFor("the host to be told", 3000, () => reasons.length > 0);
+		assert.ok(aliveAtClose, `the close is reported first, child still alive (saw ${aliveAtClose})`);
+		await h.server.disposeSessions(); // what the exit path does, inside its deadline
+		await waitFor("the child to be gone once the host disposed", 8000, () => pidsMatching("fake-agy.ts", process.pid).length === 0);
+	} finally {
+		await h.close();
+	}
+});
+
+test("a host whose close handler throws still has its children disposed", async () => {
+	// Handing the teardown over is a transfer of responsibility, not a way to skip it: a host that
+	// cannot take the close must not end up with children nobody owns any more.
+	const h = await startHarness(
+		"simple-multiturn-textblocks",
+		{},
+		{},
+		{
+			onClose: () => {
+				throw new Error("the host's exit path is itself wedged");
+			},
+		},
+	);
+	try {
+		await newSession(h);
+		const before = pidsMatching("fake-agy.ts", process.pid);
+		assert.ok(before.length > 0, "the session's child is running");
+		h.close();
+		await waitFor("the failing handler to be logged", 3000, () => h.logs.some((l) => /connection-closed handler failed/.test(l)));
+		await waitFor("the child to die anyway", 8000, () => !before.some(alive));
+	} finally {
+		await h.close();
+	}
+});
 
 test("the heartbeat is a _meta-only session/update while a silent turn runs, and stops with it", async () => {
 	const h = await startHarness("interrupted-sigint", {}, { heartbeatMs: 100 });
