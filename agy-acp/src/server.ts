@@ -133,7 +133,13 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	}
 	connection.onClose((reason) => {
 		log(`connection closed: ${reason}`);
-		void registry.disposeAll().finally(() => options.onClose?.(reason));
+		// The host is told first, and the teardown is then the host's to run: `onClose` starts the
+		// exit path, which is what arms the deadline that bounds disposing the sessions. Disposing
+		// here and reporting the close afterwards would put the whole teardown outside that deadline
+		// - a session dispose that wedges would hang the process on the trigger the deadline exists
+		// for. Without a host (the in-process tests) there is no exit path, so dispose here instead.
+		if (options.onClose) options.onClose(reason);
+		else void registry.disposeAll();
 	});
 
 	/**

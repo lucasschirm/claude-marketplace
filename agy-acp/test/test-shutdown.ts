@@ -149,21 +149,23 @@ test("a signal during the shutdown skips the remaining politeness", async () => 
 			events.push(`exit:${code}`);
 		},
 	});
-	// SIGUSR2 stands in for SIGTERM: the same code path, and it cannot disturb the test runner.
-	const listenersBefore = process.listenerCount("SIGUSR2"); // the runner may have its own
-	const uninstall = shutdown.installSignals(["SIGUSR2"]);
-	assert.strictEqual(process.listenerCount("SIGUSR2"), listenersBefore + 1, "the handler is installed");
+	// SIGWINCH stands in for SIGTERM: the same code path, and unlike SIGUSR2 it is one the test runner
+	// has not claimed - `node --test` runs each file with --report-signal=SIGUSR2, so delivering that
+	// signal writes a Node diagnostic report into the cwd of every run.
+	const listenersBefore = process.listenerCount("SIGWINCH");
+	const uninstall = shutdown.installSignals(["SIGWINCH"]);
+	assert.strictEqual(process.listenerCount("SIGWINCH"), listenersBefore + 1, "the handler is installed");
 	const running = shutdown.begin("stdin end");
 	await sleep(10);
-	process.kill(process.pid, "SIGUSR2"); // the client is done waiting
+	process.kill(process.pid, "SIGWINCH"); // the client is done waiting
 	await sleep(20);
 	assert.deepStrictEqual(events, ["exit:1"], "the second signal exits immediately, without flushing a wedged channel");
 	assert.ok(
-		logs.some((l) => /SIGUSR2 during the shutdown/.test(l)),
+		logs.some((l) => /SIGWINCH during the shutdown/.test(l)),
 		`and says so: ${logs.join(" | ")}`,
 	);
 	uninstall();
-	assert.strictEqual(process.listenerCount("SIGUSR2"), listenersBefore, "the uninstall removes what it installed");
+	assert.strictEqual(process.listenerCount("SIGWINCH"), listenersBefore, "the uninstall removes what it installed");
 	// The first run is still parked on the cleanup; nothing else to await.
 	void running;
 });

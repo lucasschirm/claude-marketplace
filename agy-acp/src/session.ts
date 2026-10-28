@@ -1,10 +1,9 @@
 // One ACP session: owns the agy child and the permission gate, and settles each prompt with a
-// stopReason or a JSON-RPC error (an error is never end_turn - see turn.ts; the stream mapping
-// itself lives in map-steps.ts). A child exit without a `result` marks needsRespawn, so the next
-// prompt relaunches agy with `--conversation <id>`; a headless auto-deny is an end_turn carrying
-// _meta.deniedActions. Issue #54 added the process lifecycle: session/cancel (deny the pending asks
-// with the cancel reason, SIGINT, then the group ladder), the lazy respawn of a child that died
-// idle, and the heartbeat that tells a client "waiting" from "stalled".
+// stopReason or a JSON-RPC error (an error is never end_turn - see turn.ts; the stream mapping lives
+// in map-steps.ts). A child exit without a `result` marks needsRespawn, so the next prompt relaunches
+// agy with --conversation <id>; a headless auto-deny is an end_turn carrying _meta.deniedActions.
+// Issue #54 is the process lifecycle here: session/cancel (asks denied with the cancel reason, SIGINT,
+// then the group ladder), the lazy respawn of a child that died idle, and the heartbeat.
 import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { TURN_IN_PROGRESS, type AcpPromptResult, type AcpSessionUpdate } from "./acp.ts";
 import { flattenPrompt } from "./prompt.ts";
@@ -64,6 +63,8 @@ export class AgySession {
 			hookTimeoutSec: config.hookTimeoutSec ?? DEFAULT_HOOK_TIMEOUT_SEC,
 			token: this.hookToken,
 			conversationId: () => (this.idValue === "" ? null : this.idValue),
+			// Derived, not a flag the session has to keep in step: no prompt in flight means no answer to give.
+			turnInFlight: () => this.turn !== null,
 		});
 		this.heartbeat = new TurnHeartbeat((update) => this.emit(update), { pendingPermissions: () => this.gate.pendingAsks() });
 	}
@@ -118,10 +119,10 @@ export class AgySession {
 
 	/**
 	 * session/cancel (issue #54), in the order a client can rely on: deny every pending permission
-	 * request with the "cancelled" reason, answer the prompt `cancelled`, then make agy stop -
-	 * SIGINT, and for an agy still alive `cancelEscalateMs` later the process-group ladder (SIGTERM,
-	 * then SIGKILL). The session is marked for a `--conversation` respawn either way, and a cancel
-	 * that arrives mid-respawn is answered too (the turn never starts).
+	 * request with the "cancelled" reason, answer the prompt `cancelled`, then make agy stop - SIGINT,
+	 * and for an agy still alive `cancelEscalateMs` later the process-group ladder (SIGTERM, SIGKILL).
+	 * The session is marked for a `--conversation` respawn either way; a cancel arriving mid-respawn is
+	 * answered too, and that turn never starts.
 	 */
 	cancel(): void {
 		if (this.disposed) return;
@@ -143,8 +144,7 @@ export class AgySession {
 		// The SIGINT -> process-group window is AGY_ACP_CANCEL_ESCALATE_MS (default 5 s).
 		const escalateMs = this.config.cancelEscalateMs ?? DEFAULT_CANCEL_ESCALATE_MS;
 		if (!driver) {
-			// The turn is still choosing its child (a respawn); turn.ts puts that child away rather than
-			// sending it the text, since the prompt above already answered.
+			// Still choosing its child (a respawn); turn.ts puts that child away instead of sending it text.
 			this.config.log(`session ${this.id}: cancelling a turn with no child yet - it will not start`);
 			return;
 		}
@@ -162,8 +162,8 @@ export class AgySession {
 		this.heartbeat.stop();
 		const pending = this.pending;
 		if (pending && !pending.settled) {
-			// A dispose interrupts the turn, and an interruption we caused is a cancellation, not an
-			// error (the session/cancel rule). stdin EOF is a half-close: the client may still be reading.
+			// An interruption we caused is a cancellation, not an error (the session/cancel rule); stdin
+			// EOF is a half-close, so the client may still be reading what we already settled.
 			settleCancelled(this, "the session was disposed");
 		}
 		if (driver) await driver.dispose();

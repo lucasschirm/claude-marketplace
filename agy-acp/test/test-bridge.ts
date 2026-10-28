@@ -616,6 +616,8 @@ async function startGateHarness(opts: {
 	clientDeadlineMs?: number;
 	outcome?: () => unknown;
 	requestImpl?: (m: string, p: Record<string, unknown>, ms: number) => Promise<unknown>;
+	/** Is a turn in flight? The gate derives its answer from this, so a test can end the turn. */
+	turnInFlight?: () => boolean;
 }): Promise<GateHarness> {
 	const requests: Array<true> = [];
 	const updates: Array<Record<string, unknown>> = [];
@@ -640,6 +642,7 @@ async function startGateHarness(opts: {
 		hookTimeoutSec: 30,
 		token: "tok-1",
 		conversationId: () => "conv-1",
+		turnInFlight: opts.turnInFlight ?? (() => true),
 	});
 	await gate.start();
 	const ask = async (stepIdx: number, name: string, args: Record<string, unknown>, conversationId = "conv-1") => {
@@ -843,16 +846,18 @@ test("the gate: after dispose, a request is a session-ended denial (not a client
 	}
 });
 
-test("the gate: a request that arrives after a cancel is denied with the cancel reason, and never asked", async () => {
-	// The window this covers: the cancel settles the prompt, and agy still has to die - and it can fire
-	// a hook in between. That ask has no client left to answer it (its turn answered `cancelled`), so
-	// opening one would put a dialog on screen for a turn that no longer exists.
+test("the gate: a request with no turn in flight is denied, with the cancel's own reason after a cancel", async () => {
+	// The window: the cancel settles the prompt, and agy still has to die - and it can fire a hook in
+	// between. That ask has no `session/prompt` left to carry the answer, so it is refused with the
+	// words the client saw rather than turned into a dialog nothing can close.
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelask-")));
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
-		const h = await startGateHarness({ cwd: workspace });
+		let turnInFlight = true;
+		const h = await startGateHarness({ cwd: workspace, turnInFlight: () => turnInFlight });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
+		turnInFlight = false; // the prompt answered `cancelled`; the child is still on its way out
 		const reply = await h.ask(7, "write_file", { Path: file });
 		assert.strictEqual(reply.decision, "deny");
 		assert.match(reply.reason ?? "", /the turn was cancelled/i, "the cancel reason, not the session-ended one");
@@ -863,15 +868,40 @@ test("the gate: a request that arrives after a cancel is denied with the cancel 
 	}
 });
 
-test("the gate: the next turn asks again (a cancel does not outlive its own turn)", async () => {
+test("the gate: a hook that outlives an agy that died mid-turn is denied too (the ended path)", async () => {
+	// Same defect, other trigger: nothing signals a dead agy's process group, its hook can still be
+	// running, and the bridge keeps listening until the respawn - so the no-turn rule must not depend
+	// on there having been a cancel.
+	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-endedhook-")));
+	try {
+		const file = path.join(workspace, "a.txt");
+		fs.writeFileSync(file, "x");
+		let turnInFlight = true;
+		const h = await startGateHarness({ cwd: workspace, turnInFlight: () => turnInFlight });
+		h.gate.abortPending("agy exited mid turn", "ended");
+		turnInFlight = false;
+		const reply = await h.ask(3, "write_file", { Path: file });
+		assert.strictEqual(reply.decision, "deny");
+		assert.match(reply.reason ?? "", /session ended/i, "the session-ended reason, since no cancel happened");
+		assert.strictEqual(h.requests.length, 0, "and again: nobody is holding a prompt to answer");
+		await h.gate.dispose();
+	} finally {
+		fs.rmSync(workspace, { recursive: true, force: true });
+	}
+});
+
+test("the gate: the next turn asks again (a denial is scoped to the turn that ended, not the session)", async () => {
 	const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-cancelnext-")));
 	try {
 		const file = path.join(workspace, "a.txt");
 		fs.writeFileSync(file, "x");
-		const h = await startGateHarness({ cwd: workspace });
+		let turnInFlight = true;
+		const h = await startGateHarness({ cwd: workspace, turnInFlight: () => turnInFlight });
 		h.gate.abortPending("the client cancelled the turn", "cancelled");
-		h.gate.onTurnStart(); // the respawned turn: the previous one's cancel conditions nothing here
-		assert.deepStrictEqual(await h.ask(1, "write_file", { Path: file }), { decision: "allow" });
+		turnInFlight = false;
+		assert.strictEqual((await h.ask(1, "write_file", { Path: file })).decision, "deny");
+		turnInFlight = true; // the respawned turn (what session.prompt() does to this state)
+		assert.deepStrictEqual(await h.ask(2, "write_file", { Path: file }), { decision: "allow" });
 		assert.strictEqual(h.requests.length, 1, "the new turn's tool call asks the client as usual");
 		await h.gate.dispose();
 	} finally {

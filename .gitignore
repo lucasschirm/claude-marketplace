@@ -2,3 +2,7 @@
 test/.fake-devin-bin/
 test/.final-msg.mjs
 node_modules/
+
+# Node diagnostic reports (`node --test` arms --report-signal=SIGUSR2; delivering that signal writes one into the cwd)
+report.*.json
+**/report.*.json
