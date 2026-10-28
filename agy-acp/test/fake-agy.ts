@@ -14,14 +14,23 @@
 //     recorded exit code);
 //   - exits with the recorded exit code.
 //
+// The driver's permission bridge: the fake tolerates the bridge's --add-dir (an extra dir
+// carrying .agents/hooks.json) and its forced --dangerously-skip-permissions, and with
+// FAKE_AGY_RUN_HOOKS=1 it runs the configured PreToolUse hook between each recorded tool step's
+// ACTIVE line and its terminal line (sh -c, the hooks.json folder as cwd, a recorded-shape
+// payload on stdin, the configured timeout) - a deny replaces the step's terminal line with a
+// TOOL_ERROR carrying the hook's reason, the way real agy does.
+//
 // `--version` prints the fixture's agy version (FAKE_AGY_VERSION overrides it, for the
 // untested/strict version-gate tests).
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const STREAM_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "stream");
+const HOOK_PAYLOADS = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "hooks", "hook-stdin-payloads.jsonl");
 
 interface FakeMeta {
 	agyVersion?: string;
@@ -63,11 +72,32 @@ const lines = fs
 	.readFileSync(path.join(STREAM_DIR, `${name}.stdout.ndjson`), "utf8")
 	.split("\n")
 	.filter((l) => l !== "");
+// FAKE_AGY_STATE_OVERRIDE=<state> remaps the terminal states of the recorded tool steps. It lets
+// the tests exercise a state outside the observed set (the driver's lenient copy passes it
+// through, and the session must keep such a tool tracked until the turn end fails it).
+const stateOverride = process.env.FAKE_AGY_STATE_OVERRIDE;
+if (stateOverride !== undefined) {
+	for (let i = 0; i < lines.length; i++) {
+		try {
+			const o = JSON.parse(lines[i]) as { step_update?: { step_type?: string; state?: string } };
+			const su = o.step_update;
+			if (su && su.step_type === "tool" && typeof su.state === "string" && su.state !== "ACTIVE") {
+				su.state = stateOverride;
+				lines[i] = JSON.stringify(o);
+			}
+		} catch {
+			// a non-JSON line is left as-is
+		}
+	}
+}
 let exitCode = Number(meta.exitCode ?? "0");
 const inputLines: string[] = meta.inputLines ?? [];
 const initDelayMs = Number(process.env.FAKE_AGY_INIT_DELAY_MS ?? 20);
 const lineGapMs = Number(process.env.FAKE_AGY_LINE_GAP_MS ?? 8);
 const chunkGapMs = Number(process.env.FAKE_AGY_CHUNK_GAP_MS ?? 2);
+
+/** The driver's per-session bridge dir (an extra --add-dir carrying .agents/hooks.json), if any. */
+let bridgeDir: string | null = null;
 
 checkArgs();
 
@@ -133,6 +163,16 @@ function lineWritten(): void {
 const conversationId = (() => {
 	const i = lines.findIndex((l) => l.includes('"event":"init"'));
 	const m = i >= 0 ? lines[i].match(/"conversation_id":"([^"]*)"/) : null;
+	return m ? m[1] : "";
+})();
+const modelName = (() => {
+	const i = lines.findIndex((l) => l.includes('"event":"init"'));
+	const m = i >= 0 ? lines[i].match(/"model":"([^"]*)"/) : null;
+	return m ? m[1] : "";
+})();
+const recordedCwd = (() => {
+	const i = lines.findIndex((l) => l.includes('"event":"init"'));
+	const m = i >= 0 ? lines[i].match(/"cwd":"([^"]*)"/) : null;
 	return m ? m[1] : "";
 })();
 
@@ -207,7 +247,7 @@ function isInterruptedResult(line: string): boolean {
 }
 
 /** Emit one recorded line; its callback drives the continuation, so frames never interleave. */
-function advance(): void {
+async function advance(): Promise<void> {
 	if (nextLine >= lines.length) {
 		finishReplay();
 		return;
@@ -218,9 +258,23 @@ function advance(): void {
 		startWaiting();
 		return;
 	}
+	const step = stepOf(line);
+	let toEmit = line;
+	const stagedDeny = step && step.state !== "ACTIVE" ? stagedDenies.get(step.index) : undefined;
+	if (stagedDeny !== undefined && step) {
+		toEmit = syntheticDenyLine(step, stagedDeny);
+		stagedDenies.delete(step.index);
+	}
 	const isResult = lineEvent(line) === "result";
 	nextLine++;
-	emitLine(line, () => {
+	// Real agy order: the step's ACTIVE goes out first, then the PreToolUse hook runs (the fake
+	// runs the configured hook the same way: sh -c, the hooks.json folder as cwd, the payload on
+	// stdin, the configured timeout), and only then the step's terminal line. A deny replaces the
+	// recorded terminal line with a TOOL_ERROR carrying the hook's reason, the way real agy does.
+	const hookStep = step && step.state === "ACTIVE" ? step : null;
+	// The continuation: after a hook (when the line was an ACTIVE) finishes, the next line is
+	// queued; a result line closes the turn and pauses for the next user line (or settles).
+	const continueAfterLine = async (): Promise<void> => {
 		if (nextLine >= lines.length) {
 			finishReplay();
 			return;
@@ -230,7 +284,7 @@ function advance(): void {
 			// otherwise pause until one arrives - or exit at once if stdin is already closed.
 			if (queuedUserLines > 0) {
 				queuedUserLines--;
-				advance();
+				void advance();
 			} else if (stdinClosed) {
 				settle();
 			} else {
@@ -239,7 +293,16 @@ function advance(): void {
 			}
 			return;
 		}
-		advance();
+		void advance();
+	};
+	emitLine(toEmit, () => {
+		void (async () => {
+			if (hookStep) {
+				const denyReason = await runHookForStep(hookStep);
+				if (denyReason !== undefined) stagedDenies.set(hookStep.index, denyReason);
+			}
+			void continueAfterLine();
+		})();
 	});
 }
 
@@ -316,7 +379,7 @@ function handleUserLine(line: string): void {
 	}
 	if (awaitingUser) {
 		awaitingUser = false;
-		advance();
+		void advance();
 		return;
 	}
 	if (nextLine >= lines.length) {
@@ -351,12 +414,12 @@ function afterFirstLine(): void {
 	if (nextLine < lines.length) {
 		if (!hasInitLine) {
 			// Startup failure (no init in the record): the error result comes without any input.
-			advance();
+			void advance();
 			return;
 		}
 		if (queuedUserLines > 0) {
 			queuedUserLines--;
-			advance();
+			void advance();
 		} else {
 			awaitingUser = true;
 			startWaiting();
@@ -477,9 +540,14 @@ function parseArgv(tokens: string[]): FlagSet {
 
 function assertNoDrift(got: FlagSet, want: FlagSet): void {
 	// Both directions: a recorded flag that the driver dropped, and a driver-side addition the
-	// record never saw, both drift.
-	for (const key of got.values.keys()) if (!want.values.has(key) && key !== "--log-file") die(`fake-agy: unexpected flag ${key}`, 2);
-	for (const flag of got.flags) if (flag !== "-p=" && !want.flags.has(flag)) die(`fake-agy: unexpected flag ${flag}`, 2);
+	// record never saw, both drift - except the permission bridge's documented additions (its
+	// --add-dir and the forced --dangerously-skip-permissions), tolerated only when the extra
+	// add-dir really is a bridge dir (it carries .agents/hooks.json).
+	for (const key of got.values.keys())
+		if (!want.values.has(key) && key !== "--log-file" && key !== "--add-dir") die(`fake-agy: unexpected flag ${key}`, 2);
+	for (const flag of got.flags)
+		if (flag !== "-p=" && !want.flags.has(flag) && !(flag === "--dangerously-skip-permissions" && bridgeDir !== null))
+			die(`fake-agy: unexpected flag ${flag}`, 2);
 }
 
 function checkArgs(): void {
@@ -492,10 +560,26 @@ function checkArgs(): void {
 		if (values.length !== 1 || values[0] !== value) die(`fake-agy: expected ${flag} ${value}, got: ${JSON.stringify(values)}`, 2);
 	}
 	if (!got.flags.has("-p=")) die("fake-agy: expected -p= (headless mode)", 2);
-	if (!meta.args) return; // the bridge scenarios record no argv; the basic shape is enough
-	const want = parseArgv(meta.args.split(/\s+/).slice(1)); // drop the leading "agy"
+	if (meta.args) checkRecordedArgs(got);
+}
+
+/** The recorded argv (if any) must match what the driver passed, the documented bridge additions
+ * aside: the bridge --add-dir (tolerated only when it really is a bridge dir) and the forced
+ * --dangerously-skip-permissions that goes with it. */
+function checkRecordedArgs(got: FlagSet): void {
+	const want = parseArgv((meta.args as string).split(/\s+/).slice(1)); // drop the leading "agy"
+	const wantAddDirs = want.values.get("--add-dir") ?? [];
+	const gotAddDirs = got.values.get("--add-dir") ?? [];
+	// The recorded add-dirs must all be present (in order); the only tolerated extra is the bridge dir.
+	if (JSON.stringify(wantAddDirs) !== JSON.stringify(gotAddDirs.filter((d) => wantAddDirs.includes(d))))
+		die(`fake-agy: --add-dir recorded values drifted: expected ${JSON.stringify(wantAddDirs)}, got ${JSON.stringify(gotAddDirs)}`, 2);
+	const extra = gotAddDirs.filter((d) => !wantAddDirs.includes(d));
+	const bridge = extra.find((d) => fs.existsSync(path.join(d, ".agents", "hooks.json")));
+	if (extra.length > 0 && bridge === undefined)
+		die(`fake-agy: extra --add-dir ${extra.join(", ")} is not a bridge dir (no .agents/hooks.json)`, 2);
+	bridgeDir = bridge ?? null;
 	for (const [key, values] of want.values) {
-		if (key === "--log-file") continue; // the driver does not pass it
+		if (key === "--log-file" || key === "--add-dir") continue; // --log-file is not passed; --add-dir handled above
 		const gotValues = got.values.get(key) ?? [];
 		if (JSON.stringify(values) !== JSON.stringify(gotValues))
 			die(`fake-agy: ${key} mismatch: expected ${JSON.stringify(values)}, got ${JSON.stringify(gotValues)}`, 2);
@@ -504,4 +588,224 @@ function checkArgs(): void {
 		if (flag !== "-p=" && !got.flags.has(flag)) die(`fake-agy: expected flag ${flag}`, 2);
 	}
 	assertNoDrift(got, want);
+}
+
+// ------------------------------------------------------------------ hook bridge
+
+// With FAKE_AGY_RUN_HOOKS=1 and a bridge dir present, the fake runs the configured PreToolUse
+// hook between each recorded tool step's ACTIVE line and its terminal line, the way real agy
+// does: `sh -c <command>` with the
+// hooks.json folder as cwd, agy's env plus ANTIGRAVITY_CONVERSATION_ID, the hook payload on
+// stdin, and the configured timeout. The payload is the shape of a recorded one from
+// hook-stdin-payloads.jsonl (first unused template with a matching tool name), with the
+// identity fields (conversationId, stepIdx, modelName) set to this scenario's and the Path
+// argument remapped from the recorded workspace root to the fake's cwd, so in-workspace
+// checks are real. A hook deny replaces the step's recorded terminal line with a TOOL_ERROR
+// carrying the hook's reason (real agy: "tool call denied by pre-tool hook: <reason>").
+// agy's documented hook output handling is emulated: allow/deny JSON, empty stdout = allow
+// (fail-open), everything else = fail-closed deny.
+
+interface StepInfo {
+	index: number;
+	name: string;
+	state: string;
+	params: Record<string, unknown>;
+}
+
+const stagedDenies = new Map<number, string>();
+
+function stepOf(line: string): StepInfo | null {
+	try {
+		const o: unknown = JSON.parse(line);
+		const su = typeof o === "object" && o !== null ? (o as Record<string, unknown>).step_update : undefined;
+		if (typeof su !== "object" || su === null) return null;
+		const s = su as Record<string, unknown>;
+		if (s.step_type !== "tool") return null;
+		const info = typeof s.tool_info === "object" && s.tool_info !== null ? (s.tool_info as Record<string, unknown>) : {};
+		const params = typeof info.parameters === "object" && info.parameters !== null ? (info.parameters as Record<string, unknown>) : {};
+		return {
+			index: typeof s.step_index === "number" ? s.step_index : -1,
+			name: typeof s.tool_name === "string" ? s.tool_name : typeof info.name === "string" ? (info.name as string) : "",
+			state: typeof s.state === "string" ? s.state : "",
+			params,
+		};
+	} catch {
+		return null;
+	}
+}
+
+const hookTemplates: Array<{ name: string; payload: Record<string, unknown> }> = (() => {
+	try {
+		const out: Array<{ name: string; payload: Record<string, unknown> }> = [];
+		for (const line of fs
+			.readFileSync(HOOK_PAYLOADS, "utf8")
+			.split("\n")
+			.filter((l) => l !== "")) {
+			const o = JSON.parse(line) as { event?: string; stdin?: { toolCall?: { name?: string } } };
+			if (o.event === "PreToolUse" && o.stdin && typeof o.stdin === "object" && o.stdin.toolCall?.name) {
+				out.push({ name: o.stdin.toolCall.name, payload: { ...(o.stdin as Record<string, unknown>) } });
+			}
+		}
+		return out;
+	} catch {
+		return [];
+	}
+})();
+const usedTemplates = new Set<number>();
+
+interface HookConfig {
+	command: string;
+	timeoutSec: number;
+}
+
+type HooksFile = Record<
+	string,
+	{ PreToolUse?: Array<{ matcher?: string; hooks?: Array<{ type?: string; command?: string; timeout?: number }> }> }
+>;
+
+function pickHook(name: string): HookConfig | null {
+	if (!bridgeDir) return null;
+	try {
+		const hooks = JSON.parse(fs.readFileSync(path.join(bridgeDir, ".agents", "hooks.json"), "utf8")) as HooksFile;
+		return firstCommandHook(hooks, name);
+	} catch {
+		// a missing or malformed hooks.json means no hook to run
+		return null;
+	}
+}
+
+/** The first command hook whose matcher allows the tool name (`*` matches everything). */
+function firstCommandHook(hooks: HooksFile, name: string): HookConfig | null {
+	for (const entry of Object.values(hooks)) {
+		for (const pre of entry?.PreToolUse ?? []) {
+			const matcher = pre.matcher ?? "*";
+			if (matcher !== "*" && matcher !== name) continue;
+			for (const h of pre.hooks ?? []) {
+				if (h.type === "command" && h.command) return { command: h.command, timeoutSec: h.timeout ?? 30 };
+			}
+		}
+	}
+	return null;
+}
+
+/** One hook payload: a recorded template (shape + fields) with this scenario's identity. */
+function buildPayload(step: StepInfo): string {
+	let idx = hookTemplates.findIndex((t, i) => !usedTemplates.has(i) && t.name === step.name);
+	if (idx < 0) idx = hookTemplates.findIndex((_t, i) => !usedTemplates.has(i));
+	if (idx >= 0) usedTemplates.add(idx);
+	const base: Record<string, unknown> =
+		idx >= 0 ? { ...hookTemplates[idx].payload } : { conversationId: "", stepIdx: 0, modelName: "", workspacePaths: [] as string[] };
+	base.conversationId = conversationId;
+	base.stepIdx = step.index;
+	if (modelName !== "") base.modelName = modelName;
+	// The hook payload's toolCall is the step's own args (what agy is about to run); the template
+	// only stands in for the envelope's shape (workspacePaths, etc.).
+	const args: Record<string, unknown> = { ...step.params };
+	const p = args.Path;
+	if (typeof p === "string" && p !== "") {
+		// The recorded workspace root (the template's, or the recorded init cwd) stands in for
+		// the fake's own cwd: strip it and re-root the path so in-workspace checks are real.
+		const ws = base.workspacePaths;
+		const prefix =
+			(Array.isArray(ws) && typeof ws[0] === "string" && ws[0] !== "" && p.startsWith(ws[0]) ? ws[0] : undefined) ??
+			(recordedCwd !== "" && p.startsWith(recordedCwd) ? recordedCwd : undefined);
+		if (prefix !== undefined) args.Path = path.join(process.cwd(), p.slice(prefix.length));
+	}
+	if (process.env.FAKE_AGY_BRIDGE_REF === "1" && typeof args.CommandLine === "string" && bridgeDir) {
+		args.CommandLine = `${args.CommandLine} ${bridgeDir}`;
+	}
+	// FAKE_AGY_REWRITE_ARGS=1 simulates agy rewriting the tool's args between the hook and the
+	// stream (the hook sees the rewritten args; the stream shows the originals) - the detection
+	// surface for the gate's _meta.argsRewritten.
+	if (process.env.FAKE_AGY_REWRITE_ARGS === "1" && typeof args.CommandLine === "string") {
+		args.CommandLine = `${args.CommandLine} --rewritten`;
+	}
+	base.toolCall = { name: step.name, args };
+	return JSON.stringify(base);
+}
+function runHookCommand(
+	command: string,
+	timeoutSec: number,
+	stdinLine: string,
+	cwd: string,
+): Promise<{ code: number | null; stdout: string }> {
+	return new Promise((resolve) => {
+		const child = spawn("sh", ["-c", command], { cwd, env: { ...process.env, ANTIGRAVITY_CONVERSATION_ID: conversationId } });
+		let out = "";
+		let settled = false;
+		const finish = (code: number | null) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ code, stdout: out });
+		};
+		const timer = setTimeout(
+			() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					// the hook is already gone
+				}
+				finish(null);
+			},
+			Math.min(timeoutSec, 120) * 1000 + 10_000,
+		);
+		timer.unref();
+		child.stdout.on("data", (d: Buffer) => {
+			out += d.toString("utf8");
+		});
+		child.on("error", () => finish(127));
+		child.on("close", (code) => finish(code));
+		// The payload is one line; agy closes the pipe after writing it - the hook reads until end.
+		child.stdin.write(`${stdinLine}\n`);
+		child.stdin.end();
+	});
+}
+
+/** agy's documented hook output handling: the decision, or a fail-closed deny reason. */
+function judgeHookOutput(code: number | null, stdout: string): string | undefined {
+	if (code !== 0) return `fake-agy: the pre-tool hook failed (exit ${code ?? "killed"}; fail-closed)`;
+	if (stdout.trim() === "") return undefined; // fail-open: empty stdout = allow
+	let o: unknown;
+	try {
+		o = JSON.parse(stdout);
+	} catch {
+		return "fake-agy: the pre-tool hook output is not JSON (fail-closed)";
+	}
+	const a = typeof o === "object" && o !== null ? (o as Record<string, unknown>) : {};
+	if (a.decision === "allow") return undefined;
+	if (a.decision === "deny") {
+		const r = a.reason;
+		return typeof r === "string" && r !== "" ? r : "the pre-tool hook denied the call";
+	}
+	return "fake-agy: the pre-tool hook output has an unknown decision (fail-closed)";
+}
+
+function syntheticDenyLine(step: StepInfo, reason: string): string {
+	return JSON.stringify({
+		event: "step_update",
+		step_update: {
+			conversation_id: conversationId,
+			step_index: step.index,
+			state: "ERROR",
+			step_type: "tool",
+			tool_name: step.name,
+			duration_seconds: 0.1,
+			tool_info: {
+				name: step.name,
+				parameters: step.params,
+				error: { type: "TOOL_ERROR", message: `tool call denied by pre-tool hook: ${reason}` },
+			},
+		},
+	});
+}
+
+/** Run the configured hook for one tool step; the deny reason to stage, or undefined (allow). */
+async function runHookForStep(step: StepInfo): Promise<string | undefined> {
+	if (process.env.FAKE_AGY_RUN_HOOKS !== "1") return undefined;
+	const hook = pickHook(step.name);
+	if (!hook) return undefined;
+	const cwd = bridgeDir ? path.join(bridgeDir, ".agents") : process.cwd();
+	const { code, stdout } = await runHookCommand(hook.command, hook.timeoutSec, buildPayload(step), cwd);
+	return judgeHookOutput(code, stdout);
 }

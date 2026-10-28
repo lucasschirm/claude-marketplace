@@ -11,6 +11,7 @@ import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { JsonRpcConnection } from "./jsonrpc.ts";
 import { checkAgyVersion, type AgyVersionStatus } from "./agy-driver.ts";
 import { AgySession } from "./session.ts";
+import { AGY_ACP_MODES } from "./permission.ts";
 
 // Keep in sync with agy-acp/package.json (test-package.ts asserts it).
 export const AGY_ACP_VERSION = "0.1.0";
@@ -26,8 +27,15 @@ export interface AgyLaunchOptions {
 	// Launch options forwarded to the driver; per-session model/effort selection lands in sub-issue 6.
 	model?: string;
 	effort?: string;
+	/** Kept for API compatibility; the session forces it: the bridge hook is the only gate. */
 	skipPermissions?: boolean;
 	addDirs?: string[];
+	/** The client deadline for session/request_permission (default 10 min; below the hook deadline). */
+	clientDeadlineMs?: number;
+	/** The hook's own deadline (AGY_ACP_HOOK_DEADLINE_MS); above the client deadline, below the hook timeout. */
+	hookDeadlineMs?: number;
+	/** The hooks.json timeout (seconds) agy enforces on the hook; above the hook deadline. */
+	hookTimeoutSec?: number;
 	probeTimeoutMs?: number;
 	graceMs?: number;
 	termMs?: number;
@@ -130,17 +138,15 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 			...launch,
 			log,
 			notify: (sessionId, update) => connection.notify("session/update", { sessionId, update }),
+			requestPermission: (params, timeoutMs) => connection.request("session/request_permission", { ...params, sessionId }, timeoutMs),
 		});
 		const sessionId = await session.start(); // a failure disposes the child and throws the RpcError
 		registry.add(sessionId, session);
-		// Modes and models are stubs until sub-issue 6 (modes, model and effort selection): the
-		// session runs in agy's default headless mode, and the model is whatever agy launched.
+		// The permission modes are live (session/set_mode); the agy-level mode/model/effort
+		// selection lands in sub-issue 6.
 		const result: Record<string, unknown> = {
 			sessionId,
-			modes: {
-				currentModeId: "default",
-				availableModes: [{ id: "default", name: "Default", description: "agy headless mode; selection lands in sub-issue 6" }],
-			},
+			modes: { currentModeId: "default", availableModes: AGY_ACP_MODES },
 			models: { currentModelId: session.initModel, availableModels: session.initModel ? [session.initModel] : [] },
 		};
 		if (mcpServers) {
@@ -168,6 +174,17 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
 		return session.prompt(p.prompt);
 	}
+
+	connection.registerMethod("session/set_mode", (params) => {
+		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/set_mode params must be an object");
+		const p = params as Record<string, unknown>;
+		if (typeof p.sessionId !== "string") throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
+		if (typeof p.modeId !== "string") throw new RpcError(INVALID_PARAMS, "modeId must be a string");
+		const session = registry.get(p.sessionId);
+		if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
+		session.setMode(p.modeId);
+		return {};
+	});
 
 	return { disposeSessions: () => registry.disposeAll() };
 }

@@ -14,8 +14,9 @@ The transport, the `initialize` handshake, the **agy process driver** (the `AgyP
 `src/agy/`, driven in tests by the fixture-replaying fake `agy` under `test/`) and the
 **session layer** (`src/session.ts` + `src/server.ts`) are implemented. `session/new`
 validates `cwd` (absolute, existing directory) and `mcpServers`, probes agy for the
-`conversation_id`, and returns `modes`/`models` stubs (real selection lands in sub-issue 6);
-requested `mcpServers` are reported via `_meta` rather than silently dropped. `session/prompt`
+`conversation_id`, and returns the live permission `modes` (see below; agy-level model and
+effort selection lands in sub-issue 6); requested `mcpServers` are reported via `_meta`
+rather than silently dropped. `session/prompt`
 accepts text, resource-link and embedded-text blocks (flattened to one text, since agy
 headless is text-only), rejects image/audio with `-32602`, and runs one turn at a time
 (`-32002`). The stream maps to `session/update` notifications - `text_delta` becomes
@@ -25,9 +26,55 @@ ends with a `stopReason` or a JSON-RPC error, never an error dressed as `end_tur
 `result` ERROR and a child exit without a `result` are `-32603` errors (the latter marks the
 session for a `--conversation` respawn on the next prompt), a headless auto-deny is an
 `end_turn` whose `denied_actions` go out as a notice before the response and ride in
-`_meta.deniedActions`. Permissions and the rest of the ACP surface land in the
+`_meta.deniedActions`. Permissions are live (the PreToolUse bridge, below); the rest of
+the ACP surface lands in the
 follow-up issues of
 [lucasschirm/claude-marketplace#49](https://github.com/lucasschirm/claude-marketplace/issues/49).
+
+## The permission bridge
+
+agy runs `--dangerously-skip-permissions`, so agy-acp is the only permission gate. For each
+session it creates a private bridge dir (`$XDG_RUNTIME_DIR/agy-acp/agy-acp-<random>`, 0700,
+falling back to `os.tmpdir()`) holding `.agents/hooks.json` (one `PreToolUse` hook under an
+unguessable per-session name, passed to agy as an `--add-dir`) and a 0600 Unix socket.
+agy runs the hook (`src/bridge-hook.ts`) on every tool call; the hook dials the socket
+with the tool name, args and a per-session token and waits for a decision. The hook is
+fail-closed: every exit path prints one JSON decision (empty stdout would be an allow in
+agy), every denial carries the "Do not retry this call." wording (without it the model
+retried 5 times in the spike), and every path exits 0.
+
+Stale bridge dirs (a crashed run) are cleaned at startup: a dir is removed when it is
+over an hour old **and its socket no longer answers** - a live session's dir is never
+removed, however old it is. A subagent's internal tool call may carry its own conversation
+id; it is served (the per-session token is the boundary) and goes through the same policy
+and client ask. `session/set_mode` (the four mode ids) answers the request and emits a
+`current_mode_update` notification.
+
+The decision ladder (`src/permission.ts` + `src/permission-gate.ts`), in every mode:
+
+1. a tool call whose args reference the bridge dir or socket is denied (the agent can see
+   the dir in `workspacePaths`); in `plan` mode, state-changing tools are denied locally;
+2. `read_file` inside the workspace is auto-allowed (plus `write_file`/`edit_file` in
+   `accept-edits`); an `allow-always` answer is held as an in-session grant (run_command
+   grants cover the full whitespace-normalised command, file grants the resolved
+   path); unknown tools are never auto-allowed;
+3. otherwise the client is asked via `session/request_permission` (options `allow_once`,
+   `allow_always`, `reject_once`; anything else - including a timeout or a closed
+   connection - is a deny).
+
+The deadline ladder, lowest to highest: the client deadline (default 10 min, a deny with
+reason) < `AGY_ACP_HOOK_DEADLINE_MS` (the hook's own timer) < the `hooks.json` timeout
+(720 s, agy's timer). While a request is pending the `tool_call` update carries
+`_meta.permission` (state, deadline) for a client watchdog; on cancel, a child exit or
+dispose every pending request is denied.
+
+agy emits a tool step's `ACTIVE` stream event **before** running the `PreToolUse` hook, so
+the `tool_call` is created from the stream's parameters and the hook's args arrive as an
+`in_progress` update - they are the args that get evaluated and shown. When they differ on
+a stream-reported key (agy adds metadata fields such as `toolSummary`, which are not a
+rewrite), the difference is logged and flagged `_meta.argsRewritten`. Remaining risk:
+our hook may not sort last in the chain, so a repo hook running after ours can still
+rewrite the args we evaluated.
 
 ## The agy process driver
 

@@ -507,15 +507,19 @@ function countGlobalThisWrites() {
 
 /**
  * Where parsing inbound text is allowed, named exactly: the subprocess door and the sibling that knows
- * what its payloads look like (extensions), the ACP frame reader, and agy's stream-json contract
- * (agy-acp). A prefix match would let `exec-anything.ts` parse whatever it liked, which is the hole
- * this invariant exists to keep shut.
+ * what its payloads look like (extensions), the ACP frame reader, agy's stream-json contract
+ * (agy-acp), and the permission bridge's own two protocol readers (the hook's stdin payload and
+ * answer line, and the server's socket request line) - the same "knows its own wire shape" reason
+ * as contract.ts. A prefix match would let `exec-anything.ts` parse whatever it liked, which is the
+ * hole this invariant exists to keep shut.
  */
 const INBOUND_PARSE_ALLOWLIST = new Set([
 	"extensions/lib/exec.ts",
 	"extensions/lib/exec-payload.ts",
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/agy/contract.ts",
+	"agy-acp/src/bridge-server.ts",
+	"agy-acp/src/bridge-hook.ts",
 ]);
 
 function countJsonParseOutsideExecLib() {
@@ -546,8 +550,10 @@ function countStdioWrites() {
 
 // agy-acp's stdout is the protocol channel, not a console: only the transport may frame it, and
 // main.ts may answer --version/--help before serving. console.log is never legitimate in server
-// sources - it is exactly how a stray debug line corrupts the stream.
-const AGY_STDOUT_ALLOWED = new Set(["agy-acp/src/jsonrpc.ts", "agy-acp/src/main.ts"]);
+// sources - it is exactly how a stray debug line corrupts the stream. bridge-hook.ts is the one
+// other writer: it is a separate child process (spawned by agy as a PreToolUse hook), and its
+// stdout is the hook's decision channel - the one JSON line agy reads, by design.
+const AGY_STDOUT_ALLOWED = new Set(["agy-acp/src/jsonrpc.ts", "agy-acp/src/main.ts", "agy-acp/src/bridge-hook.ts"]);
 
 function countAgyStdoutViolations() {
 	const hits = [];
@@ -613,7 +619,7 @@ function isMutatingCall(call) {
 /** Whether the result of the call reaches the caller: bound, returned, tested, or chained on. */
 function resultReachesCaller(before, after) {
 	const left = before.trimEnd();
-	if (/\b(?:const|let|var)\s+[\w$\s,{}\[\]:]*=[^=]/.test(before)) return true; // bound to a variable
+	if (/\b(?:const|let|var)\s+[\w$\s,{}[\]:]*=[^=]/.test(before)) return true; // bound to a variable
 	if (/^\s*(?:return|throw)\b/.test(before)) return true; // handed to the caller
 	if (/[\w$]]\s*=\s*(?:await\s*)?$/.test(left)) return true; // assigned: `res = await ...`
 	if (/\b(?:if|while)\s*\($/.test(left)) return true; // tested directly

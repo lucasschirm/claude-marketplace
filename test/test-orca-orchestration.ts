@@ -231,7 +231,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 	process.env.ORCA_BIN = mockOrcaBin;
 	process.env.ORCA_CLI_COMMAND = mockOrcaBin;
 
-	let eventListeners: Record<string, Function[]> = {};
+	const eventListeners: Record<string, Function[]> = {};
 
 	const mockPi = {
 		...pi,
@@ -289,7 +289,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// Mock context
 			let currentStatus: string | undefined;
-			let notifiedMessages: string[] = [];
+			const notifiedMessages: string[] = [];
 			const mockCtx = {
 				cwd: ctx.cwd,
 				mode: "tui" as const,

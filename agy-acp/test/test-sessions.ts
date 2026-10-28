@@ -428,6 +428,35 @@ test("subagent tool step: the invoke_subagent DONE (step_type subagent) settles 
 	}
 });
 
+test("a tool step in a state outside the observed set stays tracked and is failed at turn end", async () => {
+	// A newer agy state (not ACTIVE/DONE/ERROR) must not drop the tool from tracking without a
+	// terminal update: the turn end fails it, so a client never shows it running forever.
+	const fixture = "tool-allowed-skip-permissions";
+	const launch = launchOptionsForFixture(fixture);
+	launch.env = { ...launch.env, FAKE_AGY_STATE_OVERRIDE: "CANCELED" };
+	const h = startHarness(launch);
+	try {
+		const { result } = (await newSession(h, process.cwd())) as { result: Record<string, unknown> };
+		const frame = await h.request("session/prompt", { sessionId: result.sessionId, prompt: [textBlock(promptsForFixture(fixture)[0])] });
+		assert.strictEqual(frame.error, undefined, JSON.stringify(frame.error));
+		assert.strictEqual((frame.result as Record<string, unknown>).stopReason, "end_turn");
+		const updates = sessionUpdates(h);
+		const toolCall = updates.find((u) => u.sessionUpdate === "tool_call");
+		assert.ok(toolCall, "the tool_call went out (the ACTIVE is unchanged by the override)");
+		const settled = updates.filter((u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === toolCall?.toolCallId);
+		assert.strictEqual(settled.length, 1, "exactly one terminal update for the tool");
+		assert.strictEqual(settled[0].status, "failed", "the turn end failed the tool (not a silent drop)");
+		assert.match(
+			String((settled[0].content as Array<Record<string, Record<string, unknown>>>)[0]?.content?.text ?? ""),
+			/turn ended/,
+			"the turn-end reason is the content",
+		);
+	} finally {
+		h.close();
+		await h.server.disposeSessions();
+	}
+});
+
 test("a result ERROR returns a JSON-RPC error with agyError and stderrTail", async () => {
 	const fixture = "slash-command-rejected";
 	const h = startHarness(launchOptionsForFixture(fixture));

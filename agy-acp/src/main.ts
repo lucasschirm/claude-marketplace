@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, AGY_ACP_VERSION, PROTOCOL_VERSION } from "./server.ts";
+import { cleanupStaleBridges } from "./bridge-cleanup.ts";
 export { AGY_ACP_VERSION, PROTOCOL_VERSION };
 
 const USAGE = `agy-acp ${AGY_ACP_VERSION} - an ACP server for Google's agy CLI
@@ -61,6 +62,9 @@ export function main(args: string[]): void {
 	}
 
 	const log = createLogger();
+	// Stale bridge dirs (a previous run crashed before its cleanup) are removed before the first
+	// session; the failure is logged, never fatal - a session must not die over hygiene.
+	cleanupStaleBridges(log).catch((err: Error) => log(`stale bridge cleanup failed: ${err.message}`));
 	startAgyAcpServer({ input: process.stdin, output: process.stdout, log });
 	// stdin EOF ends the event loop on its own (the connection closes, the sessions are disposed,
 	// and their child process groups are killed); nothing else keeps a handle open.
