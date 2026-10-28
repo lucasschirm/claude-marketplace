@@ -16,6 +16,8 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const GH_TIMEOUT_MS = 30_000;
+/** Room a poll round (pr view + pr checks) needs; the watcher never starts one with less left. */
+export const POLL_RESERVE_MS = numberEnv("PR_OBSERVER_HOOK_POLL_RESERVE_MS", 2 * GH_TIMEOUT_MS + 10_000);
 
 /** Seconds the host may let a Stop hook run; the watcher sleeps strictly inside this. */
 export const STOP_HOOK_TIMEOUT_S = numberEnv("PR_OBSERVER_HOOK_TIMEOUT_S", 300);
@@ -52,7 +54,7 @@ function sanitize(raw) {
 	return String(raw ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "unknown";
 }
 
-export function readStdinJson() {
+export function readStdinJson(script, sessionId) {
 	return new Promise((resolve) => {
 		let data = "";
 		process.stdin.setEncoding("utf8");
@@ -60,7 +62,10 @@ export function readStdinJson() {
 		process.stdin.on("end", () => {
 			try {
 				resolve(data.trim() ? JSON.parse(data) : {});
-			} catch {
+			} catch (err) {
+				// The payload is host-provided; a malformed one is worth a line, then the hook
+				// proceeds with an empty payload (every consumer tolerates missing fields).
+				logLine(script, sessionId, "warn", "malformed stdin payload; continuing with an empty one", err?.message ?? String(err));
 				resolve({});
 			}
 		});
@@ -96,10 +101,14 @@ export function logLine(script, sessionId, level, what, detail) {
 	}
 }
 
-export function readState(key) {
+/** The session's state file, or {} when absent/unreadable (logged - corruption must be visible). */
+export function readState(key, script, sessionId) {
 	try {
 		return JSON.parse(fs.readFileSync(path.join(stateDir(), `state-${key}.json`), "utf8"));
-	} catch {
+	} catch (err) {
+		if (err?.code !== "ENOENT") {
+			logLine(script, sessionId, "warn", "state file unreadable; starting from an empty state", err?.message ?? String(err));
+		}
 		return {};
 	}
 }
@@ -202,7 +211,7 @@ export async function readPrSnapshot(engine, cwd) {
 	const pr = view.data ?? {};
 	const state = String(pr.state ?? "").toUpperCase();
 	if (state !== "OPEN") return { none: true, state };
-	if (Boolean(pr.isDraft)) return { none: true, state, draft: true };
+	if (Boolean(pr.isDraft)) return { none: true, state, draft: true, prNumber: Number(pr.number) };
 
 	const number = Number(pr.number);
 	const mergeState = engine.classifyMergeability(pr) ?? null;

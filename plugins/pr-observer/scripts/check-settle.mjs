@@ -24,6 +24,7 @@
  */
 import * as path from "node:path";
 import {
+	POLL_RESERVE_MS,
 	WATCH_CHUNK_MS,
 	WATCH_MAX_MS,
 	WATCH_POLL_MS,
@@ -41,7 +42,7 @@ import {
 const SCRIPT = "check-settle";
 
 try {
-	const input = await readStdinJson();
+	const input = await readStdinJson(SCRIPT, "unknown");
 	const sessionId = input.session_id ?? "unknown";
 	const pluginRoot = process.env.DEVIN_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 	const cwd = process.env.DEVIN_PROJECT_DIR || process.cwd();
@@ -98,13 +99,20 @@ try {
 		process.exit(0);
 	}
 
-	// CI is running: hold the stop and watch. The clock is shared across re-arms via the state file.
-	const state = readState(key);
+	// CI is running: hold the stop and watch. The clock is shared across re-arms via the state
+	// file - persisted BEFORE the first sleep, so a host kill mid-chunk (which loses the chunk-end
+	// write) does not restart the 4h budget on the next re-arm. The rest of the state file is
+	// re-read and left untouched: notify-changes owns lastCheckAt/lastSnapshot and may have
+	// written fresher values during the continued turn.
+	const state = readState(key, SCRIPT, sessionId);
 	const now = Date.now();
 	const watchStartedAt = Number.isFinite(state.watchStartedAt) ? state.watchStartedAt : now;
 	if (now - watchStartedAt >= WATCH_MAX_MS) {
 		logLine(SCRIPT, sessionId, "info", "watch budget exhausted; allowing the stop", `watchedMs=${now - watchStartedAt}`);
 		process.exit(0);
+	}
+	if (!Number.isFinite(state.watchStartedAt) && !writeState(key, { ...state, prNumber, watchStartedAt })) {
+		logLine(SCRIPT, sessionId, "warn", "could not persist the watch start; a host kill mid-chunk restarts the budget clock");
 	}
 
 	const chunkDeadline = now + WATCH_CHUNK_MS;
@@ -113,8 +121,9 @@ try {
 	logLine(SCRIPT, sessionId, "info", "CI running; watching", `pr=${prNumber} chunkMs=${WATCH_CHUNK_MS} pollMs=${WATCH_POLL_MS}`);
 
 	for (;;) {
-		await sleep(Math.min(WATCH_POLL_MS, Math.max(chunkDeadline - Date.now(), 0)));
-		if (Date.now() >= chunkDeadline || Date.now() >= watchDeadline) break;
+		const remaining = chunkDeadline - Date.now();
+		if (remaining < POLL_RESERVE_MS || Date.now() >= watchDeadline) break;
+		await sleep(Math.min(WATCH_POLL_MS, remaining - POLL_RESERVE_MS));
 
 		const next = await readPrSnapshot(engine, cwd);
 		if (next.error) {
@@ -149,13 +158,15 @@ try {
 		// (still pending: keep sleeping until the chunk or the watch budget runs out)
 	}
 
+	// Re-read instead of writing the pre-loop snapshot back: notify-changes may have refreshed
+	// lastCheckAt/lastSnapshot during the continued turn, and last-writer-wins with the stale
+	// read would clobber it. This hook owns only its watch fields.
+	const fresh = readState(key, SCRIPT, sessionId);
 	const persisted = writeState(key, {
-		...state,
+		...fresh,
 		prNumber,
-		watchStartedAt,
-		reArms: (Number.isFinite(state.reArms) ? state.reArms : 0) + 1,
-		// (prNumber is part of the snapshot: notify-changes keys its PR-gone/PR-changed news on it)
-		lastSnapshot: { prNumber, mergeState: snap.mergeState, ciVerdict: snap.ci.verdict, at: new Date().toISOString() },
+		watchStartedAt: Number.isFinite(fresh.watchStartedAt) ? fresh.watchStartedAt : watchStartedAt,
+		reArms: (Number.isFinite(fresh.reArms) ? fresh.reArms : 0) + 1,
 	});
 	if (!persisted) logLine(SCRIPT, sessionId, "warn", "could not persist the watch state; the next re-arm restarts the watch clock");
 

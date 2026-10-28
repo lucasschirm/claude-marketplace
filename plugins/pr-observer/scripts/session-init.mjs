@@ -8,17 +8,24 @@
  * Stop hook is the watcher (it holds the stop while CI runs), and the PostToolUse hook injects
  * mid-turn transitions. Everything here is logged and fails open (hook-lib).
  */
-import { logLine, readStdinJson, stateKey, sweepOldState, writeState } from "./hook-lib.mjs";
+import { logLine, readState, readStdinJson, stateKey, sweepOldState, writeState } from "./hook-lib.mjs";
 
 const SCRIPT = "session-init";
 
 try {
-	const input = await readStdinJson();
+	const input = await readStdinJson(SCRIPT, "unknown");
 	const sessionId = input.session_id ?? "unknown";
 	const cwd = process.env.DEVIN_PROJECT_DIR || process.cwd();
 	const key = stateKey(sessionId, cwd);
 
 	sweepOldState();
+	// SessionStart can refire for a live session (resume, clear): the watch clock and the
+	// notifier's baseline must survive it, so an existing state file is kept as-is.
+	const existing = readState(key, SCRIPT, sessionId);
+	if (existing.createdAt) {
+		logLine(SCRIPT, sessionId, "info", "session watch state already initialized; kept", `cwd=${cwd}`);
+		process.exit(0);
+	}
 	const ok = writeState(key, { createdAt: new Date().toISOString(), lastCheckAt: 0 });
 	logLine(SCRIPT, sessionId, ok ? "info" : "warn", ok ? "session watch state initialized" : "could not write the session watch state", `cwd=${cwd}`);
 	process.exit(0);

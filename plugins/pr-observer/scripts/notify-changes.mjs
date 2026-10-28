@@ -20,7 +20,7 @@ import { NOTIFY_MIN_INTERVAL_MS, loadEngine, logLine, readPrSnapshot, readState,
 const SCRIPT = "notify-changes";
 
 try {
-	const input = await readStdinJson();
+	const input = await readStdinJson(SCRIPT, "unknown");
 	const sessionId = input.session_id ?? "unknown";
 	const pluginRoot = process.env.DEVIN_PLUGIN_ROOT || path.resolve(import.meta.dirname, "..");
 	const cwd = process.env.DEVIN_PROJECT_DIR || process.cwd();
@@ -31,7 +31,7 @@ try {
 		logLine(SCRIPT, sessionId, "warn", "vendored engine failed to load; using the inline fallback classifier", engine.err?.message ?? String(engine.err));
 	}
 
-	const state = readState(key);
+	const state = readState(key, SCRIPT, sessionId);
 	const now = Date.now();
 	const lastCheckAt = Number.isFinite(state.lastCheckAt) ? state.lastCheckAt : 0;
 	if (now - lastCheckAt < NOTIFY_MIN_INTERVAL_MS) {
@@ -54,9 +54,26 @@ try {
 	};
 
 	if (snap.none) {
-		// No open non-draft PR: nothing to watch. A previous snapshot (the PR was merged/closed
-		// mid-session) is itself news worth one line.
-		if (previous && previous.prNumber !== undefined) {
+		// No open non-draft PR. A transition from a previously observed PR is news ONCE: the
+		// persisted marker (gone/draft) keeps the same state from re-injecting on every tick.
+		const alreadyReported = previous && (previous.gone || previous.draft);
+		if (snap.draft) {
+			if (previous && previous.prNumber === snap.prNumber && !alreadyReported) {
+				logLine(SCRIPT, sessionId, "info", "PR became a draft; reporting the transition", `pr=${snap.prNumber}`);
+				persist({ prNumber: snap.prNumber, draft: true, at: new Date().toISOString() });
+				writeHookOutput({
+					hookSpecificOutput: {
+						hookEventName: "PostToolUse",
+						additionalContext: `PR #${snap.prNumber} is now a draft; nothing is observed while it is a draft.`,
+					},
+				});
+				process.exit(0);
+			}
+			persist({ prNumber: snap.prNumber, draft: true, at: new Date().toISOString() });
+			logLine(SCRIPT, sessionId, "info", "no open non-draft PR on this branch (draft); nothing to watch");
+			process.exit(0);
+		}
+		if (previous && previous.prNumber !== undefined && !alreadyReported) {
 			logLine(SCRIPT, sessionId, "info", "PR no longer open; reporting the transition", `state=${snap.state ?? "gone"}`);
 			persist({ prNumber: previous.prNumber, gone: true, at: new Date().toISOString() });
 			writeHookOutput({

@@ -181,6 +181,9 @@ const WATCH_ENV = (fx: Fixture, maxWatchMs = "600000"): Record<string, string> =
 	PR_OBSERVER_HOOK_POLL_MS: "60",
 	PR_OBSERVER_HOOK_CHUNK_MS: "250",
 	PR_OBSERVER_HOOK_MAX_WATCH_MS: maxWatchMs,
+	// (the real reserve is 70s - room for a full gh round inside the 285s chunk; the test chunks
+	//  are 250ms, so the reserve shrinks with them)
+	PR_OBSERVER_HOOK_POLL_RESERVE_MS: "50",
 });
 
 // ------------------------------------------------------------------ session-init
@@ -305,8 +308,28 @@ test("stop hook: CI running holds the stop, re-arms with a heartbeat, and allows
 	const state = readStateFile(fx, "s-watch-");
 	assert.ok(state?.watchStartedAt, "the watch start is persisted for the re-arms");
 	assert.equal(state.reArms, 1);
-	// (notify-changes keys its PR-gone/PR-changed news on this: the snapshot must carry the number)
-	assert.equal(state.lastSnapshot?.prNumber, 7, "the persisted snapshot carries the PR number");
+
+	// The chunk-end write must not clobber notify-changes' fields: seed them the way a
+	// PostToolUse during the continued turn would have left them, re-arm, and check survival.
+	fs.writeFileSync(`${fx.ghState}.cipending`, "1");
+	readStateFile(fx, "s-watch-"); // (exists from the first chunk)
+	const seeded = readStateFile(fx, "s-watch-");
+	fs.writeFileSync(
+		path.join(fx.stateDir, fs.readdirSync(fx.stateDir).find((f) => f.startsWith("state-s-watch-") && f.endsWith(".json"))!),
+		JSON.stringify({
+			...seeded,
+			lastCheckAt: Date.now(),
+			lastSnapshot: { prNumber: 7, mergeState: "mergeable", ciVerdict: "unknown", at: "x" },
+		}),
+	);
+	const res3 = await runHook("check-settle.mjs", { session_id: "s-watch", stop_hook_active: true }, env);
+	assert.equal(res3.code, 0);
+	const out3 = JSON.parse(res3.stdout);
+	assert.equal(out3.decision, "block", "CI pending again: the re-arm watches");
+	const after = readStateFile(fx, "s-watch-");
+	assert.equal(after.lastSnapshot?.prNumber, 7, "notify-owned lastSnapshot survives the Stop hook's write");
+	assert.ok(Number.isFinite(after.lastCheckAt), "notify-owned lastCheckAt survives the Stop hook's write");
+	assert.equal(after.reArms, 2, "the re-arm count still advances");
 
 	// Re-entry with stop_hook_active (the way the host marks a re-armed stop), CI now passed: allowed.
 	fs.rmSync(`${fx.ghState}.cipending`);
@@ -540,6 +563,42 @@ test("notify hook: the PR merging mid-session is injected as 'no longer open'", 
 	assert.match(out.hookSpecificOutput.additionalContext, /merged/);
 });
 
+test("notify hook: 'no longer open' is injected once, not on every tick", async () => {
+	const fx = fixture("notifygoneonce");
+	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
+	const env = { ...fx.env, PR_OBSERVER_HOOK_MIN_NOTIFY_MS: "0" };
+
+	let res = await runHook("notify-changes.mjs", { session_id: "s-ngo", tool_name: "exec" }, env);
+	assert.equal(res.stdout, "", "baseline");
+
+	fs.writeFileSync(`${fx.ghState}.merged`, "1");
+	res = await runHook("notify-changes.mjs", { session_id: "s-ngo", tool_name: "exec" }, env);
+	const out = JSON.parse(res.stdout);
+	assert.match(out.hookSpecificOutput.additionalContext, /no longer open/);
+
+	res = await runHook("notify-changes.mjs", { session_id: "s-ngo", tool_name: "exec" }, env);
+	assert.equal(res.code, 0);
+	assert.equal(res.stdout, "", "the same gone-state must not re-inject on the next tick");
+});
+
+test("notify hook: a PR becoming a draft is injected once, with the draft named", async () => {
+	const fx = fixture("notifydraft");
+	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
+	const env = { ...fx.env, PR_OBSERVER_HOOK_MIN_NOTIFY_MS: "0" };
+
+	let res = await runHook("notify-changes.mjs", { session_id: "s-nd", tool_name: "exec" }, env);
+	assert.equal(res.stdout, "", "baseline");
+
+	fs.writeFileSync(`${fx.ghState}.draft`, "1");
+	res = await runHook("notify-changes.mjs", { session_id: "s-nd", tool_name: "exec" }, env);
+	const out = JSON.parse(res.stdout);
+	assert.match(out.hookSpecificOutput.additionalContext, /now a draft/);
+
+	res = await runHook("notify-changes.mjs", { session_id: "s-nd", tool_name: "exec" }, env);
+	assert.equal(res.code, 0);
+	assert.equal(res.stdout, "", "the same draft-state must not re-inject on the next tick");
+});
+
 test("notify hook: the branch's PR changing rebaselines silently", async () => {
 	const fx = fixture("notifyswitch");
 	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
@@ -610,13 +669,42 @@ test("hooks run with no stdin payload at all", async () => {
 	}
 });
 
-test("hooks survive malformed stdin JSON", async () => {
+test("hooks survive malformed stdin JSON, and the payload failure is logged", async () => {
 	const fx = fixture("badjson");
 	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
 	for (const script of ["check-settle.mjs", "notify-changes.mjs", "session-init.mjs"]) {
 		const res = await runHook(script, "{not json at all", fx.env);
 		assert.equal(res.code, 0, `${script} survives malformed JSON`);
 	}
+	assert.match(readLog(fx), /malformed stdin payload/, "the malformed payload is logged, not swallowed");
+});
+
+test("a corrupt state file is logged when it is read", async () => {
+	const fx = fixture("corruptstatelog");
+	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
+	const key = stateKeyFor(fx, "s-csl");
+	fs.writeFileSync(path.join(fx.stateDir, key), "{corrupt");
+	fs.writeFileSync(`${fx.ghState}.cipending`, "1");
+	const res = await runHook("check-settle.mjs", { session_id: "s-csl" }, WATCH_ENV(fx));
+	assert.equal(res.code, 0);
+	assert.match(readLog(fx), /state file unreadable; starting from an empty state/);
+});
+
+test("session-init refire keeps the existing watch state", async () => {
+	const fx = fixture("initrefire");
+	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
+	// First start: baseline. Then the session's state gains a watch clock (a Stop re-arm wrote it).
+	await runHook("session-init.mjs", { session_id: "s-refire" }, fx.env);
+	const file = path.join(fx.stateDir, fs.readdirSync(fx.stateDir).find((f) => f.startsWith("state-s-refire-") && f.endsWith(".json"))!);
+	fs.writeFileSync(file, JSON.stringify({ createdAt: "kept", watchStartedAt: 12345, reArms: 2 }));
+	// A refire (resume/clear) must not reset the clock.
+	const res = await runHook("session-init.mjs", { session_id: "s-refire" }, fx.env);
+	assert.equal(res.code, 0);
+	const state = readStateFile(fx, "s-refire-");
+	assert.equal(state.watchStartedAt, 12345, "the watch clock survives a SessionStart refire");
+	assert.equal(state.reArms, 2);
+	assert.equal(state.createdAt, "kept");
+	assert.ok(readLog(fx).includes("already initialized; kept"));
 });
 
 /** Recomputes the state file name the way hook-lib's stateKey does (sha1 of session+cwd). */

@@ -59,7 +59,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
   # shape an older gh or a payload without them has, which must classify as no information.
   mergeable=""
   if [ -f "${tmpDir}/conflicting" ]; then
-    mergeable=',"mergeable":"CONFLICTING","mergeableState":"DIRTY"'
+    mergeable=',"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"'
   fi
   if [ "$3" = "feat" ] || [ "$3" = "branch" ] || [ "$3" = "feat2" ]; then
     n=$(cat "${tmpDir}/branch_pr" 2>/dev/null || echo 7)
