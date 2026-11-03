@@ -12,6 +12,7 @@ import { startAgyAcpServer, AGY_ACP_VERSION, PROTOCOL_VERSION } from "./server.t
 import { cleanupStaleBridges } from "./bridge-cleanup.ts";
 import { createShutdown } from "./shutdown.ts";
 import { lifecycleConfigFromEnv } from "./config.ts";
+import { parseLaunchArgs } from "./launch.ts";
 export { AGY_ACP_VERSION, PROTOCOL_VERSION };
 
 const USAGE = `agy-acp ${AGY_ACP_VERSION} - an ACP server for Google's agy CLI
@@ -21,12 +22,20 @@ Usage:
   agy-acp --version    print the version
   agy-acp --help       print this help
 
+Selection (what the agy children run with; a client may change model and effort per session):
+  --model <id>               the model to start on (agy models lists the ids)
+  --effort <level>           low | medium | high | xhigh | max
+  --sandbox                  run agy in its own sandbox (terminal restrictions)
+  --allow-bypass             advertise the bypass mode (it allows every tool call the bridge sees)
+
 Environment:
   AGY_ACP_LOG                append diagnostics to this file instead of stderr
   AGY_ACP_COMMAND            the agy binary to launch (default: agy on PATH)
   AGY_ACP_CANCEL_ESCALATE_MS SIGINT -> process-group SIGTERM/SIGKILL window (default 5000)
   AGY_ACP_HEARTBEAT_MS       heartbeat interval during a turn (default 15000, 0 disables)
   AGY_ACP_SHUTDOWN_TIMEOUT_MS  exit deadline after a hang-up or signal (default 10000)
+  AGY_ACP_MODEL / AGY_ACP_EFFORT / AGY_ACP_SANDBOX / AGY_ACP_ALLOW_BYPASS / AGY_ACP_MODELS_TIMEOUT_MS
+                             the same selection knobs as the flags (1 turns a switch on)
 `;
 
 function createLogger(): (line: string) => void {
@@ -49,12 +58,10 @@ function createLogger(): (line: string) => void {
 	};
 }
 
-const KNOWN_ARGS = new Set(["--help", "-h", "--version", "-v"]);
-
 export function main(args: string[]): void {
-	const unknown = args.filter((a) => !KNOWN_ARGS.has(a));
-	if (unknown.length > 0) {
-		process.stderr.write(`agy-acp: unknown argument '${unknown.join(" ")}'\n${USAGE}`);
+	const launch = parseLaunchArgs(args);
+	if (!launch) {
+		process.stderr.write(`agy-acp: unknown argument '${args.join(" ")}'\n${USAGE}`);
 		process.exitCode = 2;
 		return;
 	}
@@ -82,7 +89,13 @@ export function main(args: string[]): void {
 			await cleanupStaleBridges(log); // the dirs of any session whose teardown could not finish
 		},
 	});
-	const server = startAgyAcpServer({ input: process.stdin, output: process.stdout, log, onClose: (reason) => void exit.begin(reason) });
+	const server = startAgyAcpServer({
+		agy: launch,
+		input: process.stdin,
+		output: process.stdout,
+		log,
+		onClose: (reason) => void exit.begin(reason),
+	});
 	exit.installSignals(); // after the server exists: the cleanup disposes its sessions
 }
 

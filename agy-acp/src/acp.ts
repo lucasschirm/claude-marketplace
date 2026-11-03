@@ -2,10 +2,13 @@
 // implements (session/new, session/prompt), the session/update notifications the agy stream is
 // mapped into, and the server-defined error code the session layer uses.
 //
-// The base shapes follow ACP v1 (agentclientprotocol.com). Two parts are agy-acp's own extension
-// and documented in the README: the `usage_update` session update (a per-turn usage delta, which
-// the repo's own Pi delegate already consumes from `devin acp`) and the `failed` tool-call status
-// (agy's tool `ERROR` state has no counterpart in the base status set).
+// The base shapes follow ACP v1 (agentclientprotocol.com). Two parts are agy-acp's own extension and
+// documented in the README: the `usage_update` session update (a per-turn usage delta, which the
+// repo's own Pi delegate already consumes from `devin acp`) and the `failed` tool-call status (agy's
+// tool `ERROR` state has no counterpart in the base status set). A selector's shapes live with the
+// selection state that builds them (config-options.ts), imported here as types only.
+
+import type { AcpConfigOption, AcpConfigOptionUpdate } from "./config-options.ts";
 
 /** Server-defined error (the -32000..-32099 server range): a session/prompt while a turn runs. */
 export const TURN_IN_PROGRESS = -32002;
@@ -69,6 +72,7 @@ export interface AcpSessionModeState {
 	currentModeId: string;
 	availableModes: AcpSessionMode[];
 }
+/** agy-acp's own block (since sub-issue 3): model ids. The names ride on the `model` config option. */
 export interface AcpSessionModelState {
 	currentModelId: string;
 	availableModels: string[];
@@ -77,6 +81,7 @@ export interface AcpSessionNewResult {
 	sessionId: string;
 	modes: AcpSessionModeState;
 	models: AcpSessionModelState;
+	configOptions?: AcpConfigOption[];
 	_meta?: Record<string, unknown>;
 }
 
@@ -184,6 +189,7 @@ export type AcpSessionUpdate =
 	| AcpToolCallUpdate
 	| AcpUsageUpdate
 	| AcpCurrentModeUpdate
+	| AcpConfigOptionUpdate
 	| AcpHeartbeatUpdate;
 export interface AcpSessionUpdateParams {
 	sessionId: string;
