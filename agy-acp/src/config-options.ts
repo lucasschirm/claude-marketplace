@@ -122,11 +122,15 @@ export class SessionSelection {
 		this.effortId = state.effort ?? AGY_DEFAULT_CHOICE;
 		this.sandbox = state.sandbox;
 		this.allowBypass = state.allowBypass;
+		// These are the operator's words, not a client's: they name the knob they came from, the way
+		// assertStartSelection names AGY_ACP_MODEL, so a restart is aimed at the right setting.
 		if (!isEffort(this.effortId)) {
-			throw new Error(`unknown effort: ${this.effortId} (available: ${AGY_DEFAULT_CHOICE}, ${AGY_EFFORTS.join(", ")})`);
+			throw new Error(
+				`the effort this server was launched with is not one agy accepts: ${this.effortId} (AGY_ACP_EFFORT or --effort; available: ${AGY_DEFAULT_CHOICE}, ${AGY_EFFORTS.join(", ")})`,
+			);
 		}
 		const clash = effortConflict(this.modelId, this.effortId);
-		if (clash !== null) throw new Error(`${clash} (the model and effort this server was started with)`);
+		if (clash !== null) throw new Error(`${clash} (AGY_ACP_MODEL/AGY_ACP_EFFORT or --model/--effort)`);
 	}
 
 	get mode(): string {

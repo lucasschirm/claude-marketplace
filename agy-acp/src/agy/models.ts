@@ -36,6 +36,12 @@ export interface ModelCatalog {
 	list(): Promise<AgyModel[] | null>;
 	/** The settled answer without awaiting it (`null` = not fetched, or failed). */
 	snapshot(): AgyModel[] | null;
+	/**
+	 * Why the listing could not be had (`null` while it has not failed). `session/new` puts this in
+	 * `_meta.models` verbatim: "no list" is one fact, and "no list because agy said sign in" is a
+	 * different one the client can act on, so the reason must not be flattened into a static note.
+	 */
+	failure(): string | null;
 }
 
 /**
@@ -120,6 +126,7 @@ export function listAgyModels(argv: string[], timeoutMs: number, env: NodeJS.Pro
 export function makeModelCatalog(argv: string[], env: NodeJS.ProcessEnv, timeoutMs: number, log: (line: string) => void): ModelCatalog {
 	let pending: Promise<AgyModel[] | null> | null = null;
 	let settled: AgyModel[] | null = null;
+	let reason: string | null = null;
 	return {
 		list() {
 			pending ??= listAgyModels(argv, timeoutMs, env).then(
@@ -128,6 +135,7 @@ export function makeModelCatalog(argv: string[], env: NodeJS.ProcessEnv, timeout
 					return models;
 				},
 				(err: Error) => {
+					reason = err.message;
 					log(`agy models failed - advertising only what agy reports per session: ${err.message}`);
 					return null;
 				},
@@ -135,6 +143,7 @@ export function makeModelCatalog(argv: string[], env: NodeJS.ProcessEnv, timeout
 			return pending;
 		},
 		snapshot: () => settled,
+		failure: () => reason,
 	};
 }
 

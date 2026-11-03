@@ -101,10 +101,11 @@ answer is the whole selector list, so a client never has to guess what else move
 
 `agy models` is the source of the ids; it runs **once per server process** (`agy models` can take
 seconds and needs credentials) and its answer - success or failure - is cached. When it fails,
-`session/new` says so in `_meta.models` (`{"listed": false, "note": "..."}`), the `model`
-selector carries only the model the child reported, and an id the bridge cannot name is passed to
-agy, whose startup error becomes the session error. A `-32602` naming every available id is
-refused without touching a running child.
+`session/new` says so in `_meta.models` (`{"listed": false, "reason": "...", "note": "..."}`) -
+`reason` is agy's own words, so a client can tell "sign in" from "timed out" instead of guessing from
+the server log - the `model` selector carries only the model the child reported, and an id the bridge
+cannot name is passed to agy, whose startup error becomes the session error. A `-32602` naming every
+available id is refused without touching a running child.
 
 What a choice costs is decided by what it is: **mode** is enforced by the bridge the moment it is set -
 the next permission decision is made under the new mode, even mid-turn - and `session/set_mode` answers

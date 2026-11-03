@@ -214,11 +214,11 @@ test("the operator's own selection is held to the rules a client's pick goes thr
 	// session/new being unable to start, with a message about a process the client cannot fix.
 	assert.throws(
 		() => new SessionSelection({ effort: "turbo", sandbox: false, allowBypass: false }),
-		/unknown effort: turbo \(available: default, low, medium, high, xhigh, max\)/,
+		/AGY_ACP_EFFORT or --effort; available: default, low, medium, high, xhigh, max/,
 	);
 	assert.throws(
 		() => new SessionSelection({ model: "gemini-3.8-flash-low", effort: "high", sandbox: false, allowBypass: false }),
-		/carries low effort.*server was started with/,
+		/carries low effort.*AGY_ACP_MODEL\/AGY_ACP_EFFORT or --model\/--effort/,
 	);
 	const fine = new SessionSelection({ model: "gemini-3.8-flash-low", effort: "low", sandbox: false, allowBypass: false });
 	assert.strictEqual(fine.effort, "low", "the pair agy accepts is accepted here");
@@ -452,10 +452,14 @@ test("a model list that cannot be had is a supported state, not a broken session
 		const frame = await h.request("session/new", { cwd: process.cwd(), mcpServers: [] });
 		const result = frame.result as {
 			models: { currentModelId: string; availableModels: string[] };
-			_meta?: { models?: { listed?: boolean } };
+			_meta?: { models?: { listed?: boolean; reason?: string; note?: string } };
 		};
 		assert.ok(sid, "the first session came up despite the failed listing");
 		assert.strictEqual(result._meta?.models?.listed, false, "reported rather than hidden");
+		// The reason travels: "no list" and "no list because agy says sign in" are different facts, and
+		// only the second is something a client can act on.
+		assert.match(result._meta?.models?.reason ?? "", /Please sign in to view available models/, "agy's own reason, verbatim");
+		assert.match(result._meta?.models?.note ?? "", /Please sign in to view available models/, "the note carries it too");
 		assert.deepStrictEqual(result.models.availableModels, ["gemini-3.8-flash-low"], "what agy reports per session is all we claim");
 		assert.ok(
 			h.logs.some((l) => l.includes("agy models failed")),
@@ -470,8 +474,13 @@ test("a model list that never answers is given up on, and session/new still answ
 	const h = startHarness("input-event-init", { FAKE_AGY_MODELS_DELAY_MS: "10000" }, { modelsTimeoutMs: 300 });
 	try {
 		const frame = await h.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		const result = frame.result as { _meta?: { models?: { listed?: boolean } } };
+		const result = frame.result as { _meta?: { models?: { listed?: boolean; reason?: string } } };
 		assert.strictEqual(result._meta?.models?.listed, false, "the timeout is a failed listing, not a hung session/new");
+		assert.match(
+			result._meta?.models?.reason ?? "",
+			/timed out after 300 ms/,
+			"a client told there is no list can tell a timeout from a missing login",
+		);
 		assert.ok(
 			h.logs.some((l) => l.includes("timed out after 300 ms")),
 			`the timeout says so: ${JSON.stringify(h.logs)}`,
@@ -557,9 +566,32 @@ test("a model change reaches the NEXT agy process, resuming the conversation", a
 	}
 });
 
-test("the mode a child was launched with does not outlive the session's mode", async () => {
+test("a selection flag the test did not ask for kills the replay rather than riding along silently", async () => {
+	// The opt-in is only a gate if it shuts. Here the driver legitimately wants `--mode plan`, but this
+	// harness did not claim FAKE_AGY_ALLOW_SELECTION, so the fake refuses the launch - which is what keeps
+	// "every fixture replayed green" from being the answer to a driver inventing a selection flag.
 	const { file, cleanup } = argvLog();
 	const h = startHarness("simple-multiturn-textblocks", { FAKE_AGY_ARGV_LOG: file, FAKE_AGY_ALLOW_RESUME: "1" }, {});
+	const prompts = recordedPrompts("simple-multiturn-textblocks");
+	try {
+		const sid = await newSession(h);
+		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
+		const frame = await h.request("session/prompt", { sessionId: sid, prompt: [{ type: "text", text: prompts[0] }] });
+		assert.strictEqual(frame.error?.code, -32603, `the unclaimed selection flag must fail the turn: ${JSON.stringify(frame)}`);
+		assert.match(JSON.stringify(frame.error?.data ?? {}), /unexpected flag --mode.*FAKE_AGY_ALLOW_SELECTION/s, "and say which knob to set");
+	} finally {
+		h.close();
+		cleanup();
+	}
+});
+
+test("the mode a child was launched with does not outlive the session's mode", async () => {
+	const { file, cleanup } = argvLog();
+	const h = startHarness(
+		"simple-multiturn-textblocks",
+		{ FAKE_AGY_ARGV_LOG: file, FAKE_AGY_ALLOW_RESUME: "1", FAKE_AGY_ALLOW_SELECTION: "1" },
+		{},
+	);
 	const prompts = recordedPrompts("simple-multiturn-textblocks");
 	try {
 		const sid = await newSession(h);
@@ -600,6 +632,7 @@ test("effort reaches the next launch, with the operator's sandbox and the sessio
 		{
 			FAKE_AGY_ARGV_LOG: file,
 			FAKE_AGY_ALLOW_RESUME: "1",
+			FAKE_AGY_ALLOW_SELECTION: "1", // this test drives --effort, --mode and --sandbox onto children
 			FAKE_AGY_MODEL_ALLOW: "gemini-3.8-flash-low,gemini-3.8-flash",
 		},
 		{ sandbox: true },

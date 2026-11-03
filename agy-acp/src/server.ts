@@ -190,7 +190,11 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		// rather than left for the client to discover (the model list, the mcpServers, the version).
 		const meta: Record<string, unknown> = {};
 		if (modelList === null) {
-			meta.models = { listed: false, note: "`agy models` failed: the list is only what agy reports per session" };
+			// The reason travels with the fact: a client that is told "no model list" and gets agy's own
+			// "sign in" in the same field knows what to do, and one that gets the timeout knows the
+			// listing was never going to answer. The full text is in the server log either way.
+			const reason = models.failure() ?? "`agy models` gave no reason";
+			meta.models = { listed: false, reason, note: `the model list is only what agy reports per session (${reason})` };
 		}
 		if (mcpServers) {
 			// The recorded agy 1.4.2 flag surface has no per-session MCP configuration flag, so the

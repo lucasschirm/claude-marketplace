@@ -27,9 +27,9 @@
 // Issue #55 (mode, model and effort) adds three things: `argv[0] === "models"` replays the recorded
 // `agy models` table (or, with FAKE_AGY_MODELS_FAIL=1, the unauthenticated failure the real CLI
 // produces); FAKE_AGY_ARGV_LOG records every launch's argv so a test can prove a selection reached
-// the *next* process; and `--mode` / `--effort` / `--sandbox` are tolerated as driver additions while
-// their values are still validated against what agy 1.4.2 documents - a nonsense effort is a bug, not
-// a passthrough.
+// the *next* process; and `--mode` / `--effort` / `--sandbox` are tolerated as driver additions only on
+// a launch whose test set FAKE_AGY_ALLOW_SELECTION=1, with their values still validated against what agy
+// 1.4.2 documents - a nonsense effort is a bug, not a passthrough.
 //
 // Issue #54 (the process lifecycle) adds four knobs, all off by default so the replay suites
 // above are untouched:
@@ -76,6 +76,12 @@ const allowResume = process.env.FAKE_AGY_ALLOW_RESUME === "1";
 // invented or dropped a model is drift); with it, the value must be one of the ids listed - and the
 // test asserts the exact argv through FAKE_AGY_ARGV_LOG below.
 const modelAllow = (process.env.FAKE_AGY_MODEL_ALLOW ?? "").split(",").filter((s) => s !== "");
+
+// FAKE_AGY_ALLOW_SELECTION=1 says "this test drives a mode, an effort or the sandbox onto the child".
+// Every recording predates issue #55, so the selection flags are additions by design - but they are
+// additions the test has to claim, the way a respawn claims --conversation and a picked model claims
+// --model. Without that, a driver inventing `--effort max` on every launch would replay green.
+const allowSelection = process.env.FAKE_AGY_ALLOW_SELECTION === "1";
 
 function die(message: string, code: number): never {
 	process.stderr.write(`${message}\n`);
@@ -635,33 +641,38 @@ function parseArgv(tokens: string[]): FlagSet {
 }
 
 /**
- * The additions a driver may make to a recorded invocation, and why:
- *   --add-dir / --dangerously-skip-permissions  the permission bridge (checked to be a real bridge dir)
- *   --mode / --effort / --sandbox               the selection (issue #55): none of the recordings predates
- *                                               it, and every one of these values is validated by domain
+ * A flag the driver may add to a recorded invocation, and the condition that earns it - one line per
+ * addition, because "which of these is unconditional?" is the question a reader (and the next driver
+ * change) has to be able to answer:
+ *   --log-file / --add-dir                      agy's own log target, and the bridge dir (checked real)
+ *   --dangerously-skip-permissions              only alongside a bridge dir, which is who sets it
+ *   --mode / --effort / --sandbox               the selection (issue #55), on a launch whose test claimed
+ *                                               it with FAKE_AGY_ALLOW_SELECTION - see the note there
  *   --conversation                              a respawn, when the fixture allows one
  *   --model                                     only what FAKE_AGY_MODEL_ALLOW lists
+ * Nothing a recording never saw arrives silently, a valid-but-unclaimed selection flag included: a
+ * value agy would accept is not a flag this launch was expected to carry, and "every fixture replayed
+ * happily" is how an invented flag would first be noticed in production.
  */
+function toleratedAddition(name: string): boolean {
+	if (name === "--log-file" || name === "--add-dir") return true; // agy's own log target, and the bridge dir
+	if (name === "--mode" || name === "--effort" || name === "--sandbox") return allowSelection;
+	if (name === "--conversation") return allowResume;
+	if (name === "--model") return modelAllow.length > 0;
+	if (name === "-p=") return true; // headless: the driver always passes it
+	if (name === "--dangerously-skip-permissions") return bridgeDir !== null; // only ever the bridge's doing
+	return false;
+}
+
+/** The complaint, naming the knob when the flag is a selection the test forgot to claim. */
+function unexplained(name: string): string {
+	const selection = name === "--mode" || name === "--effort" || name === "--sandbox";
+	return `unexpected flag ${name}${selection ? " (a selection this launch was not expected to make - FAKE_AGY_ALLOW_SELECTION=1 if it is)" : ""}`;
+}
+
 function assertNoDrift(got: FlagSet, want: FlagSet): void {
-	for (const key of got.values.keys())
-		if (
-			!want.values.has(key) &&
-			key !== "--log-file" &&
-			key !== "--add-dir" &&
-			key !== "--mode" &&
-			key !== "--effort" &&
-			!(key === "--conversation" && allowResume) &&
-			!(key === "--model" && modelAllow.length > 0)
-		)
-			die(`fake-agy: unexpected flag ${key}`, 2);
-	for (const flag of got.flags)
-		if (
-			flag !== "-p=" &&
-			flag !== "--sandbox" &&
-			!want.flags.has(flag) &&
-			!(flag === "--dangerously-skip-permissions" && bridgeDir !== null)
-		)
-			die(`fake-agy: unexpected flag ${flag}`, 2);
+	for (const key of got.values.keys()) if (!want.values.has(key) && !toleratedAddition(key)) die(`fake-agy: ${unexplained(key)}`, 2);
+	for (const flag of got.flags) if (!want.flags.has(flag) && !toleratedAddition(flag)) die(`fake-agy: ${unexplained(flag)}`, 2);
 }
 
 function checkArgs(): void {
