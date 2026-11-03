@@ -165,7 +165,7 @@ export class GhHealth {
 		this.windowUsed = false;
 		this.pendingWhileBusy = false;
 		this.clearTimer();
-		this.timer = this.schedule(this.nextIntervalMs(), () => this.fireHooks());
+		this.timer = this.schedule(this.nextIntervalMs(), () => this.fireRetrySlot());
 	}
 
 	/** Clears all pending retry state (e.g. on session shutdown). */
@@ -187,6 +187,21 @@ export class GhHealth {
 			this.unschedule(this.timer);
 			this.timer = undefined;
 		}
+	}
+
+	// A real setTimeout can run while `now()` is still short of the integer deadline it was
+	// armed for (sub-ms timer granularity, wall-clock steps) — acquireSlot would refuse every
+	// hook's claim in that window and, the one-shot timer spent, the chain would never retry
+	// again. Re-arming for the remainder keeps the timer the driver until the slot is due.
+	private fireRetrySlot(): void {
+		this.timer = undefined;
+		if (this.failures === 0) return;
+		const remainingMs = this.nextRetryInMs();
+		if (remainingMs > 0) {
+			this.timer = this.schedule(remainingMs, () => this.fireRetrySlot());
+			return;
+		}
+		this.fireHooks();
 	}
 
 	private fireHooks(): void {

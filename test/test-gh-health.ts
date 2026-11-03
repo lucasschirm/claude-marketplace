@@ -31,7 +31,16 @@ function makeFakeClock() {
 		}
 		nowMs = until;
 	};
-	return { now: () => nowMs, schedule, unschedule, advance, pending: () => timers.length };
+	// Runs the soonest pending timer without advancing the clock to its due time: a real
+	// setTimeout can fire while Date.now() is still short of the integer deadline (sub-ms
+	// timer granularity, wall-clock steps) — the "timer FIRED ... acquireSlot() -> false
+	// [nextRetryIn=1ms]" signature the pr-tasks-gh-failure suite dumps.
+	const fireNext = () => {
+		const i = timers.reduce((best, t, idx) => (t.at < timers[best].at ? idx : best), 0);
+		const [t] = timers.splice(i, 1);
+		t.fn();
+	};
+	return { now: () => nowMs, schedule, unschedule, advance, fireNext, pending: () => timers.length };
 }
 
 function makeHealth() {
@@ -244,6 +253,20 @@ test("reset drops a pending recovery tick", () => {
 	health.reset();
 	clock.advance(0);
 	assert.deepStrictEqual(hooks, [], "nothing may run after reset()");
+});
+
+test("a retry timer fired before its slot is due re-arms instead of stalling the chain", () => {
+	const { health, clock, hooks } = makeHealth();
+	health.recordFailure(); // slot due at +30 s
+	clock.advance(29_999);
+	clock.fireNext(); // the timer ran 1 ms before the Date.now() deadline, as in the CI dumps
+	assert.deepStrictEqual(hooks, [], "hooks must not fire into a window no slot is due for");
+	assert.strictEqual(health.acquireSlot(), false, "the slot really is not due yet");
+	assert.strictEqual(clock.pending(), 1, "the wake re-arms the remainder instead of dying");
+	clock.advance(1); // the deadline arrives: the re-armed timer still drives the hooks
+	assert.deepStrictEqual(hooks, ["fired"]);
+	assert.strictEqual(health.acquireSlot(), true, "the chain is alive: the slot can be claimed");
+	health.release();
 });
 
 test("a failure supersedes a recovery tick that has not run yet", () => {

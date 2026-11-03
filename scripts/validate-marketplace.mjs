@@ -14,7 +14,7 @@
 // parsers for one rule is how they start to disagree.
 // `npm run check` runs it; `npm run validate` runs this file.
 // and for package.json:
-//   - every path in the `pi` manifest (extensions, skills) exists
+//   - every path in the `pi` manifest (extensions, skills, prompts, themes) exists
 
 import * as fs from "node:fs";
 import * as path from "node:path";
