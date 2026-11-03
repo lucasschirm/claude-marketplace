@@ -211,15 +211,19 @@ export class SessionSelection {
 	}
 
 	/**
-	 * The signature of the flags that need a new process: model and effort (and the sandbox, which only
-	 * the operator can set). This is what `ensureDriver` compares, and mode is deliberately NOT in it:
-	 * a mode is enforced by the bridge the moment it is set, and its `--mode` flag is a hint that rides
-	 * on whatever launch comes next - forcing a respawn per mode switch would trade a policy change that
-	 * works for a conversation restart that does not need to happen.
+	 * The signature of the flags that need a new process; `ensureDriver`'s question to the live child.
+	 *
+	 * Model and effort are in it because they are exec-time arguments. Mode is in it because a `--mode`
+	 * flag already on a child cannot be taken back: a session that respawned while `plan` was set would
+	 * otherwise keep an agy that self-censors mutations after the client moved it back to `default`, and
+	 * stopping the model *trying* is that flag's whole job - the bridge would have allowed the call, and
+	 * it would never arrive. Keeping mode out saved a respawn and bought a session advertising one mode
+	 * while its child behaved as another, with nothing to converge them; the bridge still applies a mode
+	 * the moment it is set, so what the respawn buys is that the child agrees by the next turn.
 	 */
 	relaunchKey(): string {
 		const f = this.flags();
-		return JSON.stringify([f.model ?? "", f.effort ?? "", f.sandbox === true]);
+		return JSON.stringify([f.model ?? "", f.effort ?? "", f.mode ?? "", f.sandbox === true]);
 	}
 
 	/** The `configOptions` selectors (ACP): the model list with its names, and the effort levels. */

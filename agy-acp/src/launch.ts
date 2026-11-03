@@ -67,12 +67,17 @@ export function withEnvDefaults(overrides?: AgyLaunchOptions): AgyLaunchOptions 
 	out.sandbox = launch.sandbox ?? env.sandbox;
 	out.allowBypass = launch.allowBypass ?? env.allowBypass;
 	out.modelsTimeoutMs = launch.modelsTimeoutMs ?? env.modelsTimeoutMs;
+	// `argvPrefix: []` is not "the command, with no prefix": the driver would exec an empty argv, while
+	// the two probes below would happily check `$PATH`'s agy and report a version and a model list for a
+	// binary no session ever runs. Resolve an empty prefix to "unset" once, here, so the gates and the
+	// sessions can only ever point at the same binary.
+	if (out.argvPrefix !== undefined && out.argvPrefix.length === 0) out.argvPrefix = undefined;
 	return out;
 }
 
 /** The argv the sessions will run: the configured prefix, or the command on its own. */
 function launchArgv(launch: AgyLaunchOptions): string[] {
-	return launch.argvPrefix && launch.argvPrefix.length > 0 ? launch.argvPrefix : [launch.command ?? "agy"];
+	return launch.argvPrefix ?? [launch.command ?? "agy"];
 }
 
 /** The version gate: run once before the first session/new, cached (a failed check may retry). */
@@ -95,7 +100,10 @@ export function makeVersionGate(launch: AgyLaunchOptions): () => Promise<AgyVers
  * models` needs credentials must not pay for it (or hammer it) on every session/new.
  */
 export function makeModelGate(launch: AgyLaunchOptions, log: (line: string) => void): ModelCatalog {
-	return makeModelCatalog(launchArgv(launch), launch.env ?? process.env, launch.modelsTimeoutMs ?? DEFAULT_MODELS_TIMEOUT_MS, log);
+	// A budget of 0 (or less) is not a listing that fails fast, it is a listing that cannot succeed:
+	// the watchdog would fire before the command could answer. The default is the floor.
+	const timeoutMs = launch.modelsTimeoutMs !== undefined && launch.modelsTimeoutMs > 0 ? launch.modelsTimeoutMs : DEFAULT_MODELS_TIMEOUT_MS;
+	return makeModelCatalog(launchArgv(launch), launch.env ?? process.env, timeoutMs, log);
 }
 
 /** The flags `main.ts` accepts with a value, and the option each one fills. */

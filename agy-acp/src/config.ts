@@ -47,6 +47,16 @@ export function envFlag(env: NodeJS.ProcessEnv, name: string): boolean {
 	return env[name]?.trim() === "1";
 }
 
+/**
+ * A duration with no off state: unset, nonsense and a value no command could satisfy in time all mean
+ * the default. `envInt` is wrong for these - it gives 0 meaning where 0 disables a timer (the heartbeat),
+ * but a 0 ms budget for `agy models` would declare it timed out before anything could answer.
+ */
+export function envPositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+	const value = envInt(env, name, fallback);
+	return value > 0 ? value : fallback;
+}
+
 export interface LifecycleConfig {
 	/** The agy binary the sessions launch (undefined = "agy", or the launch option's own value). */
 	command?: string;
@@ -80,7 +90,7 @@ export function lifecycleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Li
 		shutdownTimeoutMs: envInt(env, "AGY_ACP_SHUTDOWN_TIMEOUT_MS", DEFAULT_SHUTDOWN_TIMEOUT_MS),
 		// The selection knobs (issue #55). The models timeout's default lives with the command that
 		// pays it (agy/models.ts), not here.
-		modelsTimeoutMs: envInt(env, "AGY_ACP_MODELS_TIMEOUT_MS", DEFAULT_MODELS_TIMEOUT_MS),
+		modelsTimeoutMs: envPositiveInt(env, "AGY_ACP_MODELS_TIMEOUT_MS", DEFAULT_MODELS_TIMEOUT_MS),
 		model: trimmed(env.AGY_ACP_MODEL),
 		effort: trimmed(env.AGY_ACP_EFFORT),
 		sandbox: envFlag(env, "AGY_ACP_SANDBOX"),

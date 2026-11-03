@@ -21,10 +21,10 @@ import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { agyArgs } from "../src/agy/args.ts";
 import { lifecycleConfigFromEnv } from "../src/config.ts";
-import { parseLaunchArgs } from "../src/launch.ts";
+import { makeModelGate, parseLaunchArgs, withEnvDefaults } from "../src/launch.ts";
 import { SelectionCommands } from "../src/session-selection.ts";
-import { AGY_EFFORTS, effortConflict, modelEffort, parseModelsTable, type AgyModel } from "../src/agy/models.ts";
-import { agyModeFlag, offeredModes, SessionSelection } from "../src/config-options.ts";
+import { AGY_EFFORTS, DEFAULT_MODELS_TIMEOUT_MS, effortConflict, modelEffort, parseModelsTable, type AgyModel } from "../src/agy/models.ts";
+import { agyModeFlag, offeredModes, SessionSelection, type AcpConfigOption } from "../src/config-options.ts";
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const MODELS_TSV = fileURLToPath(new URL("./fixtures/models/agy-1.4.2.tsv", import.meta.url));
@@ -87,6 +87,25 @@ test("`agy models` stdout parses to ids and names, and junk is not a model", () 
 	assert.deepStrictEqual(parseModelsTable("\nFetching available models...\nnospace\nsolo-id\t\n"), []);
 	// The id is the first field; everything after it is the name, spaces included.
 	assert.deepStrictEqual(parseModelsTable("a-b\tOne two"), [{ modelId: "a-b", name: "One two" }]);
+	// A row with nothing after the tab has no name to advertise, and `agy` never prints one; the trim is
+	// what makes it not match at all, so a parsed model always has a name.
+	assert.deepStrictEqual(parseModelsTable("solo-id\t"), []);
+	assert.ok(parseModelsTable(fs.readFileSync(MODELS_TSV, "utf8")).every((m) => m.name !== ""));
+});
+
+test("a launch configuration points the probes and the sessions at one binary, and gives the listing a budget", () => {
+	// `argvPrefix: []` used to mean "unset" to the version gate and "no command at all" to the driver:
+	// the gate would bless a working agy on $PATH while every session failed to spawn one.
+	assert.strictEqual(withEnvDefaults({ argvPrefix: [] }).argvPrefix, undefined);
+	assert.strictEqual(withEnvDefaults({ argvPrefix: ["node", "fake-agy.ts"] }).argvPrefix?.length, 2);
+	// A listing budget of 0 would fail the listing before the command could answer, and 0 is what an
+	// operator gets when they set the variable without thinking about what it means here.
+	assert.strictEqual(lifecycleConfigFromEnv({ AGY_ACP_MODELS_TIMEOUT_MS: "0" }).modelsTimeoutMs, DEFAULT_MODELS_TIMEOUT_MS);
+	assert.strictEqual(lifecycleConfigFromEnv({ AGY_ACP_MODELS_TIMEOUT_MS: "-5" }).modelsTimeoutMs, DEFAULT_MODELS_TIMEOUT_MS);
+	assert.strictEqual(lifecycleConfigFromEnv({ AGY_ACP_MODELS_TIMEOUT_MS: "45000" }).modelsTimeoutMs, 45000);
+	// And the gate does not let a caller-supplied 0 through either: the listing still happens.
+	const gate = makeModelGate({ argvPrefix: [process.execPath, FAKE], modelsTimeoutMs: 0, env: process.env }, () => {});
+	return gate.list().then((models) => assert.strictEqual(models?.length, 13, "a 0 ms budget falls back to the default, not to a failure"));
 });
 
 test("the effort pair agy is known to refuse is refused here, with its words", () => {
@@ -131,12 +150,14 @@ test("a selection validates what a client can send, and says what it meant inste
 	assert.strictEqual(AGY_EFFORTS.join(","), "low,medium,high,xhigh,max", "agy --help's list");
 });
 
-test("the mode changes the policy now; the model and effort need a new process", () => {
+test("every selection that ends up on the child is part of what makes that child stale", () => {
 	const sel = new SessionSelection({ model: "gemini-3.8-flash-low", sandbox: false, allowBypass: true });
 	const before = sel.relaunchKey();
 	sel.setMode("plan");
-	assert.strictEqual(sel.relaunchKey(), before, "a mode needs no respawn: the bridge enforces it, and --mode rides on the next spawn");
-	assert.strictEqual(sel.flags().mode, "plan", "but the next spawn does carry it");
+	// The bridge enforces the mode at once, but `--mode plan` is on the child for its whole life, and a
+	// session that moved back to `default` would still have an agy refusing to try mutations.
+	assert.notStrictEqual(sel.relaunchKey(), before, "a mode needs a new child: the flag cannot come off");
+	assert.strictEqual(sel.flags().mode, "plan", "and the next spawn carries it");
 	sel.setModel("claude-opus-5-5-high", parseModelsTable(fs.readFileSync(MODELS_TSV, "utf8")));
 	assert.notStrictEqual(sel.relaunchKey(), before, "a model does: its --model was fixed when the child was exec'd");
 });
@@ -378,6 +399,52 @@ test("session/new advertises the model list, once per process, and the selectors
 	}
 });
 
+test("the selectors say what the binary listed, even when it left the running model out", async () => {
+	// A listing is a fact about the binary, not a constant in this repo. This one is written by the test
+	// (and names no real model) so the assertions below can only pass by reading what was listed: the
+	// model this conversation actually reports is appended because a client must be able to go back to
+	// it, and everything else is the file.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-listing-"));
+	const file = path.join(dir, "listing.tsv");
+	fs.writeFileSync(file, "test-model-a\tTest Model A\ntest-model-b\tTest Model B\n");
+	const h = startHarness(
+		"simple-multiturn-textblocks",
+		{ FAKE_AGY_MODELS_FILE: file, FAKE_AGY_MODEL_ALLOW: "test-model-a" },
+		{ model: "test-model-a" }, // the fixture's conversation reports a model this listing omits
+	);
+	try {
+		const result = (await h.request("session/new", { sessionId: "s", cwd: process.cwd(), mcpServers: [] })).result as Record<
+			string,
+			unknown
+		>;
+		const selector = (result.configOptions as AcpConfigOption[]).find((o) => o.id === "model");
+		assert.deepStrictEqual(
+			(selector?.options ?? []).map((o) => o.value),
+			["default", "test-model-a", "test-model-b", "gemini-3.8-flash-low"],
+			"exactly what was listed, plus this conversation's own model appended because it is missing",
+		);
+		assert.deepStrictEqual(
+			(selector?.options ?? []).map((o) => o.name),
+			["agy default", "Test Model A", "Test Model B", "gemini-3.8-flash-low"],
+			"listed models are named as the binary named them; the appended one has no name to offer",
+		);
+		assert.deepStrictEqual((result.models as { availableModels: string[] }).availableModels, [
+			"test-model-a",
+			"test-model-b",
+			"gemini-3.8-flash-low",
+		]);
+		// And a model from the recording this listing replaced is unknown here.
+		const refused = await h.request("session/set_model", {
+			sessionId: String(result.sessionId),
+			modelId: "gemini-3.8-flash-high",
+		});
+		assert.strictEqual(refused.error?.code, -32602, JSON.stringify(refused.error));
+	} finally {
+		h.close();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("a model list that cannot be had is a supported state, not a broken session", async () => {
 	const h = startHarness("input-event-init", { FAKE_AGY_MODELS_FAIL: "1" });
 	try {
@@ -490,7 +557,43 @@ test("a model change reaches the NEXT agy process, resuming the conversation", a
 	}
 });
 
-test("effort reaches the next launch; a mode rides on it without forcing the respawn", async () => {
+test("the mode a child was launched with does not outlive the session's mode", async () => {
+	const { file, cleanup } = argvLog();
+	const h = startHarness("simple-multiturn-textblocks", { FAKE_AGY_ARGV_LOG: file, FAKE_AGY_ALLOW_RESUME: "1" }, {});
+	const prompts = recordedPrompts("simple-multiturn-textblocks");
+	try {
+		const sid = await newSession(h);
+		await h.request("session/prompt", promptParams(sid, prompts[0]));
+		assert.ok(
+			!recordedLaunches(file)
+				.filter((a) => a[0] !== "models")[0]
+				.includes("--mode"),
+			"the first child is launched with no mode flag",
+		);
+
+		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
+		const planned = await h.request("session/prompt", promptParams(sid, prompts[0]));
+		assert.strictEqual((planned.result as { stopReason?: string })?.stopReason, "end_turn");
+		const launches = recordedLaunches(file).filter((a) => a[0] !== "models");
+		assert.strictEqual(launches.length, 2, "the mode change put the request on a new child");
+		assert.strictEqual(launches[1][launches[1].indexOf("--mode") + 1], "plan", "and it says plan");
+
+		// The case that matters: the flag cannot be taken back. Back to `default` means the next child
+		// must be launched without it, or the session advertises a mode its agy is not in.
+		await h.request("session/set_mode", { sessionId: sid, modeId: "default" });
+		const released = await h.request("session/prompt", promptParams(sid, prompts[0]));
+		assert.strictEqual((released.result as { stopReason?: string })?.stopReason, "end_turn");
+		const after = recordedLaunches(file).filter((a) => a[0] !== "models");
+		assert.strictEqual(after.length, 3, `leaving plan mode needs a child without the flag: ${JSON.stringify(after.at(-1))}`);
+		assert.ok(!after[2].includes("--mode"), "and the new child carries no mode flag at all");
+		assert.strictEqual(after[2][after[2].indexOf("--conversation") + 1], sid, "resuming the same conversation to do it");
+	} finally {
+		h.close();
+		cleanup();
+	}
+});
+
+test("effort reaches the next launch, with the operator's sandbox and the session's mode", async () => {
 	const { file, cleanup } = argvLog();
 	const h = startHarness(
 		"simple-multiturn-textblocks",
@@ -517,9 +620,9 @@ test("effort reaches the next launch; a mode rides on it without forcing the res
 
 		const launches = recordedLaunches(file).filter((argv) => argv[0] !== "models");
 		const second = launches[1];
-		assert.ok(second, "the effort forced the next turn onto a new child");
+		assert.ok(second, "the change forced the next turn onto a new child");
 		assert.strictEqual(second[second.indexOf("--effort") + 1], "low", "--effort reaches agy");
-		assert.ok(second.includes("--mode"), "the mode flag rode along on the launch the effort needed");
+		assert.ok(second.includes("--mode"), "and so does the mode the session is in");
 		assert.strictEqual(second[second.indexOf("--mode") + 1], "plan");
 		assert.ok(second.includes("--sandbox"), "and the operator's sandbox is still there");
 	} finally {

@@ -106,14 +106,17 @@ selector carries only the model the child reported, and an id the bridge cannot 
 agy, whose startup error becomes the session error. A `-32602` naming every available id is
 refused without touching a running child.
 
-What a choice costs is decided by what it is: **mode** is enforced by the bridge immediately, so
-`session/set_mode` answers at once and the `--mode` flag merely rides on the next child; **model
-and effort are `agy` startup arguments**, so a change marks the child stale and the next
-`session/prompt` starts a new one with `--conversation`, keeping the conversation. A change is per
-session: a second `session/new` starts from the operator's launch, not from whatever a client last
-picked. `agy` refuses an effort that contradicts an effort-qualified model id (it said so on
-stderr in the spike: `--model gemini-3.8-flash-low conflicts with --effort=high`), and `agy-acp`
-refuses it before breaking a running turn.
+What a choice costs is decided by what it is: **mode** is enforced by the bridge the moment it is set -
+the next permission decision is made under the new mode, even mid-turn - and `session/set_mode` answers
+at once; **every one of the three is also an `agy` startup argument**, so a change marks the child stale
+and the next `session/prompt` starts a new one with `--conversation`, keeping the conversation. Mode is
+in that rule because a flag cannot be taken back: a child launched with `--mode plan` goes on refusing
+to *try* mutations after the session moved back to `default`, and a session that advertises one mode
+while its agy behaves as another is worse than the respawn it costs. A change is per session: a second
+`session/new` starts from the operator's launch, not from whatever a client last picked. `agy` refuses
+an effort that contradicts an effort-qualified model id (it said so on stderr in the spike:
+`--model gemini-3.8-flash-low conflicts with --effort=high`), and `agy-acp` refuses it before breaking a
+running turn.
 
 The operator sets the starting point with `--model` / `--effort` / `--sandbox` (or
 `AGY_ACP_MODEL` / `AGY_ACP_EFFORT` / `AGY_ACP_SANDBOX`); the client may then change model and

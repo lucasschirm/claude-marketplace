@@ -51,21 +51,21 @@
     "agy-acp/src/agy/args.ts": 64,
     "agy-acp/src/agy/contract.ts": 289,
     "agy-acp/src/agy/events.ts": 31,
-    "agy-acp/src/agy/models.ts": 163,
+    "agy-acp/src/agy/models.ts": 164,
     "agy-acp/src/agy/process.ts": 298,
     "agy-acp/src/agy/version.ts": 91,
     "agy-acp/src/bridge-cleanup.ts": 50,
     "agy-acp/src/bridge-hook.ts": 121,
     "agy-acp/src/bridge-server.ts": 295,
     "agy-acp/src/cancel.ts": 94,
-    "agy-acp/src/config-options.ts": 258,
-    "agy-acp/src/config.ts": 90,
+    "agy-acp/src/config-options.ts": 262,
+    "agy-acp/src/config.ts": 100,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/flush-stdout.ts": 39,
     "agy-acp/src/framing.ts": 81,
     "agy-acp/src/heartbeat.ts": 70,
     "agy-acp/src/jsonrpc.ts": 296,
-    "agy-acp/src/launch.ts": 134,
+    "agy-acp/src/launch.ts": 142,
     "agy-acp/src/lib/child-process.ts": 40,
     "agy-acp/src/main.ts": 115,
     "agy-acp/src/map-steps.ts": 77,
@@ -77,7 +77,7 @@
     "agy-acp/src/server.ts": 220,
     "agy-acp/src/session-registry.ts": 79,
     "agy-acp/src/session-selection.ts": 131,
-    "agy-acp/src/session.ts": 346,
+    "agy-acp/src/session.ts": 349,
     "agy-acp/src/shutdown.ts": 114,
     "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 84,
@@ -318,8 +318,19 @@
         "agy-acp/src/session.ts: 346 lines > baseline 339 (files may only shrink)",
         "agy-acp/src/turn.ts: 133 lines > baseline 129 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "Devin's second review of #55: a mode change now takes its flag off the child, and a launch or a listing budget that cannot work falls back rather than failing silently",
+      "changes": [
+        "agy-acp/src/agy/models.ts: 164 lines > baseline 163 (files may only shrink)",
+        "agy-acp/src/config-options.ts: 262 lines > baseline 258 (files may only shrink)",
+        "agy-acp/src/config.ts: 100 lines > baseline 90 (files may only shrink)",
+        "agy-acp/src/launch.ts: 142 lines > baseline 134 (files may only shrink)",
+        "agy-acp/src/session.ts: 349 lines > baseline 346 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "0e570b7",
+  "generatedFrom": "1ce69ec",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

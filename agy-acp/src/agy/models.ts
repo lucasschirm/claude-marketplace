@@ -50,8 +50,9 @@ export function parseModelsTable(stdout: string): AgyModel[] {
 		if (trimmed === "") continue;
 		const match = /^([^\s\t]+)\t+(.*)$/.exec(trimmed);
 		if (!match) continue;
-		const name = match[2].trim();
-		models.push({ modelId: match[1], name: name === "" ? match[1] : name });
+		// The line is trimmed before the match, so `(.*)` cannot come back empty: a row whose name is
+		// missing has no tab left by then and is skipped with everything else that is not a model row.
+		models.push({ modelId: match[1], name: match[2].trim() });
 	}
 	return models;
 }

@@ -1,9 +1,8 @@
 // What a client may change about a session - its mode, its model, its effort - and what each change
 // costs. Kept apart from AgySession itself because the rules are the interesting part and are all
-// about the selection, not about turns: the mode is enforced by the bridge right now (so a change
-// answers immediately and `--mode` merely rides on the next child), while model and effort are `agy`
-// startup arguments, so a change marks the live child stale and the next prompt respawns it with
-// `--conversation` (issue #55).
+// about the selection, not about turns: the mode is enforced by the bridge right now, so a change
+// answers immediately whatever the child does next, and all three are `agy` startup arguments, so a
+// change marks the live child stale and the next prompt respawns it with `--conversation` (issue #55).
 //
 // Every setter validates and throws RpcError(-32602): the caller is a JSON-RPC method, and "unknown
 // model" is the client's mistake to hear about, not ours.
@@ -80,7 +79,8 @@ export class SelectionCommands {
 
 	/**
 	 * session/set_mode. The bridge policy changes immediately (the next permission decision is made
-	 * under the new mode, even mid-turn); `--mode` is a launch flag, so it rides on the next respawn.
+	 * under the new mode, even mid-turn); the `--mode` flag is a launch argument, so a child that was
+	 * started in another mode is not kept to argue about it.
 	 */
 	setMode(modeId: string): void {
 		try {

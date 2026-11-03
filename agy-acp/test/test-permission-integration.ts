@@ -344,7 +344,9 @@ test("a client that never answers is a denial at the deadline", async () => {
 
 test("plan mode: the denial is local, the client is never asked", async () => {
 	LOGS.length = 0;
-	const h = await startHarness("tool-hook-denied");
+	// ALLOW_RESUME: `set_mode` below marks the child stale (its `--mode` flag cannot come off again), so
+	// the turn under plan runs on a respawned agy resuming this conversation.
+	const h = await startHarness("tool-hook-denied", { FAKE_AGY_ALLOW_RESUME: "1" });
 	try {
 		const sid = await newSession(h);
 		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
@@ -368,7 +370,8 @@ test("plan mode: the denial is local, the client is never asked", async () => {
 
 test("accept-edits: in-workspace writes and edits are auto-allowed; commands, outside reads, and web still ask", async () => {
 	LOGS.length = 0;
-	const h = await startHarness("tool-coverage-write-edit-read-search");
+	// ALLOW_RESUME: as above - the mode change costs a respawn, and the turn answers from the new child.
+	const h = await startHarness("tool-coverage-write-edit-read-search", { FAKE_AGY_ALLOW_RESUME: "1" });
 	try {
 		const sid = await newSession(h);
 		await h.request("session/set_mode", { sessionId: sid, modeId: "accept-edits" });

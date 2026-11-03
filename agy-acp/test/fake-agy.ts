@@ -105,10 +105,12 @@ if (process.env.FAKE_AGY_ARGV_LOG) {
 	fs.appendFileSync(process.env.FAKE_AGY_ARGV_LOG, `${JSON.stringify({ argv })}\n`);
 }
 
-// `agy models` (issue #55): the table the server fetches once per process. The real command needs
-// credentials, and without them it prints "Fetching available models..." and exits 1 - reproduce that
-// with FAKE_AGY_MODELS_FAIL=1, because a listing that cannot be had is a path the server supports and
-// must test. FAKE_AGY_MODELS_DELAY_MS makes it slow, which is how its timeout is tested.
+// `agy models` (issue #55): the table the server fetches once per process, replayed from the recording.
+// The real command needs credentials, and without them it prints "Fetching available models..." and
+// exits 1 - reproduce that with FAKE_AGY_MODELS_FAIL=1, because a listing that cannot be had is a path
+// the server supports and must test. FAKE_AGY_MODELS_DELAY_MS makes it slow, which is how its timeout
+// is tested. FAKE_AGY_MODELS_FILE points at another table, for the test that has to prove the selectors
+// carry what the binary listed rather than a list this repo keeps.
 if (argv[0] === "models") {
 	const finish = () => {
 		if (process.env.FAKE_AGY_MODELS_FAIL === "1") {

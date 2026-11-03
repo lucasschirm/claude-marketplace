@@ -328,7 +328,10 @@ export class AgySession {
 		}
 	}
 
-	/** session/set_mode: the bridge policy follows at once, `--mode` rides on the next child. */
+	/**
+	 * session/set_mode: the bridge policy follows at once, and `--mode` needs a child that was started
+	 * with it - the flag cannot come off a running one, so the next prompt respawns.
+	 */
 	setMode(modeId: string): void {
 		this.choice.setMode(modeId);
 	}
