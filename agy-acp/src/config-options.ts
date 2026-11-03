@@ -19,7 +19,7 @@
 
 import type { AcpSessionMode } from "./acp.ts";
 import { AGY_ACP_MODES, type AcpModeInfo } from "./permission.ts";
-import { AGY_DEFAULT_CHOICE, AGY_EFFORTS, effortConflict, modelEffort, type AgyModel } from "./agy/models.ts";
+import { AGY_DEFAULT_CHOICE, AGY_EFFORTS, effortConflict, isEffort, modelEffort, type AgyModel } from "./agy/models.ts";
 
 // ---------------------------------------------------------------- the ACP wire shapes of a selector
 
@@ -110,11 +110,23 @@ export class SessionSelection {
 	 * passed no `--model`: agy 1.4.2 only reports the model it was given one of). */
 	private reported = "";
 
+	/**
+	 * The starting point comes from the operator (AGY_ACP_MODEL / AGY_ACP_EFFORT and their flags), and it
+	 * goes through the same two rules a client's pick does. A typo there would otherwise surface as agy
+	 * refusing to start - on every session/new, with a message about a process the client cannot fix.
+	 * Model *ids* are not checked here: the list is the catalogue's business (agy/models.ts) and the
+	 * session layer has it when it builds the session.
+	 */
 	constructor(state: SelectionState) {
 		this.modelId = state.model ?? AGY_DEFAULT_CHOICE;
 		this.effortId = state.effort ?? AGY_DEFAULT_CHOICE;
 		this.sandbox = state.sandbox;
 		this.allowBypass = state.allowBypass;
+		if (!isEffort(this.effortId)) {
+			throw new Error(`unknown effort: ${this.effortId} (available: ${AGY_DEFAULT_CHOICE}, ${AGY_EFFORTS.join(", ")})`);
+		}
+		const clash = effortConflict(this.modelId, this.effortId);
+		if (clash !== null) throw new Error(`${clash} (the model and effort this server was started with)`);
 	}
 
 	get mode(): string {
@@ -135,10 +147,17 @@ export class SessionSelection {
 		return { currentModeId: this.modeId, availableModes: offeredModes(this.allowBypass) };
 	}
 
-	/** The ids `set_model` accepts: everything agy listed, plus whatever this session is running. */
+	/**
+	 * The ids `set_model` accepts: everything agy listed, plus what this session is actually running.
+	 * The two extras are the ids no listing carried - the model an `init` reported, and a pick accepted
+	 * while the listing was failing - and without them the selector would show a `currentValue` a client
+	 * could not choose, which is the one thing a dropdown cannot recover from.
+	 */
 	knownModels(models: AgyModel[] | null): string[] {
 		const ids = models ? models.map((m) => m.modelId) : [];
-		if (this.reported !== "" && !ids.includes(this.reported)) ids.push(this.reported);
+		for (const own of [this.reported, this.modelId]) {
+			if (own !== "" && own !== AGY_DEFAULT_CHOICE && !ids.includes(own)) ids.push(own);
+		}
 		return ids;
 	}
 
@@ -173,7 +192,7 @@ export class SessionSelection {
 	}
 
 	setEffort(effort: string): void {
-		if (!AGY_EFFORTS.includes(effort) && effort !== AGY_DEFAULT_CHOICE) {
+		if (!isEffort(effort)) {
 			throw new Error(`unknown effort: ${effort} (available: ${AGY_DEFAULT_CHOICE}, ${AGY_EFFORTS.join(", ")})`);
 		}
 		const clash = effortConflict(this.modelId, effort);

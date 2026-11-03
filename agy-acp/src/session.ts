@@ -209,7 +209,11 @@ export class AgySession {
 		// so the conversation survives and with the flags we hold now.
 		const stale = current !== null && this.launchedKey !== this.choice.relaunchKey();
 		if (current && this.live && !this.needsRespawn && !stale) return current;
-		const resume = this.needsRespawn || (stale && this.id !== "");
+		// A session with a conversation id always resumes it, whatever made the child go away - including
+		// a respawn that itself failed. Deriving this from the needsRespawn/stale flags instead loses the
+		// stickiness exactly then: neither flag survives the attempt, so the retry would launch a *new*
+		// conversation while the id, the client and the cumulative counters still describe the old one.
+		const resume = this.id !== "";
 		if (current && !current.exited) {
 			// The child we are replacing is still dying (a cancel escalates asynchronously and the next
 			// prompt can arrive first): awaiting its bounded ladder keeps no child unowned.
@@ -225,9 +229,12 @@ export class AgySession {
 		this.config.log(`session ${this.id}: ${resume ? `respawning agy with --conversation ${this.id}` : "spawning agy"}`);
 		try {
 			const probed = await driver.probe(this.config.probeTimeoutMs);
-			// A resume that starts a fresh conversation would produce negative usage deltas (the driver was
-			// seeded with the last cumulative state). Refuse; needsRespawn survives, so retry on the next prompt.
-			if (resume && probed !== this.id) throw new Error(`agy started a new conversation (${probed}) instead of resuming ${this.id}`);
+			// A child that reports a conversation other than ours would produce negative usage deltas (the
+			// driver is seeded with the last cumulative state) and would silently rebind the session: the id
+			// we handed the client is the conversation we own. Refuse, so the next prompt retries the resume.
+			if (this.id !== "" && probed !== this.id) {
+				throw new Error(`agy started a new conversation (${probed}) instead of resuming ${this.id}`);
+			}
 			this.needsRespawnValue = false;
 			return driver;
 		} catch (err) {

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { JsonRpcConnection } from "./jsonrpc.ts";
+import { assertStartSelection, registerSelectionMethods, sessionParams } from "./selection-methods.ts";
 import { makeModelGate, makeVersionGate, withEnvDefaults, type AgyLaunchOptions } from "./launch.ts";
 import { AgySession } from "./session.ts";
 import { SessionRegistry } from "./session-registry.ts";
@@ -165,6 +166,7 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		// Before the session exists: its session/new result carries the list, and a client must not be
 		// able to pick a model we never advertised. A failure is not fatal - it yields `null`.
 		const modelList = await models.list();
+		assertStartSelection(launch.model, modelList);
 		const session = new AgySession({
 			cwd,
 			...launch,
@@ -205,69 +207,13 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		return result;
 	}
 
-	/** The part every session-scoped method needs: the params object and a session that exists. */
-	function sessionParams(method: string, params: unknown): { session: AgySession; fields: Record<string, unknown> } {
-		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, `${method} params must be an object`);
-		const p = params as Record<string, unknown>;
-		if (typeof p.sessionId !== "string") throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
-		const session = registry.get(p.sessionId);
-		if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
-		return { session, fields: p };
-	}
-
 	function handleSessionPrompt(params: unknown): unknown {
-		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/prompt params must be an object");
-		const p = params as Record<string, unknown>;
-		if (typeof p.sessionId !== "string") throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
-		const session = registry.get(p.sessionId);
-		if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
-		return session.prompt(p.prompt);
+		const { session, fields } = sessionParams("session/prompt", params, registry);
+		return session.prompt(fields.prompt);
 	}
 
-	/** session/set_mode: the permission mode, changed now (the agy flag follows on the next respawn). */
-	connection.registerMethod("session/set_mode", (params) => {
-		const { session, fields } = sessionParams("session/set_mode", params);
-		if (typeof fields.modeId !== "string") throw new RpcError(INVALID_PARAMS, "modeId must be a string");
-		session.setMode(fields.modeId);
-		return {};
-	});
-
-	/**
-	 * session/set_model - agy-acp's own name for it, because ACP v1 has no model method: the canonical
-	 * way is session/set_config_option with the `model` selector. Both are wired to one action, so a
-	 * client that knows the flag and a client that only speaks selectors get the same session.
-	 */
-	connection.registerMethod("session/set_model", async (params) => {
-		const { session, fields } = sessionParams("session/set_model", params);
-		if (typeof fields.modelId !== "string") throw new RpcError(INVALID_PARAMS, "modelId must be a string");
-		await session.setModel(fields.modelId);
-		return {};
-	});
-
-	/**
-	 * session/set_config_option (ACP): `{configId, value}`. The response and the `config_option_update`
-	 * the session emits both carry the whole set, which is what a client refreshes its dropdowns from.
-	 */
-	connection.registerMethod("session/set_config_option", async (params) => {
-		const { session, fields } = sessionParams("session/set_config_option", params);
-		if (typeof fields.configId !== "string") throw new RpcError(INVALID_PARAMS, "configId must be a string");
-		const value = fields.value;
-		if (fields.configId === "model") {
-			if (typeof value !== "string") throw new RpcError(INVALID_PARAMS, "the model option takes a string value");
-			await session.setModel(value);
-		} else if (fields.configId === "effort") {
-			if (typeof value !== "string") throw new RpcError(INVALID_PARAMS, "the effort option takes a string value");
-			session.setEffort(value);
-		} else {
-			// A mode is a selector too, but it has a first-class ACP surface of its own (session/set_mode),
-			// and one source of truth beats two that can drift. Say so rather than pretending to accept it.
-			throw new RpcError(
-				INVALID_PARAMS,
-				`unknown config option: ${fields.configId} (model and effort are settable here; a mode is set with session/set_mode)`,
-			);
-		}
-		return { configOptions: session.configOptions() };
-	});
+	// session/set_mode, session/set_model, session/set_config_option - one subject, one module.
+	registerSelectionMethods(connection, registry);
 
 	return { disposeSessions: () => registry.disposeAll() };
 }

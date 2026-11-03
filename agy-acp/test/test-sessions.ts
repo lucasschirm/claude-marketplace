@@ -310,7 +310,11 @@ test("the version gate checks the binary the sessions will spawn (the launch env
 });
 
 test("session/new fails with -32603 and the stderr tail when agy cannot start", async () => {
-	const h = startHarness(launchOptionsForFixture("bad-model-id"));
+	// FAKE_AGY_MODELS_FAIL is this test's point as much as the fixture is: with no list here, agy's own
+	// startup refusal is the verdict (the recorded stderr names every model it does offer). With a list,
+	// the same id is refused before a child is started - test-config.ts covers that half of the pair.
+	const launch = launchOptionsForFixture("bad-model-id");
+	const h = startHarness({ ...launch, env: { ...launch.env, FAKE_AGY_MODELS_FAIL: "1" } });
 	try {
 		const frame = await newSession(h, process.cwd());
 		assertErrorFrame(frame, -32603, "session/new with a bad model");

@@ -12,7 +12,7 @@ import { INVALID_PARAMS, RpcError } from "./errors.ts";
 import type { AcpSessionUpdate } from "./acp.ts";
 import type { AcpConfigOption, AcpConfigOptionUpdate } from "./config-options.ts";
 import type { ModelCatalog } from "./agy/models.ts";
-import type { SessionSelection } from "./config-options.ts";
+import { AGY_DEFAULT_CHOICE, type SessionSelection } from "./config-options.ts";
 
 export interface SelectionCommandsConfig {
 	/** The session's own selection; this class never replaces it, only changes it. */
@@ -66,11 +66,16 @@ export class SelectionCommands {
 		return this.selection.configOptions(this.catalog?.snapshot() ?? null);
 	}
 
-	/** The `models` block, kept for the clients that read ids without a display name. */
+	/**
+	 * The `models` block, kept for the clients that read ids without a display name. Whatever it names as
+	 * current is one of the values it lists - `default` included, since setting `default` is how a client
+	 * asks for no `--model` flag. A block whose current value is unselectable is a control that cannot be
+	 * redrawn from its own data.
+	 */
 	modelsState(): { currentModelId: string; availableModels: string[] } {
-		const ids = this.selection.knownModels(this.catalog?.snapshot() ?? null);
 		const current = this.selection.model;
-		return { currentModelId: current, availableModels: ids.length > 0 ? ids : current === "default" ? [] : [current] };
+		const ids = this.selection.knownModels(this.catalog?.snapshot() ?? null);
+		return { currentModelId: current, availableModels: ids.includes(current) ? ids : [current, ...ids] };
 	}
 
 	/**
@@ -99,7 +104,10 @@ export class SelectionCommands {
 		try {
 			this.selection.setModel(modelId, known);
 		} catch (err) {
-			throw new RpcError(INVALID_PARAMS, (err as Error).message, { availableModels: this.selection.knownModels(known) });
+			const ids = this.selection.knownModels(known);
+			throw new RpcError(INVALID_PARAMS, (err as Error).message, {
+				availableModels: ids.includes(AGY_DEFAULT_CHOICE) ? ids : [AGY_DEFAULT_CHOICE, ...ids],
+			});
 		}
 		this.emitConfigOptions();
 	}

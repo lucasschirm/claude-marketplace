@@ -40,6 +40,10 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
 	// Pending before the child is chosen: a session/cancel that lands during a multi-second respawn
 	// has a prompt to answer, and an absent `host.pending` below is how this turn learns of it.
 	const promise = new Promise<AcpPromptResult>((resolve, reject) => (host.pending = { resolve, reject, settled: false }));
+	// A rejection that arrives while this function is suspended below (a child that dies mid-respawn
+	// settles the turn from its exit handler) would otherwise sit unhandled until `return promise`, and
+	// Node reports that as an unhandled rejection - correctly, since nothing had been listening yet.
+	promise.catch(() => {});
 	let driver: AgyProcess;
 	try {
 		driver = await host.ensureDriver();

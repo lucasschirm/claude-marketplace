@@ -117,7 +117,15 @@ refuses it before breaking a running turn.
 
 The operator sets the starting point with `--model` / `--effort` / `--sandbox` (or
 `AGY_ACP_MODEL` / `AGY_ACP_EFFORT` / `AGY_ACP_SANDBOX`); the client may then change model and
-effort, never the sandbox, and only the modes that are offered.
+effort, never the sandbox, and only the modes that are offered. A starting point `agy` would refuse
+is refused here instead, with the values it could have been: a typo in the environment is the
+operator's, and every session of that server inheriting a child that will not start is a poor way to
+say so.
+
+Whatever is advertised can be chosen: the `models` block always lists what it names as current, and a
+selector's `currentValue` is always one of its `options` - including `default`, which is how a client
+asks for no flag at all. A control whose current value is not in its own list cannot be redrawn from
+that list, which is the failure this rule exists to prevent.
 
 ## Cancelling a turn, and the process going away
 

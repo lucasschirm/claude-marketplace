@@ -15,8 +15,8 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
-    "biome.suspicious/noExplicitAny": 151,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedFunctionParameters": 1,
@@ -58,7 +58,7 @@
     "agy-acp/src/bridge-hook.ts": 121,
     "agy-acp/src/bridge-server.ts": 295,
     "agy-acp/src/cancel.ts": 94,
-    "agy-acp/src/config-options.ts": 239,
+    "agy-acp/src/config-options.ts": 258,
     "agy-acp/src/config.ts": 90,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/flush-stdout.ts": 39,
@@ -73,14 +73,15 @@
     "agy-acp/src/permission-gate.ts": 285,
     "agy-acp/src/permission.ts": 278,
     "agy-acp/src/prompt.ts": 53,
-    "agy-acp/src/server.ts": 274,
+    "agy-acp/src/selection-methods.ts": 100,
+    "agy-acp/src/server.ts": 220,
     "agy-acp/src/session-registry.ts": 79,
-    "agy-acp/src/session-selection.ts": 123,
-    "agy-acp/src/session.ts": 339,
+    "agy-acp/src/session-selection.ts": 131,
+    "agy-acp/src/session.ts": 346,
     "agy-acp/src/shutdown.ts": 114,
     "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 84,
-    "agy-acp/src/turn.ts": 129,
+    "agy-acp/src/turn.ts": 133,
     "agy-acp/src/update-map.ts": 152
   },
   "notes": [
@@ -307,8 +308,18 @@
         "agy-acp/src/session.ts: 339 lines > baseline 300 (files may only shrink)",
         "agy-acp/src/spawn-agy.ts: 60 lines > baseline 51 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "Devin's review of #55: the operator's selection is validated, an advertised current value is always selectable, and a respawn keeps its conversation, so the selection modules grew by those checks",
+      "changes": [
+        "agy-acp/src/config-options.ts: 258 lines > baseline 239 (files may only shrink)",
+        "agy-acp/src/session-selection.ts: 131 lines > baseline 123 (files may only shrink)",
+        "agy-acp/src/session.ts: 346 lines > baseline 339 (files may only shrink)",
+        "agy-acp/src/turn.ts: 133 lines > baseline 129 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "d53ae69",
+  "generatedFrom": "0e570b7",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

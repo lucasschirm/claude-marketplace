@@ -21,7 +21,9 @@ import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { agyArgs } from "../src/agy/args.ts";
 import { lifecycleConfigFromEnv } from "../src/config.ts";
-import { AGY_EFFORTS, effortConflict, modelEffort, parseModelsTable } from "../src/agy/models.ts";
+import { parseLaunchArgs } from "../src/launch.ts";
+import { SelectionCommands } from "../src/session-selection.ts";
+import { AGY_EFFORTS, effortConflict, modelEffort, parseModelsTable, type AgyModel } from "../src/agy/models.ts";
 import { agyModeFlag, offeredModes, SessionSelection } from "../src/config-options.ts";
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
@@ -165,6 +167,65 @@ test("the selectors agy-acp advertises are ACP-shaped", () => {
 		oddModel.options.some((o) => o.value === "my-custom-model"),
 		"advertising a model the client cannot pick is a trap",
 	);
+});
+
+test("parseLaunchArgs reads the selection flags and refuses what it cannot honour", () => {
+	assert.deepStrictEqual(parseLaunchArgs([]), {});
+	assert.deepStrictEqual(parseLaunchArgs(["--help", "--version"]), {}, "the info flags are main's business, not a refusal here");
+	assert.deepStrictEqual(parseLaunchArgs(["--model", "claude-opus-5-5-high", "--effort", "low"]), {
+		model: "claude-opus-5-5-high",
+		effort: "low",
+	});
+	assert.deepStrictEqual(
+		parseLaunchArgs(["--model=claude-opus-5-5-high"]),
+		{ model: "claude-opus-5-5-high" },
+		"--flag=value is the same shape",
+	);
+	assert.deepStrictEqual(parseLaunchArgs(["--sandbox", "--allow-bypass"]), { sandbox: true, allowBypass: true });
+	assert.strictEqual(parseLaunchArgs(["--model"]), undefined, "a flag with no value is not a selection");
+	assert.strictEqual(parseLaunchArgs(["--model", "--sandbox"]), undefined, "the next flag is not a value");
+	assert.strictEqual(parseLaunchArgs(["--sandbox=1"]), undefined, "a switch written with a value leaves a token nobody asked for");
+	assert.strictEqual(parseLaunchArgs(["--frobnicate"]), undefined, "an unknown argument still gets the usage text");
+});
+
+test("the operator's own selection is held to the rules a client's pick goes through", () => {
+	// AGY_ACP_EFFORT=turbo used to reach `agy` and fail there, so the mistake surfaced as every
+	// session/new being unable to start, with a message about a process the client cannot fix.
+	assert.throws(
+		() => new SessionSelection({ effort: "turbo", sandbox: false, allowBypass: false }),
+		/unknown effort: turbo \(available: default, low, medium, high, xhigh, max\)/,
+	);
+	assert.throws(
+		() => new SessionSelection({ model: "gemini-3.8-flash-low", effort: "high", sandbox: false, allowBypass: false }),
+		/carries low effort.*server was started with/,
+	);
+	const fine = new SessionSelection({ model: "gemini-3.8-flash-low", effort: "low", sandbox: false, allowBypass: false });
+	assert.strictEqual(fine.effort, "low", "the pair agy accepts is accepted here");
+	assert.strictEqual(new SessionSelection({ model: "default", effort: "max", sandbox: false, allowBypass: false }).model, "default");
+});
+
+test("what a selection advertises as current is always one of what it advertises", () => {
+	const listed = parseModelsTable(fs.readFileSync(MODELS_TSV, "utf8"));
+	const cases: Array<[ConstructorParameters<typeof SessionSelection>[0], AgyModel[] | null]> = [
+		[{ sandbox: false, allowBypass: false }, listed], // no --model, nothing reported yet: `default` is the value
+		[{ sandbox: false, allowBypass: false }, null], // and with no list at all
+		[{ model: "gemini-weird-unlisted", sandbox: false, allowBypass: false }, null], // accepted while the list was failing
+	];
+	for (const [state, known] of cases) {
+		const selection = new SessionSelection(state);
+		const commands = new SelectionCommands({ selection, emit: () => {}, onModeChange: () => {} });
+		const block = commands.modelsState();
+		assert.ok(
+			block.availableModels.includes(block.currentModelId),
+			`${state.model ?? "unset"}/${known === null ? "nolist" : "list"}: ${JSON.stringify(block)}`,
+		);
+		for (const option of selection.configOptions(known)) {
+			assert.ok(
+				option.options.some((o) => o.value === option.currentValue),
+				`${option.id}: currentValue ${option.currentValue} is not among its options`,
+			);
+		}
+	}
 });
 
 // ---------------------------------------------------------------- over the wire, with the fake
@@ -529,9 +590,64 @@ test("session/set_model and the model selector are the same action, and both nee
 		assert.strictEqual(wrongType.error?.code, -32602, "a selector takes a string");
 		const ok = await h.request("session/set_model", { sessionId: sid, modelId: "default" });
 		assert.strictEqual(ok.error, undefined, "the sentinel is a valid choice");
+		const answered = (ok.result as { configOptions?: Array<{ id: string; options: Array<{ value: string }> }> }).configOptions;
+		assert.ok(
+			answered?.some((o) => o.id === "model" && o.options.some((c) => c.value === "default")),
+			"and it answers as the selector route does",
+		);
 		const pushed = h.updates().filter((u) => u.sessionUpdate === "config_option_update");
 		assert.ok(pushed.length > 0, "and it is announced, so a second client of the session agrees");
 	} finally {
 		h.close();
+	}
+});
+
+test("a model change whose respawn fails keeps the conversation it owes the client", async () => {
+	const { file, cleanup } = argvLog();
+	// No FAKE_AGY_ALLOW_RESUME: the fake treats --conversation as drift and dies, which is how to make
+	// the respawn itself fail. The point is the retry. If it launches without --conversation it starts
+	// a NEW conversation, and a session that does that quietly is worse than one that fails: the id the
+	// client holds, the bridge's conversation field and the cumulative usage counters all still describe
+	// the old one, so the next turns report deltas that go backwards.
+	const h = startHarness(
+		"simple-multiturn-textblocks",
+		{ FAKE_AGY_ARGV_LOG: file, FAKE_AGY_MODEL_ALLOW: "gemini-3.8-flash-low,gemini-3.8-flash-high" },
+		{},
+	);
+	const prompts = recordedPrompts("simple-multiturn-textblocks");
+	try {
+		const sid = await newSession(h);
+		const first = await h.request("session/prompt", promptParams(sid, prompts[0]));
+		assert.strictEqual((first.result as { stopReason?: string })?.stopReason, "end_turn", "the first turn ran on the first child");
+		await h.request("session/set_model", { sessionId: sid, modelId: "gemini-3.8-flash-high" });
+		const failed = await h.request("session/prompt", promptParams(sid, prompts[0]));
+		assert.ok(failed.error, `the respawn was meant to fail, got ${JSON.stringify(failed.result)}`);
+		const retry = await h.request("session/prompt", promptParams(sid, prompts[0]));
+		assert.ok(retry.error, "and the retry fails too, rather than carrying on on a conversation nobody was told about");
+		const launches = recordedLaunches(file).filter((argv) => argv[0] !== "models");
+		assert.strictEqual(launches.length, 3, `the first launch plus two resume attempts: ${JSON.stringify(launches)}`);
+		for (const argv of launches.slice(1)) {
+			assert.ok(argv.includes("--conversation"), `every launch after the first resumes the conversation: ${JSON.stringify(argv)}`);
+			assert.strictEqual(argv[argv.indexOf("--conversation") + 1], sid, "the id the client was given, not a fresh one");
+		}
+	} finally {
+		h.close();
+		cleanup();
+	}
+});
+
+test("a model the operator configured agy does not offer is named, and costs no child", async () => {
+	const { file, cleanup } = argvLog();
+	const h = startHarness("simple-multiturn-textblocks", { FAKE_AGY_ARGV_LOG: file }, { model: "gemini-nonexistent-xyz" });
+	try {
+		const frame = await h.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		assert.ok(frame.error, `AGY_ACP_MODEL=typo must be reported, not spawned into: ${JSON.stringify(frame.result)}`);
+		assert.match(frame.error?.message ?? "", /not one agy offers: gemini-nonexistent-xyz/);
+		assert.match(frame.error?.message ?? "", /AGY_ACP_MODEL or --model/, "and named where it was set");
+		assert.match(frame.error?.message ?? "", /gpt-oss-120b-medium/, "with the list of what it could have been");
+		assert.strictEqual(recordedLaunches(file).filter((argv) => argv[0] !== "models").length, 0, "the refusal asked nothing of agy");
+	} finally {
+		h.close();
+		cleanup();
 	}
 });
