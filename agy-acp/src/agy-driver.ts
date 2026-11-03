@@ -34,4 +34,6 @@ export {
 	TESTED_AGY_VERSIONS,
 	type AgyVersionStatus,
 } from "./agy/version.ts";
+// The model list is not re-exported here: `agy-driver.ts` is the surface the session layer speaks, and
+// the model catalogue belongs to the server, which imports src/agy/models.ts directly.
 export { spawnProcessGroup, type ProcessGroupSpawnOptions } from "./lib/child-process.ts";

@@ -228,9 +228,32 @@ test("session/new probes agy and returns the id, the stubs, and the mcpServers r
 		const modes = result.modes as Record<string, unknown>;
 		assert.strictEqual(modes.currentModeId, "default");
 		assert.ok(Array.isArray(modes.availableModes) && (modes.availableModes as unknown[]).length >= 1);
-		const models = result.models as Record<string, unknown>;
+		const models = result.models as { currentModelId: string; availableModels: string[] };
 		assert.strictEqual(models.currentModelId, "gemini-3.8-flash-low", "the model agy's init reported");
-		assert.deepStrictEqual(models.availableModels, ["gemini-3.8-flash-low"]);
+		// The list is `agy models`, not just the running model: a client picks from what agy has, and
+		// the display names ride on the `model` selector (ACP has no name field in the models block).
+		assert.ok(models.availableModels.includes("gemini-3.8-flash-low"), "the running model is in its own list");
+		assert.ok(models.availableModels.includes("claude-opus-5-5-high"), "every id agy listed is advertised");
+		const options = result.configOptions as Array<Record<string, unknown>>;
+		const modelOption = options.find((o) => o.id === "model") as {
+			category: string;
+			currentValue: string;
+			options: Array<{ value: string; name: string }>;
+		};
+		assert.strictEqual(modelOption.category, "model");
+		assert.strictEqual(modelOption.currentValue, "gemini-3.8-flash-low");
+		assert.strictEqual(
+			modelOption.options.find((o) => o.value === "gemini-3.8-flash-low")?.name,
+			"Gemini 3.8 Flash (Low)",
+			"agy's own display name, from the recorded listing",
+		);
+		const effortOption = options.find((o) => o.id === "effort") as { category: string; options: Array<{ value: string }> };
+		assert.strictEqual(effortOption.category, "thought_level", "agy's --effort, advertised the ACP way");
+		assert.deepStrictEqual(
+			effortOption.options.map((o) => o.value),
+			["default", "low", "medium", "high", "xhigh", "max"],
+			"agy --help's five levels plus the sentinel that passes no flag",
+		);
 		const meta = result._meta as Record<string, unknown>;
 		const reported = meta.mcpServers as Record<string, unknown>;
 		assert.strictEqual(reported.supported, false, "mcpServers are reported as unsupported");
@@ -287,7 +310,11 @@ test("the version gate checks the binary the sessions will spawn (the launch env
 });
 
 test("session/new fails with -32603 and the stderr tail when agy cannot start", async () => {
-	const h = startHarness(launchOptionsForFixture("bad-model-id"));
+	// FAKE_AGY_MODELS_FAIL is this test's point as much as the fixture is: with no list here, agy's own
+	// startup refusal is the verdict (the recorded stderr names every model it does offer). With a list,
+	// the same id is refused before a child is started - test-config.ts covers that half of the pair.
+	const launch = launchOptionsForFixture("bad-model-id");
+	const h = startHarness({ ...launch, env: { ...launch.env, FAKE_AGY_MODELS_FAIL: "1" } });
 	try {
 		const frame = await newSession(h, process.cwd());
 		assertErrorFrame(frame, -32603, "session/new with a bad model");

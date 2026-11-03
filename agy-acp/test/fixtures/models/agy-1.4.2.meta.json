@@ -1,0 +1,9 @@
+{
+	"command": "agy models",
+	"agyVersion": "1.4.2",
+	"capturedOn": "2026-08-01",
+	"note": "Recorded from a signed-in agy 1.4.2: 'agy models' prints 'id<TAB>Display Name' lines with no header, in agy's own order. The same ids and names appear in the stderr of a run started with a bad --model (see fixtures/stream/bad-model-id.meta.json), which is how the list is cross-checked. A signed-out agy prints 'Fetching available models...' then 'Error: Please sign in to view available models.' and exits 1 - that is the failure path, reproduced with FAKE_AGY_MODELS_FAIL=1.",
+	"stderr": "Fetching available models...\n",
+	"exitCode": "0",
+	"models": 13
+}

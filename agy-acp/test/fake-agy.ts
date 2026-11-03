@@ -24,6 +24,13 @@
 // `--version` prints the fixture's agy version (FAKE_AGY_VERSION overrides it, for the
 // untested/strict version-gate tests).
 //
+// Issue #55 (mode, model and effort) adds three things: `argv[0] === "models"` replays the recorded
+// `agy models` table (or, with FAKE_AGY_MODELS_FAIL=1, the unauthenticated failure the real CLI
+// produces); FAKE_AGY_ARGV_LOG records every launch's argv so a test can prove a selection reached
+// the *next* process; and `--mode` / `--effort` / `--sandbox` are tolerated as driver additions only on
+// a launch whose test set FAKE_AGY_ALLOW_SELECTION=1, with their values still validated against what agy
+// 1.4.2 documents - a nonsense effort is a bug, not a passthrough.
+//
 // Issue #54 (the process lifecycle) adds four knobs, all off by default so the replay suites
 // above are untouched:
 //   FAKE_AGY_IGNORE_SIGNALS    ignore SIGINT/SIGTERM/SIGHUP: the agy that has to be escalated
@@ -40,6 +47,15 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const STREAM_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "stream");
+const MODELS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "models");
+
+// Declared up here because checkArgs() runs at module scope, below: these are the flag vocabulary agy
+// 1.4.2 documents, and a const in scope only after its line would be a TDZ error at that call.
+/** The flags that take a value, so the parser does not read a value as a flag. */
+const VALUE_FLAGS = ["--input-format", "--output-format", "--model", "--effort", "--mode", "--conversation", "--add-dir", "--log-file"];
+/** The values agy's own help lists for --effort and --mode; a value off these is agy-acp's bug. */
+const EFFORT_VALUES = ["low", "medium", "high", "xhigh", "max"];
+const MODE_VALUES = ["accept-edits", "auto", "plan"];
 const HOOK_PAYLOADS = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "hooks", "hook-stdin-payloads.jsonl");
 
 interface FakeMeta {
@@ -54,6 +70,18 @@ const argv = process.argv.slice(2);
 // The resume flag as the driver passed it, checked against the fixture's conversation id below.
 let resumeFlag: string | null = null;
 const allowResume = process.env.FAKE_AGY_ALLOW_RESUME === "1";
+
+// FAKE_AGY_MODEL_ALLOW=<id,id,...> is how a model-selection test says "the driver may pass a --model
+// other than the recorded one". Without it the recorded value is compared exactly (a driver that
+// invented or dropped a model is drift); with it, the value must be one of the ids listed - and the
+// test asserts the exact argv through FAKE_AGY_ARGV_LOG below.
+const modelAllow = (process.env.FAKE_AGY_MODEL_ALLOW ?? "").split(",").filter((s) => s !== "");
+
+// FAKE_AGY_ALLOW_SELECTION=1 says "this test drives a mode, an effort or the sandbox onto the child".
+// Every recording predates issue #55, so the selection flags are additions by design - but they are
+// additions the test has to claim, the way a respawn claims --conversation and a picked model claims
+// --model. Without that, a driver inventing `--effort max` on every launch would replay green.
+const allowSelection = process.env.FAKE_AGY_ALLOW_SELECTION === "1";
 
 function die(message: string, code: number): never {
 	process.stderr.write(`${message}\n`);
@@ -74,6 +102,36 @@ if (argv[0] === "--version") {
 	const version = process.env.FAKE_AGY_VERSION ?? fixture?.agyVersion ?? "1.4.2";
 	process.stdout.write(`${version}\n`);
 	process.exit(0);
+}
+
+// FAKE_AGY_ARGV_LOG: one JSON line per process launch. A respawn is a new process, so a test reads
+// the lines back and sees exactly what each launch was asked for - the only way to tell "the model
+// change applied to the next turn" from "the model change applied to nothing".
+if (process.env.FAKE_AGY_ARGV_LOG) {
+	fs.appendFileSync(process.env.FAKE_AGY_ARGV_LOG, `${JSON.stringify({ argv })}\n`);
+}
+
+// `agy models` (issue #55): the table the server fetches once per process, replayed from the recording.
+// The real command needs credentials, and without them it prints "Fetching available models..." and
+// exits 1 - reproduce that with FAKE_AGY_MODELS_FAIL=1, because a listing that cannot be had is a path
+// the server supports and must test. FAKE_AGY_MODELS_DELAY_MS makes it slow, which is how its timeout
+// is tested. FAKE_AGY_MODELS_FILE points at another table, for the test that has to prove the selectors
+// carry what the binary listed rather than a list this repo keeps.
+if (argv[0] === "models") {
+	const finish = () => {
+		if (process.env.FAKE_AGY_MODELS_FAIL === "1") {
+			process.stderr.write("Fetching available models...\nError: Please sign in to view available models.\n");
+			process.exit(1);
+		}
+		const file = process.env.FAKE_AGY_MODELS_FILE ?? path.join(MODELS_DIR, "agy-1.4.2.tsv");
+		process.stdout.write(fs.readFileSync(file, "utf8"));
+		process.exit(0);
+	};
+	const delayMs = Number(process.env.FAKE_AGY_MODELS_DELAY_MS ?? 0);
+	// Top-level await, so a slow listing cannot fall through into the session checks below: a listing
+	// is not a session and has no -p=, no bridge and no fixture turn to validate.
+	if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+	finish();
 }
 
 const name = process.env.FAKE_AGY_FIXTURE;
@@ -573,7 +631,7 @@ function parseArgv(tokens: string[]): FlagSet {
 			const eq = t.indexOf("=");
 			const key = eq >= 0 ? t.slice(0, eq) : t;
 			if (eq >= 0) out.values.set(key, [...(out.values.get(key) ?? []), t.slice(eq + 1)]);
-			else if (["--input-format", "--output-format", "--model", "--effort", "--conversation", "--add-dir", "--log-file"].includes(key)) {
+			else if (VALUE_FLAGS.includes(key)) {
 				i++;
 				out.values.set(key, [...(out.values.get(key) ?? []), tokens[i]]);
 			} else out.flags.add(key);
@@ -582,17 +640,39 @@ function parseArgv(tokens: string[]): FlagSet {
 	return out;
 }
 
+/**
+ * A flag the driver may add to a recorded invocation, and the condition that earns it - one line per
+ * addition, because "which of these is unconditional?" is the question a reader (and the next driver
+ * change) has to be able to answer:
+ *   --log-file / --add-dir                      agy's own log target, and the bridge dir (checked real)
+ *   --dangerously-skip-permissions              only alongside a bridge dir, which is who sets it
+ *   --mode / --effort / --sandbox               the selection (issue #55), on a launch whose test claimed
+ *                                               it with FAKE_AGY_ALLOW_SELECTION - see the note there
+ *   --conversation                              a respawn, when the fixture allows one
+ *   --model                                     only what FAKE_AGY_MODEL_ALLOW lists
+ * Nothing a recording never saw arrives silently, a valid-but-unclaimed selection flag included: a
+ * value agy would accept is not a flag this launch was expected to carry, and "every fixture replayed
+ * happily" is how an invented flag would first be noticed in production.
+ */
+function toleratedAddition(name: string): boolean {
+	if (name === "--log-file" || name === "--add-dir") return true; // agy's own log target, and the bridge dir
+	if (name === "--mode" || name === "--effort" || name === "--sandbox") return allowSelection;
+	if (name === "--conversation") return allowResume;
+	if (name === "--model") return modelAllow.length > 0;
+	if (name === "-p=") return true; // headless: the driver always passes it
+	if (name === "--dangerously-skip-permissions") return bridgeDir !== null; // only ever the bridge's doing
+	return false;
+}
+
+/** The complaint, naming the knob when the flag is a selection the test forgot to claim. */
+function unexplained(name: string): string {
+	const selection = name === "--mode" || name === "--effort" || name === "--sandbox";
+	return `unexpected flag ${name}${selection ? " (a selection this launch was not expected to make - FAKE_AGY_ALLOW_SELECTION=1 if it is)" : ""}`;
+}
+
 function assertNoDrift(got: FlagSet, want: FlagSet): void {
-	// Both directions: a recorded flag that the driver dropped, and a driver-side addition the
-	// record never saw, both drift - except the permission bridge's documented additions (its
-	// --add-dir and the forced --dangerously-skip-permissions), tolerated only when the extra
-	// add-dir really is a bridge dir (it carries .agents/hooks.json).
-	for (const key of got.values.keys())
-		if (!want.values.has(key) && key !== "--log-file" && key !== "--add-dir" && !(key === "--conversation" && allowResume))
-			die(`fake-agy: unexpected flag ${key}`, 2);
-	for (const flag of got.flags)
-		if (flag !== "-p=" && !want.flags.has(flag) && !(flag === "--dangerously-skip-permissions" && bridgeDir !== null))
-			die(`fake-agy: unexpected flag ${flag}`, 2);
+	for (const key of got.values.keys()) if (!want.values.has(key) && !toleratedAddition(key)) die(`fake-agy: ${unexplained(key)}`, 2);
+	for (const flag of got.flags) if (!want.flags.has(flag) && !toleratedAddition(flag)) die(`fake-agy: ${unexplained(flag)}`, 2);
 }
 
 function checkArgs(): void {
@@ -605,6 +685,15 @@ function checkArgs(): void {
 		if (values.length !== 1 || values[0] !== value) die(`fake-agy: expected ${flag} ${value}, got: ${JSON.stringify(values)}`, 2);
 	}
 	if (!got.flags.has("-p=")) die("fake-agy: expected -p= (headless mode)", 2);
+	// The selection flags are agy's own, so their values have a documented domain: an effort agy would
+	// never accept means agy-acp built the argv wrong, and that is caught here rather than at a spawn.
+	for (const value of got.values.get("--effort") ?? [])
+		if (!EFFORT_VALUES.includes(value)) die(`fake-agy: --effort ${JSON.stringify(value)} is not one of ${EFFORT_VALUES.join(", ")}`, 2);
+	for (const value of got.values.get("--mode") ?? [])
+		if (!MODE_VALUES.includes(value)) die(`fake-agy: --mode ${JSON.stringify(value)} is not one of ${MODE_VALUES.join(", ")}`, 2);
+	for (const value of got.values.get("--model") ?? [])
+		if (modelAllow.length > 0 && !modelAllow.includes(value))
+			die(`fake-agy: --model ${JSON.stringify(value)} is not in FAKE_AGY_MODEL_ALLOW`, 2);
 	if (meta.args) checkRecordedArgs(got);
 }
 
@@ -626,7 +715,9 @@ function checkRecordedArgs(got: FlagSet): void {
 	// A respawn carries the conversation it resumes; the id itself is checked once the fixture's is known.
 	if (allowResume) resumeFlag = got.values.get("--conversation")?.[0] ?? null;
 	for (const [key, values] of want.values) {
-		if (key === "--log-file" || key === "--add-dir") continue; // --log-file is not passed; --add-dir handled above
+		// --log-file is not passed; --add-dir is handled above; --model is handled by FAKE_AGY_MODEL_ALLOW
+		// (a model-selection test changes it deliberately and asserts the argv through the argv log).
+		if (key === "--log-file" || key === "--add-dir" || (key === "--model" && modelAllow.length > 0)) continue;
 		const gotValues = got.values.get(key) ?? [];
 		if (JSON.stringify(values) !== JSON.stringify(gotValues))
 			die(`fake-agy: ${key} mismatch: expected ${JSON.stringify(values)}, got ${JSON.stringify(gotValues)}`, 2);

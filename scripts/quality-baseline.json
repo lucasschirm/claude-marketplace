@@ -16,8 +16,8 @@
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
     "biome.suspicious/noExplicitAny": 151,
-    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedFunctionParameters": 1,
     "biome.correctness/noUnusedImports": 1
@@ -46,37 +46,42 @@
     "extensions/orca-orchestration.ts": 1734,
     "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 627,
-    "agy-acp/src/acp.ts": 192,
-    "agy-acp/src/agy-driver.ts": 38,
-    "agy-acp/src/agy/args.ts": 51,
+    "agy-acp/src/acp.ts": 198,
+    "agy-acp/src/agy-driver.ts": 40,
+    "agy-acp/src/agy/args.ts": 64,
     "agy-acp/src/agy/contract.ts": 289,
     "agy-acp/src/agy/events.ts": 31,
+    "agy-acp/src/agy/models.ts": 173,
     "agy-acp/src/agy/process.ts": 298,
     "agy-acp/src/agy/version.ts": 91,
     "agy-acp/src/bridge-cleanup.ts": 50,
     "agy-acp/src/bridge-hook.ts": 121,
     "agy-acp/src/bridge-server.ts": 295,
     "agy-acp/src/cancel.ts": 94,
-    "agy-acp/src/config.ts": 52,
+    "agy-acp/src/config-options.ts": 266,
+    "agy-acp/src/config.ts": 100,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/flush-stdout.ts": 39,
     "agy-acp/src/framing.ts": 81,
     "agy-acp/src/heartbeat.ts": 70,
     "agy-acp/src/jsonrpc.ts": 296,
+    "agy-acp/src/launch.ts": 142,
     "agy-acp/src/lib/child-process.ts": 40,
-    "agy-acp/src/main.ts": 102,
+    "agy-acp/src/main.ts": 115,
     "agy-acp/src/map-steps.ts": 77,
     "agy-acp/src/pending-asks.ts": 105,
     "agy-acp/src/permission-gate.ts": 285,
     "agy-acp/src/permission.ts": 278,
     "agy-acp/src/prompt.ts": 53,
-    "agy-acp/src/server.ts": 271,
-    "agy-acp/src/session-registry.ts": 65,
-    "agy-acp/src/session.ts": 300,
+    "agy-acp/src/selection-methods.ts": 100,
+    "agy-acp/src/server.ts": 224,
+    "agy-acp/src/session-registry.ts": 79,
+    "agy-acp/src/session-selection.ts": 131,
+    "agy-acp/src/session.ts": 349,
     "agy-acp/src/shutdown.ts": 114,
-    "agy-acp/src/spawn-agy.ts": 51,
+    "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 84,
-    "agy-acp/src/turn.ts": 129,
+    "agy-acp/src/turn.ts": 133,
     "agy-acp/src/update-map.ts": 152
   },
   "notes": [
@@ -288,8 +293,53 @@
       "changes": [
         "extensions/lib/gh-health.ts: 323 lines > baseline 308 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "issue #55 adds mode, model and effort selection, so the files that launch agy and hold session state grew by the flags, selectors and setters that capability is made of",
+      "changes": [
+        "agy-acp/src/acp.ts: 198 lines > baseline 192 (files may only shrink)",
+        "agy-acp/src/agy-driver.ts: 40 lines > baseline 38 (files may only shrink)",
+        "agy-acp/src/agy/args.ts: 64 lines > baseline 51 (files may only shrink)",
+        "agy-acp/src/config.ts: 90 lines > baseline 52 (files may only shrink)",
+        "agy-acp/src/main.ts: 115 lines > baseline 102 (files may only shrink)",
+        "agy-acp/src/server.ts: 274 lines > baseline 271 (files may only shrink)",
+        "agy-acp/src/session-registry.ts: 79 lines > baseline 65 (files may only shrink)",
+        "agy-acp/src/session.ts: 339 lines > baseline 300 (files may only shrink)",
+        "agy-acp/src/spawn-agy.ts: 60 lines > baseline 51 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "Devin's review of #55: the operator's selection is validated, an advertised current value is always selectable, and a respawn keeps its conversation, so the selection modules grew by those checks",
+      "changes": [
+        "agy-acp/src/config-options.ts: 258 lines > baseline 239 (files may only shrink)",
+        "agy-acp/src/session-selection.ts: 131 lines > baseline 123 (files may only shrink)",
+        "agy-acp/src/session.ts: 346 lines > baseline 339 (files may only shrink)",
+        "agy-acp/src/turn.ts: 133 lines > baseline 129 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "Devin's second review of #55: a mode change now takes its flag off the child, and a launch or a listing budget that cannot work falls back rather than failing silently",
+      "changes": [
+        "agy-acp/src/agy/models.ts: 164 lines > baseline 163 (files may only shrink)",
+        "agy-acp/src/config-options.ts: 262 lines > baseline 258 (files may only shrink)",
+        "agy-acp/src/config.ts: 100 lines > baseline 90 (files may only shrink)",
+        "agy-acp/src/launch.ts: 142 lines > baseline 134 (files may only shrink)",
+        "agy-acp/src/session.ts: 349 lines > baseline 346 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "Devin's third review of #55: a failed model listing now carries its reason, an operator effort error names its knob, and the fake only tolerates selection flags a test claims",
+      "changes": [
+        "agy-acp/src/agy/models.ts: 173 lines > baseline 164 (files may only shrink)",
+        "agy-acp/src/config-options.ts: 266 lines > baseline 262 (files may only shrink)",
+        "agy-acp/src/server.ts: 224 lines > baseline 220 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "034d6bd",
+  "generatedFrom": "15c22be",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

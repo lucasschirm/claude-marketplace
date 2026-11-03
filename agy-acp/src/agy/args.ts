@@ -17,8 +17,17 @@ export interface AgyProcessOptions {
 	command?: string;
 	/** argv prefix in place of the `agy` command (tests point this at the fake). */
 	argvPrefix?: string[];
+	/** `--model`: a model id from `agy models` (issue #55). Unset = agy picks its own. */
 	model?: string;
+	/** `--effort`: one of AGY_EFFORTS. Unset = the model's own default. */
 	effort?: string;
+	/**
+	 * `--mode`: the agy execution mode matching the session's permission mode (see
+	 * `agyModeFlag` in config-options.ts). A hint, not a gate - the bridge decides permissions.
+	 */
+	mode?: string;
+	/** `--sandbox`: agy's own terminal restrictions, defence in depth below the bridge (issue #55). */
+	sandbox?: boolean;
 	/** Resume this conversation in the new process (`--conversation`). */
 	conversation?: string;
 	addDirs?: string[];
@@ -39,10 +48,14 @@ export interface AgyProcessOptions {
 }
 
 /** The flag vector the driver builds; exposed so tests and the fake can compare against it. */
-export function agyArgs(options: Pick<AgyProcessOptions, "model" | "effort" | "conversation" | "addDirs" | "skipPermissions">): string[] {
+export function agyArgs(
+	options: Pick<AgyProcessOptions, "model" | "effort" | "mode" | "sandbox" | "conversation" | "addDirs" | "skipPermissions">,
+): string[] {
 	const args = ["--input-format", "stream-json", "--output-format", "stream-json", "-p="];
 	if (options.model) args.push("--model", options.model);
 	if (options.effort) args.push("--effort", options.effort);
+	if (options.mode) args.push("--mode", options.mode);
+	if (options.sandbox) args.push("--sandbox");
 	if (options.conversation) args.push("--conversation", options.conversation);
 	for (const dir of options.addDirs ?? []) args.push("--add-dir", dir);
 	if (options.skipPermissions) args.push("--dangerously-skip-permissions");

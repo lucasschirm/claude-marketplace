@@ -10,6 +10,7 @@
 
 import { AgyProcess, type AgyCumulative } from "./agy-driver.ts";
 import type { SessionLaunchConfig } from "./session.ts";
+import type { LaunchFlags } from "./config-options.ts";
 
 export interface SessionSpawnOptions {
 	config: SessionLaunchConfig;
@@ -22,6 +23,12 @@ export interface SessionSpawnOptions {
 	conversationId: string;
 	/** The cumulative counters the previous process of this conversation left, so usage deltas continue. */
 	previous: AgyCumulative;
+	/**
+	 * The selection the child is launched with (issue #55): mode, model, effort, sandbox. They come
+	 * from the session rather than the launch options because a client can change them - and the
+	 * session is what decides when a change is worth a respawn.
+	 */
+	flags: LaunchFlags;
 }
 
 export function spawnSessionAgy(options: SessionSpawnOptions): AgyProcess {
@@ -36,8 +43,10 @@ export function spawnSessionAgy(options: SessionSpawnOptions): AgyProcess {
 		},
 		command: a.command,
 		argvPrefix: a.argvPrefix,
-		model: a.model,
-		effort: a.effort,
+		model: options.flags.model,
+		effort: options.flags.effort,
+		mode: options.flags.mode,
+		sandbox: options.flags.sandbox,
 		addDirs: [...(a.addDirs ?? []), options.bridge.dir],
 		skipPermissions: true,
 		conversation: options.resume ? options.conversationId : undefined,

@@ -24,16 +24,30 @@ export class SessionRegistry {
 	}
 
 	add(sessionId: string, session: AgySession): void {
+		// A slot that is already taken must not simply be overwritten: the session it held owns a child
+		// process, and an unreferenced owner is never disposed - the child keeps the conversation (and a
+		// test process) alive forever. A real agy gives every conversation a fresh id, so this is the
+		// defensive path; a fixture-replaying one reports the same id, so it is also the only path that
+		// gets exercised by a suite that opens two sessions on one scenario.
+		const replaced = this.sessions.get(sessionId);
+		if (replaced !== undefined && replaced !== session) {
+			this.log(`session ${sessionId} registered twice - disposing the session it replaces`);
+			this.track(sessionId, replaced);
+		}
 		if (this.closed) {
 			this.log(`session ${sessionId} started after the connection closed - disposing it`);
-			this.pendingDisposes.push(
-				session.dispose().catch((err: Error) => {
-					this.log(`session ${sessionId} dispose failed: ${err.message}`);
-				}),
-			);
+			this.track(sessionId, session);
 			return;
 		}
 		this.sessions.set(sessionId, session);
+	}
+
+	private track(sessionId: string, session: AgySession): void {
+		this.pendingDisposes.push(
+			session.dispose().catch((err: Error) => {
+				this.log(`session ${sessionId} dispose failed: ${err.message}`);
+			}),
+		);
 	}
 
 	get(sessionId: string): AgySession | undefined {

@@ -14,9 +14,9 @@ The transport, the `initialize` handshake, the **agy process driver** (the `AgyP
 `src/agy/`, driven in tests by the fixture-replaying fake `agy` under `test/`) and the
 **session layer** (`src/session.ts` + `src/server.ts`) are implemented. `session/new`
 validates `cwd` (absolute, existing directory) and `mcpServers`, probes agy for the
-`conversation_id`, and returns the live permission `modes` (see below; agy-level model and
-effort selection lands in sub-issue 6); requested `mcpServers` are reported via `_meta`
-rather than silently dropped. `session/prompt`
+`conversation_id`, and returns the live permission `modes` and the `model`/`effort`
+selectors (see "Choosing the model, the effort and the mode" below); requested `mcpServers`
+are reported via `_meta` rather than silently dropped. `session/prompt`
 accepts text, resource-link and embedded-text blocks (flattened to one text, since agy
 headless is text-only), rejects image/audio with `-32602`, and runs one turn at a time
 (`-32002`). The stream maps to `session/update` notifications - `text_delta` becomes
@@ -50,8 +50,11 @@ Stale bridge dirs (a crashed run) are cleaned at startup: a dir is removed when 
 over an hour old **and its socket no longer answers** - a live session's dir is never
 removed, however old it is. A subagent's internal tool call may carry its own conversation
 id; it is served (the per-session token is the boundary) and goes through the same policy
-and client ask. `session/set_mode` (the four mode ids) answers the request and emits a
-`current_mode_update` notification.
+and client ask. `session/set_mode` answers the request and emits a `current_mode_update`
+notification; three of the four mode ids (`default`, `accept-edits`, `plan`) are offered by
+default, and `bypass` - which lets every tool call through this gate - only when the operator
+says so with `--allow-bypass` / `AGY_ACP_ALLOW_BYPASS=1`. A client that asks for a mode that
+is not offered gets `-32602` naming that switch, and no update.
 
 The decision ladder (`src/permission.ts` + `src/permission-gate.ts`), in every mode:
 
@@ -84,6 +87,49 @@ a stream-reported key (agy adds metadata fields such as `toolSummary`, which are
 rewrite), the difference is logged and flagged `_meta.argsRewritten`. Remaining risk:
 our hook may not sort last in the chain, so a repo hook running after ours can still
 rewrite the args we evaluated.
+
+## Choosing the model, the effort and the mode
+
+Three things decide what a turn runs on: the **mode** (what the bridge allows), the **model** and
+the **effort** (`agy --model`, `agy --effort`). ACP has one method for the first
+(`session/set_mode`) and none for the other two, so model and effort are ACP **config options**:
+`session/new` returns them in `configOptions` - a `model` selector in category `model`, an `effort`
+selector in category `thought_level` - each carrying its `currentValue` and its options with agy's
+own display names (`claude-opus-5-5-high` is "Claude Opus 5.5 (High)"), and `agy-acp` also answers
+`session/set_model`, the name clients reach for first. Both names are the same action, and the
+answer is the whole selector list, so a client never has to guess what else moved.
+
+`agy models` is the source of the ids; it runs **once per server process** (`agy models` can take
+seconds and needs credentials) and its answer - success or failure - is cached. When it fails,
+`session/new` says so in `_meta.models` (`{"listed": false, "reason": "...", "note": "..."}`) -
+`reason` is agy's own words, so a client can tell "sign in" from "timed out" instead of guessing from
+the server log - the `model` selector carries only the model the child reported, and an id the bridge
+cannot name is passed to agy, whose startup error becomes the session error. A `-32602` naming every
+available id is refused without touching a running child.
+
+What a choice costs is decided by what it is: **mode** is enforced by the bridge the moment it is set -
+the next permission decision is made under the new mode, even mid-turn - and `session/set_mode` answers
+at once; **every one of the three is also an `agy` startup argument**, so a change marks the child stale
+and the next `session/prompt` starts a new one with `--conversation`, keeping the conversation. Mode is
+in that rule because a flag cannot be taken back: a child launched with `--mode plan` goes on refusing
+to *try* mutations after the session moved back to `default`, and a session that advertises one mode
+while its agy behaves as another is worse than the respawn it costs. A change is per session: a second
+`session/new` starts from the operator's launch, not from whatever a client last picked. `agy` refuses
+an effort that contradicts an effort-qualified model id (it said so on stderr in the spike:
+`--model gemini-3.8-flash-low conflicts with --effort=high`), and `agy-acp` refuses it before breaking a
+running turn.
+
+The operator sets the starting point with `--model` / `--effort` / `--sandbox` (or
+`AGY_ACP_MODEL` / `AGY_ACP_EFFORT` / `AGY_ACP_SANDBOX`); the client may then change model and
+effort, never the sandbox, and only the modes that are offered. A starting point `agy` would refuse
+is refused here instead, with the values it could have been: a typo in the environment is the
+operator's, and every session of that server inheriting a child that will not start is a poor way to
+say so.
+
+Whatever is advertised can be chosen: the `models` block always lists what it names as current, and a
+selector's `currentValue` is always one of its `options` - including `default`, which is how a client
+asks for no flag at all. A control whose current value is not in its own list cannot be redrawn from
+that list, which is the failure this rule exists to prevent.
 
 ## Cancelling a turn, and the process going away
 
@@ -207,7 +253,10 @@ AGY_ACP_LOG=/tmp/agy-acp.log agy-acp   # diagnostics to a file instead of stderr
 The knobs, all with the defaults above and all read from the environment (`agy-acp --help` prints
 them): `AGY_ACP_COMMAND` (the `agy` binary to launch), `AGY_ACP_CANCEL_ESCALATE_MS` (the
 `SIGINT` -> process-group window), `AGY_ACP_HEARTBEAT_MS` (0 disables the beat) and
-`AGY_ACP_SHUTDOWN_TIMEOUT_MS` (the exit deadline).
+`AGY_ACP_SHUTDOWN_TIMEOUT_MS` (the exit deadline). The selection knobs are `AGY_ACP_MODEL`,
+`AGY_ACP_EFFORT`, `AGY_ACP_SANDBOX`, `AGY_ACP_MODELS_TIMEOUT_MS` (how long `agy models` may take
+before the list is written off) and `AGY_ACP_ALLOW_BYPASS`, which exists because bypassing the
+permission gate is the operator's decision: without it the `bypass` mode is not even advertised.
 
 For Zed, an `agent_servers` entry along the lines of:
 

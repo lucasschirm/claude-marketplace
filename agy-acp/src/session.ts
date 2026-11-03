@@ -4,7 +4,10 @@
 // agy with --conversation <id>; a headless auto-deny is an end_turn carrying _meta.deniedActions.
 // Issue #54 is the process lifecycle here: session/cancel (asks denied with the cancel reason, SIGINT,
 // then the group ladder), the lazy respawn of a child that died idle, and the heartbeat.
-import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
+// Issue #55 is the selection (mode / model / effort, in config-options.ts): those are agy *launch*
+// flags, so a change is reported to the client at once and reaches the process on the next turn, when
+// ensureDriver finds a live child launched with different flags than we now believe.
+import { INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { TURN_IN_PROGRESS, type AcpPromptResult, type AcpSessionUpdate } from "./acp.ts";
 import { flattenPrompt } from "./prompt.ts";
 import {
@@ -20,9 +23,12 @@ import { spawnSessionAgy } from "./spawn-agy.ts";
 import { TurnHeartbeat } from "./heartbeat.ts";
 import { cancelAgy, CANCELLED_TOOL_REASON } from "./cancel.ts";
 import { DEFAULT_CANCEL_ESCALATE_MS, DEFAULT_HEARTBEAT_MS } from "./config.ts";
+import { SessionSelection, type AcpConfigOption } from "./config-options.ts";
+import { SelectionCommands } from "./session-selection.ts";
+import type { ModelCatalog } from "./agy/models.ts";
 import { ZERO_CUMULATIVE, type AgyProcess, type AgyCumulative, type AgyDriverEvent, type AgyExitInfo } from "./agy-driver.ts";
 // Type-only (erased at runtime): the launch options are the server's public API.
-import type { AgyLaunchOptions } from "./server.ts";
+import type { AgyLaunchOptions } from "./launch.ts";
 export interface SessionLaunchConfig extends AgyLaunchOptions {
 	cwd: string;
 	log: (line: string) => void;
@@ -30,6 +36,8 @@ export interface SessionLaunchConfig extends AgyLaunchOptions {
 	notify: (sessionId: string, update: AcpSessionUpdate) => void;
 	/** Sends one session/request_permission to the client (the session id is added here). */
 	requestPermission: (params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
+	/** The per-process `agy models` list; without it nothing can check a model id (see models.ts). */
+	modelCatalog?: ModelCatalog;
 }
 
 export class AgySession {
@@ -38,8 +46,11 @@ export class AgySession {
 	private readonly gate: PermissionGate;
 	private readonly hookToken: string;
 	private readonly hookDeadlineMs: number;
+	/** Mode, model and effort: what a client may change, and what each change costs (session-selection.ts). */
+	private readonly choice: SelectionCommands;
+	/** The selection the live child was actually launched with (the respawn test, issue #55). */
+	private launchedKey = "";
 	private idValue = "";
-	private initModelValue = "";
 	private live = false;
 	private needsRespawnValue = false;
 	private disposed = false;
@@ -69,17 +80,35 @@ export class AgySession {
 			turnCount: () => this.turnCountValue,
 		});
 		this.heartbeat = new TurnHeartbeat((update) => this.emit(update), { pendingPermissions: () => this.gate.pendingAsks() });
+		const selection = new SessionSelection({
+			model: config.model,
+			effort: config.effort,
+			sandbox: config.sandbox === true,
+			allowBypass: config.allowBypass === true,
+		});
+		this.choice = new SelectionCommands({
+			selection,
+			catalog: config.modelCatalog,
+			emit: (update) => this.emit(update),
+			onModeChange: (modeId) => this.gate.setMode(modeId),
+		});
+		this.launchedKey = this.choice.relaunchKey();
 	}
 
 	get id(): string {
 		return this.idValue;
 	}
-	/** The model agy's init event reported (the session/new `models` stub). */
-	get initModel(): string {
-		return this.initModelValue;
-	}
 	get needsRespawn(): boolean {
 		return this.needsRespawnValue;
+	}
+	modes(): ReturnType<SelectionCommands["modes"]> {
+		return this.choice.modes();
+	}
+	configOptions(): AcpConfigOption[] {
+		return this.choice.configOptions();
+	}
+	modelsState(): ReturnType<SelectionCommands["modelsState"]> {
+		return this.choice.modelsState();
 	}
 	/** Spawns agy and probes for the conversation id; a failure disposes the child and throws. */
 	async start(): Promise<string> {
@@ -175,8 +204,16 @@ export class AgySession {
 	 * last cumulative counters, so usage deltas and the step numbering continue. */
 	async ensureDriver(): Promise<AgyProcess> {
 		const current = this.driver;
-		if (current && this.live && !this.needsRespawn) return current;
-		const resume = this.needsRespawn;
+		// A changed selection cannot follow a running child - its --model/--effort/--mode were fixed at
+		// exec. A stale child is therefore handled exactly like a dead one: relaunch, with --conversation
+		// so the conversation survives and with the flags we hold now.
+		const stale = current !== null && this.launchedKey !== this.choice.relaunchKey();
+		if (current && this.live && !this.needsRespawn && !stale) return current;
+		// A session with a conversation id always resumes it, whatever made the child go away - including
+		// a respawn that itself failed. Deriving this from the needsRespawn/stale flags instead loses the
+		// stickiness exactly then: neither flag survives the attempt, so the retry would launch a *new*
+		// conversation while the id, the client and the cumulative counters still describe the old one.
+		const resume = this.id !== "";
 		if (current && !current.exited) {
 			// The child we are replacing is still dying (a cancel escalates asynchronously and the next
 			// prompt can arrive first): awaiting its bounded ladder keeps no child unowned.
@@ -192,9 +229,12 @@ export class AgySession {
 		this.config.log(`session ${this.id}: ${resume ? `respawning agy with --conversation ${this.id}` : "spawning agy"}`);
 		try {
 			const probed = await driver.probe(this.config.probeTimeoutMs);
-			// A resume that starts a fresh conversation would produce negative usage deltas (the driver was
-			// seeded with the last cumulative state). Refuse; needsRespawn survives, so retry on the next prompt.
-			if (resume && probed !== this.id) throw new Error(`agy started a new conversation (${probed}) instead of resuming ${this.id}`);
+			// A child that reports a conversation other than ours would produce negative usage deltas (the
+			// driver is seeded with the last cumulative state) and would silently rebind the session: the id
+			// we handed the client is the conversation we own. Refuse, so the next prompt retries the resume.
+			if (this.id !== "" && probed !== this.id) {
+				throw new Error(`agy started a new conversation (${probed}) instead of resuming ${this.id}`);
+			}
 			this.needsRespawnValue = false;
 			return driver;
 		} catch (err) {
@@ -210,8 +250,11 @@ export class AgySession {
 
 	/** The child for one launch (first start or `--conversation` respawn); see spawn-agy.ts. */
 	private spawnDriver(resume: boolean): AgyProcess {
+		// recorded here so a later selection change is seen as a stale child, not a suggestion
+		this.launchedKey = this.choice.relaunchKey();
 		return spawnSessionAgy({
 			config: this.config,
+			flags: this.choice.flags(),
 			bridge: { socketPath: this.gate.socketPath, dir: this.gate.dir },
 			hookToken: this.hookToken,
 			hookDeadlineMs: this.hookDeadlineMs,
@@ -228,7 +271,7 @@ export class AgySession {
 
 	private onEvent(driver: AgyProcess, e: AgyDriverEvent): void {
 		if (e.event === "init") {
-			this.initModelValue = e.init.model;
+			this.choice.setReportedModel(e.init.model);
 			// First start: this.id is still empty (the probe sets it); a mismatch can only exist on a respawned driver - the one to log.
 			if (this.id !== "" && e.conversation_id !== this.id)
 				this.config.log(`session ${this.id}: init id ${e.conversation_id} differs from ${this.id}`);
@@ -285,15 +328,21 @@ export class AgySession {
 		}
 	}
 
-	/** The session/set_mode handler (the agy-level mode wiring lands in sub-issue 6). */
+	/**
+	 * session/set_mode: the bridge policy follows at once, and `--mode` needs a child that was started
+	 * with it - the flag cannot come off a running one, so the next prompt respawns.
+	 */
 	setMode(modeId: string): void {
-		try {
-			this.gate.setMode(modeId);
-		} catch (err) {
-			throw new RpcError(INVALID_PARAMS, (err as Error).message);
-		}
-		// The agent notifies the mode change (ACP: current_mode_update); the caller knows, but
-		// other listeners of the update stream do not.
-		this.emit({ sessionUpdate: "current_mode_update", currentModeId: modeId });
+		this.choice.setMode(modeId);
+	}
+
+	/** session/set_model (and the `model` selector): takes effect on the next turn, after a respawn. */
+	setModel(modelId: string): Promise<void> {
+		return this.choice.setModel(modelId);
+	}
+
+	/** session/set_config_option(effort): one of agy's levels, or `default` for "pass no flag". */
+	setEffort(effort: string): void {
+		this.choice.setEffort(effort);
 	}
 }

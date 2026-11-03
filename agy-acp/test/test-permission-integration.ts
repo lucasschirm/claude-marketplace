@@ -344,7 +344,10 @@ test("a client that never answers is a denial at the deadline", async () => {
 
 test("plan mode: the denial is local, the client is never asked", async () => {
 	LOGS.length = 0;
-	const h = await startHarness("tool-hook-denied");
+	// ALLOW_RESUME: `set_mode` below marks the child stale (its `--mode` flag cannot come off again), so
+	// the turn under plan runs on a respawned agy resuming this conversation; ALLOW_SELECTION because that
+	// launch carries `--mode plan`, which this recording predates.
+	const h = await startHarness("tool-hook-denied", { FAKE_AGY_ALLOW_RESUME: "1", FAKE_AGY_ALLOW_SELECTION: "1" });
 	try {
 		const sid = await newSession(h);
 		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
@@ -368,7 +371,12 @@ test("plan mode: the denial is local, the client is never asked", async () => {
 
 test("accept-edits: in-workspace writes and edits are auto-allowed; commands, outside reads, and web still ask", async () => {
 	LOGS.length = 0;
-	const h = await startHarness("tool-coverage-write-edit-read-search");
+	// ALLOW_RESUME / ALLOW_SELECTION: as above - the mode change costs a respawn onto a `--mode
+	// accept-edits` child, and the turn answers from that child.
+	const h = await startHarness("tool-coverage-write-edit-read-search", {
+		FAKE_AGY_ALLOW_RESUME: "1",
+		FAKE_AGY_ALLOW_SELECTION: "1",
+	});
 	try {
 		const sid = await newSession(h);
 		await h.request("session/set_mode", { sessionId: sid, modeId: "accept-edits" });
@@ -532,15 +540,40 @@ test("dispose removes the session's bridge dir: no stray bridge dirs, no fake ag
 	}
 });
 
-test("the session/new result advertises the four modes, current default", async () => {
+test("session/new advertises the three default modes; bypass needs the operator's switch", async () => {
 	const h = await startHarness("tool-allowed-skip-permissions");
 	try {
 		const r = await h.request("session/new", { cwd: process.cwd(), mcpServers: [] });
 		const modes = r.modes as { currentModeId: string; availableModes: Array<{ id: string; name: string }> };
 		assert.strictEqual(modes.currentModeId, "default");
 		const ids = modes.availableModes.map((m) => m.id).sort();
-		assert.deepStrictEqual(ids, ["accept-edits", "bypass", "default", "plan"], "the four documented modes");
+		assert.deepStrictEqual(ids, ["accept-edits", "default", "plan"], "bypass is not offered unless it is enabled");
+		// And it is refused, not silently accepted: an unattended session must not be able to shop its
+		// way out of the bridge by asking for the mode that allows everything.
+		await assert.rejects(
+			h.request("session/set_mode", { sessionId: r.sessionId, modeId: "bypass" }),
+			/JSON-RPC -32602: unknown mode: bypass.*AGY_ACP_ALLOW_BYPASS/,
+			"refused as invalid params, with the name of the switch that would offer it",
+		);
+		const stillDefault = h.updates.find((u) => u.sessionUpdate === "current_mode_update");
+		assert.strictEqual(stillDefault, undefined, "a refused mode emits no current_mode_update");
 	} finally {
 		h.close();
+	}
+	// Enabled, the same request works: the mode is real, only its availability is gated.
+	const enabled = await startHarness("tool-allowed-skip-permissions", undefined, { allowBypass: true });
+	try {
+		const r = await enabled.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const modes = r.modes as { availableModes: Array<{ id: string }> };
+		assert.deepStrictEqual(
+			modes.availableModes.map((m) => m.id).sort(),
+			["accept-edits", "bypass", "default", "plan"],
+			"the fourth mode appears when the operator enables it",
+		);
+		await enabled.request("session/set_mode", { sessionId: r.sessionId, modeId: "bypass" });
+		const upd = enabled.updates.find((u) => u.sessionUpdate === "current_mode_update") as { currentModeId?: string };
+		assert.strictEqual(upd?.currentModeId, "bypass");
+	} finally {
+		enabled.close();
 	}
 });

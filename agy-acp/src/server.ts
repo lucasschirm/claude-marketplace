@@ -9,43 +9,18 @@ import * as path from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
 import { JsonRpcConnection } from "./jsonrpc.ts";
-import { lifecycleConfigFromEnv } from "./config.ts";
-import { checkAgyVersion, type AgyVersionStatus } from "./agy-driver.ts";
+import { assertStartSelection, registerSelectionMethods, sessionParams } from "./selection-methods.ts";
+import { makeModelGate, makeVersionGate, withEnvDefaults, type AgyLaunchOptions } from "./launch.ts";
 import { AgySession } from "./session.ts";
 import { SessionRegistry } from "./session-registry.ts";
-import { AGY_ACP_MODES } from "./permission.ts";
+
+// The launch options are part of this module's public surface (main.ts and the suites import them from
+// here); they live in launch.ts, next to the two per-process probes that run against the same argv.
+export type { AgyLaunchOptions } from "./launch.ts";
 
 // Keep in sync with agy-acp/package.json (test-package.ts asserts it).
 export const AGY_ACP_VERSION = "0.1.0";
 export const PROTOCOL_VERSION = 1;
-
-export interface AgyLaunchOptions {
-	/** The agy binary (default "agy"). */
-	command?: string;
-	/** argv prefix in place of the command (tests point this at the fake). */
-	argvPrefix?: string[];
-	/** The exact environment the child sees (default the server's process.env). */
-	env?: NodeJS.ProcessEnv;
-	// Launch options forwarded to the driver; per-session model/effort selection lands in sub-issue 6.
-	model?: string;
-	effort?: string;
-	/** Kept for API compatibility; the session forces it: the bridge hook is the only gate. */
-	skipPermissions?: boolean;
-	addDirs?: string[];
-	/** The client deadline for session/request_permission (default 10 min; below the hook deadline). */
-	clientDeadlineMs?: number;
-	/** The hook's own deadline (AGY_ACP_HOOK_DEADLINE_MS); above the client deadline, below the hook timeout. */
-	hookDeadlineMs?: number;
-	/** The hooks.json timeout (seconds) agy enforces on the hook; above the hook deadline. */
-	hookTimeoutSec?: number;
-	probeTimeoutMs?: number;
-	graceMs?: number;
-	termMs?: number;
-	/** The SIGINT -> process-group escalation window of session/cancel (default 5 s, env-configurable). */
-	cancelEscalateMs?: number;
-	/** The heartbeat interval of a running turn (default 15 s, 0 disables; env-configurable). */
-	heartbeatMs?: number;
-}
 
 export interface AgyAcpServerOptions {
 	input: Readable;
@@ -70,22 +45,6 @@ export interface AgyAcpServer {
 	disposeSessions: () => Promise<void>;
 }
 
-/** The version gate: run once before the first session/new, cached (a failed check may retry). */
-function makeVersionGate(launch: AgyLaunchOptions): () => Promise<AgyVersionStatus> {
-	let cached: Promise<AgyVersionStatus> | null = null;
-	return () => {
-		if (!cached) {
-			const argv = [...(launch.argvPrefix ?? [launch.command ?? "agy"]), "--version"];
-			// The gate must check the binary the sessions will spawn: the same argv and the same env.
-			cached = checkAgyVersion(argv, undefined, launch.env ?? process.env).catch((err: Error) => {
-				cached = null; // a transient spawn failure is not a verdict about the version
-				throw err;
-			});
-		}
-		return cached;
-	};
-}
-
 function handleInitialize(params: unknown): unknown {
 	const requested = typeof params === "object" && params !== null ? (params as Record<string, unknown>).protocolVersion : undefined;
 	// ACP negotiation: a client asking for a newer version gets the latest we support (the spec's
@@ -104,22 +63,13 @@ function handleInitialize(params: unknown): unknown {
 	};
 }
 
-/** The launch options with the environment's defaults underneath them (an explicit option wins). */
-function withEnvDefaults(launch: AgyLaunchOptions): AgyLaunchOptions {
-	const env = lifecycleConfigFromEnv();
-	const out: AgyLaunchOptions = { ...launch };
-	out.command = launch.command ?? env.command;
-	out.cancelEscalateMs = launch.cancelEscalateMs ?? env.cancelEscalateMs;
-	out.heartbeatMs = launch.heartbeatMs ?? env.heartbeatMs;
-	return out;
-}
-
 export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	const log = options.log ?? (() => {});
 	const launch = withEnvDefaults(options.agy ?? {});
 	const connection = new JsonRpcConnection({ input: options.input, output: options.output, log });
 	const registry = new SessionRegistry(log);
 	const checkVersion = makeVersionGate(launch);
+	const models = makeModelGate(launch, log);
 
 	connection.registerMethod("initialize", handleInitialize);
 	connection.registerMethod("session/new", (params) => handleSessionNew(params));
@@ -213,58 +163,61 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 			});
 		}
 		if (status.warning) log(`agy version warning: ${status.warning}`);
+		// Before the session exists: its session/new result carries the list, and a client must not be
+		// able to pick a model we never advertised. A failure is not fatal - it yields `null`.
+		const modelList = await models.list();
+		assertStartSelection(launch.model, modelList);
 		const session = new AgySession({
 			cwd,
 			...launch,
+			modelCatalog: models,
 			log,
 			notify: (sessionId, update) => connection.notify("session/update", { sessionId, update }),
 			requestPermission: (params, timeoutMs) => connection.request("session/request_permission", { ...params, sessionId }, timeoutMs),
 		});
 		const sessionId = await session.start(); // a failure disposes the child and throws the RpcError
 		registry.add(sessionId, session);
-		// The permission modes are live (session/set_mode); the agy-level mode/model/effort
-		// selection lands in sub-issue 6.
+		// The selection, advertised: the modes the bridge enforces (session/set_mode) and the ACP
+		// selectors for the model list and the effort levels (session/set_config_option). `models` is
+		// the ids-only block agy-acp has published since sub-issue 3; the names are on the selector.
 		const result: Record<string, unknown> = {
 			sessionId,
-			modes: { currentModeId: "default", availableModes: AGY_ACP_MODES },
-			models: { currentModelId: session.initModel, availableModels: session.initModel ? [session.initModel] : [] },
+			modes: session.modes(),
+			models: session.modelsState(),
+			configOptions: session.configOptions(),
 		};
+		// One object, several notes: whatever agy-acp could not do or does not support is reported here
+		// rather than left for the client to discover (the model list, the mcpServers, the version).
+		const meta: Record<string, unknown> = {};
+		if (modelList === null) {
+			// The reason travels with the fact: a client that is told "no model list" and gets agy's own
+			// "sign in" in the same field knows what to do, and one that gets the timeout knows the
+			// listing was never going to answer. The full text is in the server log either way.
+			const reason = models.failure() ?? "`agy models` gave no reason";
+			meta.models = { listed: false, reason, note: `the model list is only what agy reports per session (${reason})` };
+		}
 		if (mcpServers) {
 			// The recorded agy 1.4.2 flag surface has no per-session MCP configuration flag, so the
 			// servers are accepted, reported as unsupported and echoed back - never silently dropped.
 			// (agy's built-in tool list carries call_mcp_tool, so it may manage MCP servers
 			// out-of-band; whether per-session configuration exists needs investigating.)
 			log(`session ${sessionId}: ${mcpServers.length} mcpServers requested - unsupported by agy, reported via _meta`);
-			result._meta = { mcpServers: { supported: false, requested: mcpServers } };
+			meta.mcpServers = { supported: false, requested: mcpServers };
 		}
 		if (status.warning) {
-			result._meta = {
-				...(result._meta as Record<string, unknown> | undefined),
-				agyVersion: { version: status.version, tested: status.tested, warning: status.warning },
-			};
+			meta.agyVersion = { version: status.version, tested: status.tested, warning: status.warning };
 		}
+		if (Object.keys(meta).length > 0) result._meta = meta;
 		return result;
 	}
 
 	function handleSessionPrompt(params: unknown): unknown {
-		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/prompt params must be an object");
-		const p = params as Record<string, unknown>;
-		if (typeof p.sessionId !== "string") throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
-		const session = registry.get(p.sessionId);
-		if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
-		return session.prompt(p.prompt);
+		const { session, fields } = sessionParams("session/prompt", params, registry);
+		return session.prompt(fields.prompt);
 	}
 
-	connection.registerMethod("session/set_mode", (params) => {
-		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/set_mode params must be an object");
-		const p = params as Record<string, unknown>;
-		if (typeof p.sessionId !== "string") throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
-		if (typeof p.modeId !== "string") throw new RpcError(INVALID_PARAMS, "modeId must be a string");
-		const session = registry.get(p.sessionId);
-		if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
-		session.setMode(p.modeId);
-		return {};
-	});
+	// session/set_mode, session/set_model, session/set_config_option - one subject, one module.
+	registerSelectionMethods(connection, registry);
 
 	return { disposeSessions: () => registry.disposeAll() };
 }
