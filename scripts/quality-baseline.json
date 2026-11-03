@@ -15,10 +15,9 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
-
     "biome.suspicious/noExplicitAny": 151,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.style/noNonNullAssertion": 5,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedFunctionParameters": 1,
     "biome.correctness/noUnusedImports": 1
@@ -35,7 +34,7 @@
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
-    "extensions/lib/gh-health.ts": 308,
+    "extensions/lib/gh-health.ts": 323,
     "extensions/lib/git-repo.ts": 164,
     "extensions/lib/github-review-threads.ts": 638,
     "extensions/lib/mergeability.ts": 49,
@@ -282,8 +281,15 @@
         "agy-acp/src/server.ts: 271 lines > baseline 241 (files may only shrink)",
         "agy-acp/src/turn.ts: 129 lines > baseline 94 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "gh-health.ts 308->323: the retry timer now re-arms when it wakes before its slot is due (an early setTimeout fired the hooks into a window acquireSlot refused and the consumed one-shot left nothing scheduled - the pr-tasks-gh-failure CI stall on PR #74 and twice on main)",
+      "changes": [
+        "extensions/lib/gh-health.ts: 323 lines > baseline 308 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "c4c5670",
+  "generatedFrom": "034d6bd",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }
