@@ -15,7 +15,53 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# The cutover: the first commit .githooks/commit-msg stamped. Commits that are not descendants of it
+# were made before the hooks existed and are exempt, so a branch already in flight when they landed is
+# not failed retroactively. Drop it once no such branch is open.
+env:
+  QUALITY_GATE_CUTOVER: 810de21a53bf7473e5f214862d9ebc86718c0dd6
+
 jobs:
+  # Was every commit on this branch made with the gate running? A pre-commit hook is a local file:
+  # --no-verify, QA_SKIP_HOOKS=1 and "never ran npm install" all bypass it with nothing to show at the
+  # time, and the commit left behind is the only evidence. This job is seconds and needs no install, so
+  # a bypass is the first thing the run reports - see scripts/check-commit-hygiene.mjs for what counts.
+  commit-hygiene:
+    name: Every commit went through the gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 - the base commit and every patch in between have to be in the checkout.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # github.sha on a pull_request is the test-merge commit, whose parents are the base and the PR
+      # head: base..github.sha is exactly the pull request's own commits, and merges are exempt anyway.
+      - name: Check the commits this pull request adds
+        if: github.event_name == 'pull_request'
+        run: >
+          node scripts/check-commit-hygiene.mjs
+          --base ${{ github.event.pull_request.base.sha }}
+          --head ${{ github.sha }}
+          --cutover ${{ env.QUALITY_GATE_CUTOVER }}
+
+      - name: Check the commits this push adds
+        if: github.event_name == 'push'
+        run: >
+          node scripts/check-commit-hygiene.mjs
+          --base ${{ github.event.before }}
+          --head ${{ github.sha }}
+          --cutover ${{ env.QUALITY_GATE_CUTOVER }}
+
+      - name: Check this branch against main
+        if: github.event_name == 'workflow_dispatch'
+        run: >
+          node scripts/check-commit-hygiene.mjs
+          --base origin/main
+          --head ${{ github.sha }}
+          --cutover ${{ env.QUALITY_GATE_CUTOVER }}
+
   # The gate that made 34 type errors possible to land, now covering the whole cheap surface: strict
   # tsc, biome lint, formatting stability, the repo invariants and the quality ratchet, and the
   # manifests. The slower jobs wait for it, so a defect stops the run in ~1 minute instead of after the
@@ -34,23 +80,14 @@ jobs:
 
       - run: npm ci
 
-      - name: Typecheck extensions/
-        run: npm run typecheck
-
-      - name: Lint extensions/ (biome)
-        run: npm run lint
-
-      - name: Formatting is stable (biome format, no writes)
-        run: npm run format:check
-
-      - name: Repo invariants and quality ratchet
-        run: npm run check
+      # By that exact name, and nothing else from it spelled out here: `npm run qa:static` is what
+      # .githooks/pre-commit runs, so CI and the hook cannot drift into gating different things.
+      # It is typecheck, lint, format:check, check and validate - npm names the one that failed.
+      - name: The same static gate the pre-commit hook runs (npm run qa:static)
+        run: npm run qa:static
 
       - name: The invariants are proven to bite (fixtures against a copy of the tree)
         run: bash test/run.sh quality-fixtures
-
-      - name: Validate marketplace / plugin / Pi manifests
-        run: npm run validate
 
   # Standalone node:test suites (Node >= 23.6 runs TypeScript directly) plus the manifests.
   manifests-and-unit-tests:

@@ -294,3 +294,127 @@ test("a message typed in an editor keeps its own subject, with the trailer below
 	assert.equal(r.git("log", "-1", "--format=%s").trim(), "typed subject", "the subject is the author's");
 	assert.deepEqual(bindings(r.trailer()), { patch: r.patchId(), tree: r.tree() }, "and the trailer is a trailer");
 });
+
+// --- the CI half: scripts/check-commit-hygiene.mjs, which is what makes a bypass cost something.
+
+/** The hygiene check, run from this repo against a throwaway repo's history. */
+function hygiene(r: Repo, base: string, head = "HEAD", extra: string[] = []): { code: number; out: string } {
+	const args = [path.join(ROOT, "scripts", "check-commit-hygiene.mjs"), "--base", base, "--head", head, ...extra];
+	const p = spawnSync("node", args, { cwd: r.dir, encoding: "utf-8" });
+	return { code: p.status ?? -1, out: `${p.stdout ?? ""}${p.stderr ?? ""}` };
+}
+
+test("a branch of gated commits passes the hygiene check", () => {
+	const r = newRepo();
+	const base = r.git("rev-parse", "HEAD").trim();
+	r.write("a.txt", "hygiene-one\n");
+	r.git("add", "a.txt");
+	r.commit(["-m", "first"]);
+	r.write("b.txt", "hygiene-two\n");
+	r.git("add", "b.txt");
+	r.commit(["-m", "second"]);
+	const result = hygiene(r, base);
+	assert.equal(result.code, 0, result.out);
+});
+
+test("a branch with one bypassed commit fails, naming that commit and no other", () => {
+	const r = newRepo();
+	const base = r.git("rev-parse", "HEAD").trim();
+	r.write("a.txt", "hygiene-three\n");
+	r.git("add", "a.txt");
+	r.commit(["-m", "gated"]);
+	const gated = r.git("rev-parse", "--short", "HEAD").trim();
+	r.write("b.txt", "hygiene-four\n");
+	r.git("add", "b.txt");
+	r.commit(["--no-verify", "-m", "snuck in"]);
+	const bypassed = r.git("rev-parse", "--short", "HEAD").trim();
+	const result = hygiene(r, base);
+	assert.equal(result.code, 1, "the check fails");
+	assert.match(result.out, new RegExp(bypassed), "it names the bypassed commit");
+	assert.doesNotMatch(result.out, new RegExp(gated), "and not the gated one");
+	assert.match(result.out, /hooks:install/, "and says how to get the gate running");
+});
+
+test("a rebase does not invalidate a trailer: the patch-id outlives the tree", () => {
+	const r = newRepo();
+	r.git("checkout", "-q", "-b", "feature");
+	r.write("b.txt", "feature work\n");
+	r.git("add", "b.txt");
+	r.commit(["-m", "feature work"]);
+	r.git("checkout", "-q", "main");
+	r.write("a.txt", "main moves\n");
+	r.git("add", "a.txt");
+	r.commit(["-m", "main moves"]);
+	const movedBase = r.git("rev-parse", "HEAD").trim();
+	// A rebase runs none of these hooks: the commit is rewritten and carries its trailer along.
+	r.git("rebase", "-q", "main", "feature");
+	const result = hygiene(r, movedBase);
+	assert.equal(result.code, 0, result.out);
+	assert.notEqual(bindings(r.trailer()).tree, r.tree(), "the tree binding no longer matches: the patch-id is what passed");
+});
+
+test("a merge commit is exempt: git runs no pre-commit for one", () => {
+	const r = newRepo();
+	const base = r.git("rev-parse", "HEAD").trim();
+	r.git("checkout", "-q", "-b", "side");
+	r.write("b.txt", "side work\n");
+	r.git("add", "b.txt");
+	r.commit(["-m", "side work"]);
+	r.git("checkout", "-q", "main");
+	r.git("merge", "--no-ff", "-q", "-m", "merge side", "side");
+	assert.equal(r.trailer(), "", "the merge commit carries no trailer");
+	const result = hygiene(r, base);
+	assert.equal(result.code, 0, result.out);
+});
+
+test("the version-bump bot is exempt: it commits in CI, where no hooks are installed", () => {
+	const r = newRepo();
+	const base = r.git("rev-parse", "HEAD").trim();
+	r.write("a.txt", "bumped\n");
+	r.git("add", "a.txt");
+	const bot = { GIT_AUTHOR_NAME: "github-actions[bot]", GIT_AUTHOR_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com" };
+	assert.equal(r.commit(["--no-verify", "-m", "chore(plugins): bump versions"], bot).code, 0);
+	assert.equal(r.trailer(), "", "the bot's commit has no trailer");
+	assert.equal(hygiene(r, base).code, 0, "the bot's commit is exempt");
+	// And so is a commit GitHub itself made: a squash merge is committed by the web flow, with the
+	// author's name on it and no trailer, and failing main for that would teach people to ignore this.
+	r.write("b.txt", "squashed\n");
+	r.git("add", "b.txt");
+	const web = { GIT_COMMITTER_NAME: "GitHub", GIT_COMMITTER_EMAIL: "noreply@github.com" };
+	assert.equal(r.commit(["--no-verify", "-m", "Squashed PR (#12)"], web).code, 0);
+	const result = hygiene(r, base);
+	assert.equal(result.code, 0, result.out);
+});
+
+test("history from before the gate is out of scope: --cutover bounds the check", () => {
+	const r = newRepo();
+	const base = r.git("rev-parse", "HEAD").trim();
+	r.write("a.txt", "from before\n");
+	r.git("add", "a.txt");
+	r.commit(["--no-verify", "-m", "before the gate existed"]);
+	const stranded = r.git("rev-parse", "--short", "HEAD").trim();
+	r.write("b.txt", "the gate arrives\n");
+	r.git("add", "b.txt");
+	r.commit(["-m", "the first gated commit"]);
+	const cutover = r.git("rev-parse", "HEAD").trim();
+	r.write("a.txt", "after\n");
+	r.git("add", "a.txt");
+	r.commit(["-m", "after the gate"]);
+	const bounded = hygiene(r, base, "HEAD", ["--cutover", cutover]);
+	assert.equal(bounded.code, 0, bounded.out);
+	const unbounded = hygiene(r, base);
+	assert.equal(unbounded.code, 1, "without the cutover the same branch fails");
+	assert.match(unbounded.out, new RegExp(stranded), "on the commit that predates the gate");
+});
+
+test("a cutover this checkout does not have is ignored, out loud", () => {
+	const r = newRepo();
+	const base = r.git("rev-parse", "HEAD").trim();
+	r.write("a.txt", "gated\n");
+	r.git("add", "a.txt");
+	r.commit(["-m", "gated"]);
+	// A squash merge means the cutover commit never landed: the check must not fail silently open.
+	const result = hygiene(r, base, "HEAD", ["--cutover", "0".repeat(39) + "1"]);
+	assert.equal(result.code, 0, result.out);
+	assert.match(result.out, /cutover/, "it says the cutover was not applied");
+});
