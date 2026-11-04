@@ -81,16 +81,16 @@ export function agyModeFlag(modeId: string): string | undefined {
 
 /** The flag-level view of a session: what its next agy process must be launched with. */
 export interface LaunchFlags {
-	model?: string;
-	effort?: string;
-	mode?: string;
-	sandbox?: boolean;
+	model?: string | undefined;
+	effort?: string | undefined;
+	mode?: string | undefined;
+	sandbox?: boolean | undefined;
 }
 
 /** Where the selections start: the operator's launch options, plus the server-wide gates. */
 export interface SelectionState {
-	model?: string;
-	effort?: string;
+	model?: string | undefined;
+	effort?: string | undefined;
 	sandbox: boolean;
 	allowBypass: boolean;
 }

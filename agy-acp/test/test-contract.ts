@@ -178,3 +178,37 @@ function checkField(name: string, raw: unknown, event: AgyEvent, kind: string, f
 	assert.deepStrictEqual(accessor(event), rawValue, `${name}: typed view diverges from raw at ${key}`);
 	seen.add(key);
 }
+
+// F9: `tool_info` was the one optional assigned unconditionally, so every non-tool step carried the
+// key with value `undefined`. `exactOptionalPropertyTypes` is what makes that a type error; this is
+// what makes it a behavioural one - a record's absent field must be absent.
+test("a non-tool step carries no tool_info key at all", () => {
+	const parsed = parseAgyLine(
+		JSON.stringify({
+			event: "step_update",
+			step_update: { conversation_id: "c", step_index: 1, state: "ACTIVE", step_type: "agent_response", text_delta: "hi" },
+		}),
+	);
+	assert.strictEqual(parsed.kind, "event");
+	const step = (parsed.event as AgyStepUpdateEvent).step_update;
+	assert.strictEqual(Object.hasOwn(step, "tool_info"), false, "an absent optional must be absent, not present-and-undefined");
+});
+
+test("a tool step still carries its tool_info", () => {
+	const parsed = parseAgyLine(
+		JSON.stringify({
+			event: "step_update",
+			step_update: {
+				conversation_id: "c",
+				step_index: 2,
+				state: "ACTIVE",
+				step_type: "tool",
+				tool_info: { name: "read_file", parameters: { Path: "/w/a.txt" } },
+			},
+		}),
+	);
+	assert.strictEqual(parsed.kind, "event");
+	const step = (parsed.event as AgyStepUpdateEvent).step_update;
+	assert.strictEqual(step.tool_info?.name, "read_file");
+	assert.deepStrictEqual(step.tool_info?.parameters, { Path: "/w/a.txt" });
+});

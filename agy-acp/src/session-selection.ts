@@ -17,7 +17,7 @@ export interface SelectionCommandsConfig {
 	/** The session's own selection; this class never replaces it, only changes it. */
 	selection: SessionSelection;
 	/** The per-process `agy models` list; without it no id here can be checked (see agy/models.ts). */
-	catalog?: ModelCatalog;
+	catalog?: ModelCatalog | undefined;
 	/** The session's emitter, so the notification carries the session id. */
 	emit: (update: AcpSessionUpdate) => void;
 	/** The bridge policy follows the mode immediately, mid-turn included. */
@@ -26,7 +26,7 @@ export interface SelectionCommandsConfig {
 
 export class SelectionCommands {
 	private readonly selection: SessionSelection;
-	private readonly catalog?: ModelCatalog;
+	private readonly catalog?: ModelCatalog | undefined;
 	private readonly emit: (update: AcpSessionUpdate) => void;
 	private readonly onModeChange: (modeId: string) => void;
 

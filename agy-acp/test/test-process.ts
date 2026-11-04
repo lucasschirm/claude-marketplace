@@ -58,7 +58,10 @@ interface Handle {
 	exits: AgyExitInfo[];
 }
 
-function startDriver(fixture: string, options: Omit<AgyProcessOptions, "cwd" | "argvPrefix"> & { argvPrefix?: string[] }): Handle {
+function startDriver(
+	fixture: string,
+	options: Omit<AgyProcessOptions, "cwd" | "argvPrefix"> & { argvPrefix?: string[] | undefined },
+): Handle {
 	const driver = new AgyProcess({
 		cwd: process.cwd(),
 		env: { ...process.env, FAKE_AGY_FIXTURE: fixture, FAKE_AGY_INIT_DELAY_MS: "5", FAKE_AGY_LINE_GAP_MS: "3" },

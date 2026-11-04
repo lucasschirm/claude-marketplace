@@ -169,8 +169,8 @@ function toInitEvent(raw: Record<string, unknown>): AgyInitEvent {
 	};
 }
 
-function toToolInfo(raw: unknown): AgyToolInfo | undefined {
-	if (!isRecord(raw)) return undefined;
+/** The caller's `isRecord` guard is what decides whether a step HAS tool info; this only shapes it. */
+function toToolInfo(raw: Record<string, unknown>): AgyToolInfo {
 	const info: AgyToolInfo = {
 		name: asString(raw.name, ""),
 		parameters: isRecord(raw.parameters) ? (raw.parameters as Record<string, unknown>) : {},
@@ -206,7 +206,7 @@ function toStepUpdateEvent(raw: Record<string, unknown>): AgyStepUpdateEvent {
 	if (su.duration_seconds !== undefined) step.duration_seconds = asNumber(su.duration_seconds, 0);
 	if (su.usage !== undefined) step.usage = asUsage(su.usage);
 	if (typeof su.tool_name === "string") step.tool_name = su.tool_name;
-	step.tool_info = toToolInfo(su.tool_info);
+	if (isRecord(su.tool_info)) step.tool_info = toToolInfo(su.tool_info);
 	if (isRecord(su.subagent_info)) {
 		const subs = Array.isArray(su.subagent_info.subagents) ? su.subagent_info.subagents : [];
 		step.subagent_info = { subagents: subs.map((s) => toSubagentEntry(s)) };

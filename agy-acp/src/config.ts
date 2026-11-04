@@ -59,14 +59,14 @@ export function envPositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: n
 
 export interface LifecycleConfig {
 	/** The agy binary the sessions launch (undefined = "agy", or the launch option's own value). */
-	command?: string;
+	command?: string | undefined;
 	cancelEscalateMs: number;
 	heartbeatMs: number;
 	shutdownTimeoutMs: number;
 	/** The model each session starts on (undefined = agy's own default). */
-	model?: string;
+	model?: string | undefined;
 	/** The effort each session starts on (undefined = the model's own default). */
-	effort?: string;
+	effort?: string | undefined;
 	/** `AGY_ACP_SANDBOX`: launch every child with `--sandbox`. */
 	sandbox: boolean;
 	/** `AGY_ACP_ALLOW_BYPASS`: offer the `bypass` mode. */

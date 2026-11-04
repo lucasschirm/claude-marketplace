@@ -12,15 +12,15 @@ import { lifecycleConfigFromEnv } from "./config.ts";
 
 export interface AgyLaunchOptions {
 	/** The agy binary (default "agy"). */
-	command?: string;
+	command?: string | undefined;
 	/** argv prefix in place of the command (tests point this at the fake). */
-	argvPrefix?: string[];
+	argvPrefix?: string[] | undefined;
 	/** The exact environment the child sees (default the server's process.env). */
 	env?: NodeJS.ProcessEnv;
 	/** The model every session starts on (a client may change it: session/set_config_option). */
-	model?: string;
+	model?: string | undefined;
 	/** The reasoning effort every session starts on (agy's own level; see agy/models.ts). */
-	effort?: string;
+	effort?: string | undefined;
 	/** `agy --sandbox` for every child: defence in depth under the bridge, never instead of it. */
 	sandbox?: boolean;
 	/**

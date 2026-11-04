@@ -12,39 +12,39 @@ export const AGY_PROBE_EVENT = "agy-acp-probe";
 export interface AgyProcessOptions {
 	cwd: string;
 	/** The exact environment the child sees; when omitted the driver passes its own process.env (the spawn itself never inherits implicitly). */
-	env?: NodeJS.ProcessEnv;
+	env?: NodeJS.ProcessEnv | undefined;
 	/** The program to run (default "agy"). */
-	command?: string;
+	command?: string | undefined;
 	/** argv prefix in place of the `agy` command (tests point this at the fake). */
-	argvPrefix?: string[];
+	argvPrefix?: string[] | undefined;
 	/** `--model`: a model id from `agy models` (issue #55). Unset = agy picks its own. */
-	model?: string;
+	model?: string | undefined;
 	/** `--effort`: one of AGY_EFFORTS. Unset = the model's own default. */
-	effort?: string;
+	effort?: string | undefined;
 	/**
 	 * `--mode`: the agy execution mode matching the session's permission mode (see
 	 * `agyModeFlag` in config-options.ts). A hint, not a gate - the bridge decides permissions.
 	 */
-	mode?: string;
+	mode?: string | undefined;
 	/** `--sandbox`: agy's own terminal restrictions, defence in depth below the bridge (issue #55). */
-	sandbox?: boolean;
+	sandbox?: boolean | undefined;
 	/** Resume this conversation in the new process (`--conversation`). */
-	conversation?: string;
-	addDirs?: string[];
-	skipPermissions?: boolean;
+	conversation?: string | undefined;
+	addDirs?: string[] | undefined;
+	skipPermissions?: boolean | undefined;
 	/** Max ms to wait for `init` after the probe (default 30 s - real agy takes up to ~9 s). */
-	probeTimeoutMs?: number;
+	probeTimeoutMs?: number | undefined;
 	/** Max bytes of stderr kept for diagnostics (default 64 KiB). */
-	stderrBytes?: number;
+	stderrBytes?: number | undefined;
 	/** Max single stdout line in bytes (default 8 MiB); longer lines end the stream. */
-	maxLineBytes?: number;
+	maxLineBytes?: number | undefined;
 	/** Cumulative counters a previous process of the same conversation left behind. */
-	previous?: AgyCumulative;
+	previous?: AgyCumulative | undefined;
 	/** Max ms to wait for a calm exit after closing stdin before signalling the group (default 3 s). */
-	graceMs?: number;
+	graceMs?: number | undefined;
 	/** Max ms to wait after SIGTERM before SIGKILL (default 1 s). */
-	termMs?: number;
-	log?: (line: string) => void;
+	termMs?: number | undefined;
+	log?: ((line: string) => void) | undefined;
 }
 
 /** The flag vector the driver builds; exposed so tests and the fake can compare against it. */
