@@ -20,12 +20,12 @@
     "biome.style/useBlockStatements": 637,
     "biome.suspicious/noShadow": 56,
     "biome.suspicious/noReturnAssign": 5,
-    "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
+    "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noConsole": 10,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
@@ -449,6 +449,6 @@
       ]
     }
   ],
-  "generatedFrom": "9dd5bf2",
+  "generatedFrom": "c52062a",
   "biomeConfigHash": "c8dc254289df38ab"
 }
