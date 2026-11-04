@@ -44,7 +44,9 @@ export interface StepMapHost {
 /** One `step_update` of a running turn, mapped to zero or more session/update notifications. */
 export function mapStepToUpdates(host: StepMapHost, s: AgyStepUpdateEvent["step_update"]): void {
 	if (s.step_type === "agent_response") {
-		if (typeof s.text_delta === "string" && s.text_delta !== "") host.emit(agentMessageChunk(s.text_delta));
+		if (typeof s.text_delta === "string" && s.text_delta !== "") {
+			host.emit(agentMessageChunk(s.text_delta));
+		}
 		return;
 	}
 	if (s.step_type === "system_message") {
@@ -53,13 +55,20 @@ export function mapStepToUpdates(host: StepMapHost, s: AgyStepUpdateEvent["step_
 		return;
 	}
 	const id = toolCallIdOf(host.conversationId, s.step_index);
-	if (s.state === "ACTIVE") mapActiveTool(host, s, id);
-	else if (s.state !== "DONE" && s.state !== "ERROR") return;
-	else if (host.activeTools.delete(id)) settleTerminalTool(host, s, id);
+	if (s.state === "ACTIVE") {
+		mapActiveTool(host, s, id);
+		return;
+	}
+	// Only a terminal state settles a tool call, and only the first one to arrive for this id.
+	if ((s.state === "DONE" || s.state === "ERROR") && host.activeTools.delete(id)) {
+		settleTerminalTool(host, s, id);
+	}
 }
 
 function mapActiveTool(host: StepMapHost, s: AgyStepUpdateEvent["step_update"], id: string): void {
-	if (s.step_type !== "tool") return;
+	if (s.step_type !== "tool") {
+		return;
+	}
 	host.activeTools.add(id);
 	const name = s.tool_name ?? s.tool_info?.name ?? "tool";
 	const parameters = s.tool_info?.parameters;
@@ -71,6 +80,9 @@ function mapActiveTool(host: StepMapHost, s: AgyStepUpdateEvent["step_update"], 
 }
 
 function settleTerminalTool(host: StepMapHost, s: AgyStepUpdateEvent["step_update"], id: string): void {
-	if (s.state === "DONE") host.emit(toolCallCompleted(id, s.tool_info?.output));
-	else if (s.state === "ERROR") host.emit(toolCallFailed(id, s.tool_info?.error?.message ?? "tool failed"));
+	if (s.state === "DONE") {
+		host.emit(toolCallCompleted(id, s.tool_info?.output));
+	} else if (s.state === "ERROR") {
+		host.emit(toolCallFailed(id, s.tool_info?.error?.message ?? "tool failed"));
+	}
 }

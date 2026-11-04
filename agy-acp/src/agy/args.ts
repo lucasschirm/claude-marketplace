@@ -65,12 +65,26 @@ export function agyArgs(
 	options: Pick<AgyProcessOptions, "model" | "effort" | "mode" | "sandbox" | "conversation" | "addDirs" | "skipPermissions">,
 ): string[] {
 	const args = ["--input-format", "stream-json", "--output-format", "stream-json", "-p="];
-	if (options.model) args.push("--model", options.model);
-	if (options.effort) args.push("--effort", options.effort);
-	if (options.mode) args.push("--mode", options.mode);
-	if (options.sandbox) args.push("--sandbox");
-	if (options.conversation) args.push("--conversation", options.conversation);
-	for (const dir of options.addDirs ?? []) args.push("--add-dir", dir);
-	if (options.skipPermissions) args.push("--dangerously-skip-permissions");
+	if (options.model) {
+		args.push("--model", options.model);
+	}
+	if (options.effort) {
+		args.push("--effort", options.effort);
+	}
+	if (options.mode) {
+		args.push("--mode", options.mode);
+	}
+	if (options.sandbox) {
+		args.push("--sandbox");
+	}
+	if (options.conversation) {
+		args.push("--conversation", options.conversation);
+	}
+	for (const dir of options.addDirs ?? []) {
+		args.push("--add-dir", dir);
+	}
+	if (options.skipPermissions) {
+		args.push("--dangerously-skip-permissions");
+	}
 	return args;
 }

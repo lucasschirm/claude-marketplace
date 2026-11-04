@@ -24,7 +24,9 @@ const written = { value: false };
 /** The single stdout writer: prints one JSON decision, then exits 0. Idempotent. Every denial
  * carries the no-retry wording - enforced here, so no path can forget it. */
 function finish(decision: "allow" | "deny", reason?: string): void {
-	if (written.value) return;
+	if (written.value) {
+		return;
+	}
 	written.value = true;
 	const out =
 		decision === "deny"
@@ -55,7 +57,9 @@ process.on("uncaughtException", (err) => finish("deny", local(`the hook failed (
 let input = "";
 let payloadHandled = false;
 function onPayload(): void {
-	if (payloadHandled) return;
+	if (payloadHandled) {
+		return;
+	}
 	payloadHandled = true;
 	let payload: unknown;
 	try {
@@ -90,7 +94,9 @@ function onPayload(): void {
 	conn.on("data", (d: Buffer) => {
 		buf += d.toString("utf8");
 		const i = buf.indexOf("\n");
-		if (i < 0) return;
+		if (i < 0) {
+			return;
+		}
 		let ans: unknown;
 		try {
 			ans = JSON.parse(buf.slice(0, i));

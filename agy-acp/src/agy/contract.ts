@@ -151,7 +151,9 @@ function asUsage(value: unknown): AgyUsage {
 }
 
 function asStringArray(value: unknown): string[] {
-	if (!Array.isArray(value)) return [];
+	if (!Array.isArray(value)) {
+		return [];
+	}
 	return value.every((v) => typeof v === "string") ? (value as string[]) : [];
 }
 
@@ -175,8 +177,12 @@ function toToolInfo(raw: Record<string, unknown>): AgyToolInfo {
 		name: asString(raw.name, ""),
 		parameters: isRecord(raw.parameters) ? (raw.parameters as Record<string, unknown>) : {},
 	};
-	if (typeof raw.output === "string") info.output = raw.output;
-	if (isRecord(raw.error)) info.error = { type: asString(raw.error.type, ""), message: asString(raw.error.message, "") };
+	if (typeof raw.output === "string") {
+		info.output = raw.output;
+	}
+	if (isRecord(raw.error)) {
+		info.error = { type: asString(raw.error.type, ""), message: asString(raw.error.message, "") };
+	}
 	return info;
 }
 
@@ -202,11 +208,21 @@ function toStepUpdateEvent(raw: Record<string, unknown>): AgyStepUpdateEvent {
 		state: asString(su.state, "") as AgyStepState,
 		step_type: asString(su.step_type, "") as AgyStepType,
 	};
-	if (typeof su.text_delta === "string") step.text_delta = su.text_delta;
-	if (su.duration_seconds !== undefined) step.duration_seconds = asNumber(su.duration_seconds, 0);
-	if (su.usage !== undefined) step.usage = asUsage(su.usage);
-	if (typeof su.tool_name === "string") step.tool_name = su.tool_name;
-	if (isRecord(su.tool_info)) step.tool_info = toToolInfo(su.tool_info);
+	if (typeof su.text_delta === "string") {
+		step.text_delta = su.text_delta;
+	}
+	if (su.duration_seconds !== undefined) {
+		step.duration_seconds = asNumber(su.duration_seconds, 0);
+	}
+	if (su.usage !== undefined) {
+		step.usage = asUsage(su.usage);
+	}
+	if (typeof su.tool_name === "string") {
+		step.tool_name = su.tool_name;
+	}
+	if (isRecord(su.tool_info)) {
+		step.tool_info = toToolInfo(su.tool_info);
+	}
 	if (isRecord(su.subagent_info)) {
 		const subs = Array.isArray(su.subagent_info.subagents) ? su.subagent_info.subagents : [];
 		step.subagent_info = { subagents: subs.map((s) => toSubagentEntry(s)) };
@@ -229,8 +245,12 @@ function toResultEvent(raw: Record<string, unknown>): AgyResultEvent {
 		duration_seconds: asNumber(r.duration_seconds, 0),
 		usage: asUsage(r.usage),
 	};
-	if (typeof r.error === "string") result.error = r.error;
-	if (Array.isArray(r.denied_actions)) result.denied_actions = r.denied_actions.map((d) => toDeniedAction(d));
+	if (typeof r.error === "string") {
+		result.error = r.error;
+	}
+	if (Array.isArray(r.denied_actions)) {
+		result.denied_actions = r.denied_actions.map((d) => toDeniedAction(d));
+	}
 	return { event: "result", result };
 }
 
@@ -246,7 +266,9 @@ export function parseAgyLine(line: string): ParsedAgyLine {
 	} catch {
 		return { kind: "unknown", event: "", raw };
 	}
-	if (!isRecord(raw) || typeof raw.event !== "string") return { kind: "unknown", event: "", raw };
+	if (!isRecord(raw) || typeof raw.event !== "string") {
+		return { kind: "unknown", event: "", raw };
+	}
 	switch (raw.event) {
 		case "init":
 			return { kind: "event", event: toInitEvent(raw) };

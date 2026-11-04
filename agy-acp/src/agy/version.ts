@@ -49,13 +49,17 @@ function runVersionCommand(argv: AgyArgv, timeoutMs: number, env: NodeJS.Process
 		let stderr = "";
 		let settled = false;
 		const fail = (message: string) => {
-			if (settled) return;
+			if (settled) {
+				return;
+			}
 			settled = true;
 			clearTimeout(watchdog);
 			reject(new Error(`${message}; stderr: ${stderr.trim() || "(empty)"}`));
 		};
 		const finish = (code: number | null, signal: NodeJS.Signals | null) => {
-			if (settled) return;
+			if (settled) {
+				return;
+			}
 			settled = true;
 			clearTimeout(watchdog);
 			const version = stdout
@@ -63,8 +67,11 @@ function runVersionCommand(argv: AgyArgv, timeoutMs: number, env: NodeJS.Process
 				.map((l) => l.trim())
 				.find((l) => l !== "")
 				?.split(/\s+/)[0];
-			if (code === 0 && version) resolve(version);
-			else fail(`agy --version exited with code=${code} signal=${signal ?? "none"} output=${JSON.stringify(stdout.trim())}`);
+			if (code === 0 && version) {
+				resolve(version);
+			} else {
+				fail(`agy --version exited with code=${code} signal=${signal ?? "none"} output=${JSON.stringify(stdout.trim())}`);
+			}
 		};
 		child.stdout?.on("data", (d: Buffer) => {
 			stdout += d.toString("utf8");
@@ -75,12 +82,13 @@ function runVersionCommand(argv: AgyArgv, timeoutMs: number, env: NodeJS.Process
 		// The spawn timeout SIGTERMs only the child's pid, once; a binary that ignores SIGTERM must
 		// not keep this promise alive - a watchdog kills the group and reports the timeout explicitly.
 		const watchdog = setTimeout(() => {
-			if (child.pid !== undefined)
+			if (child.pid !== undefined) {
 				try {
 					process.kill(-child.pid, "SIGKILL");
 				} catch {
 					// the group is already gone
 				}
+			}
 			fail(`agy --version timed out after ${timeoutMs} ms`);
 		}, timeoutMs);
 		watchdog.unref();

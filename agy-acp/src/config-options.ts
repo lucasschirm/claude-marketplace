@@ -135,7 +135,9 @@ export class SessionSelection {
 			);
 		}
 		const clash = effortConflict(this.modelId, this.effortId);
-		if (clash !== null) throw new Error(`${clash} (AGY_ACP_MODEL/AGY_ACP_EFFORT or --model/--effort)`);
+		if (clash !== null) {
+			throw new Error(`${clash} (AGY_ACP_MODEL/AGY_ACP_EFFORT or --model/--effort)`);
+		}
 	}
 
 	get mode(): string {
@@ -165,7 +167,9 @@ export class SessionSelection {
 	knownModels(models: AgyModel[] | null): string[] {
 		const ids = models ? models.map((m) => m.modelId) : [];
 		for (const own of [this.reported, this.modelId]) {
-			if (own !== "" && own !== AGY_DEFAULT_CHOICE && !ids.includes(own)) ids.push(own);
+			if (own !== "" && own !== AGY_DEFAULT_CHOICE && !ids.includes(own)) {
+				ids.push(own);
+			}
 		}
 		return ids;
 	}
@@ -186,7 +190,9 @@ export class SessionSelection {
 	 * fixture), and the session reports that as a startup error rather than inventing a verdict.
 	 */
 	setModel(modelId: string, known: AgyModel[] | null): void {
-		if (modelId === "") throw new Error("modelId must not be empty");
+		if (modelId === "") {
+			throw new Error("modelId must not be empty");
+		}
 		if (known !== null) {
 			const ids = this.knownModels(known);
 			if (modelId !== AGY_DEFAULT_CHOICE && !ids.includes(modelId)) {
@@ -205,7 +211,9 @@ export class SessionSelection {
 			throw new Error(`unknown effort: ${effort} (available: ${AGY_DEFAULT_CHOICE}, ${AGY_EFFORTS.join(", ")})`);
 		}
 		const clash = effortConflict(this.modelId, effort);
-		if (clash !== null) throw new Error(`${clash} - set the model to ${AGY_DEFAULT_CHOICE} first`);
+		if (clash !== null) {
+			throw new Error(`${clash} - set the model to ${AGY_DEFAULT_CHOICE} first`);
+		}
 		this.effortId = effort;
 	}
 

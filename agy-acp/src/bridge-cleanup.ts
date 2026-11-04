@@ -31,12 +31,16 @@ export async function cleanupStaleBridges(log: (line: string) => void, nowMs: nu
 			continue; // no runtime dir yet (or unreadable) - nothing to clean
 		}
 		for (const entry of entries) {
-			if (!BRIDGE_DIR_NAME_RE.test(entry)) continue;
+			if (!BRIDGE_DIR_NAME_RE.test(entry)) {
+				continue;
+			}
 			const p = path.join(root, entry);
 			try {
 				const st = await fs.promises.stat(p);
 				if (nowMs - st.mtimeMs > STALE_BRIDGE_MS) {
-					if (await isLiveSocket(path.join(p, "socket"))) continue; // still serving: not stale
+					if (await isLiveSocket(path.join(p, "socket"))) {
+						continue; // still serving: not stale
+					}
 					await fs.promises.rm(p, { recursive: true, force: true });
 					log(`bridge cleanup: removed stale ${p}`);
 				}

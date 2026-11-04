@@ -42,11 +42,59 @@
 				"noExplicitAny": "warn",
 				// 17 call sites today; flips to "error" in the commit that removes the last one (P1/C2.2),
 				// because console output lands inside a live TUI.
-				"noConsole": "warn"
+				"noConsole": "warn",
+				// The four rules below are "error" on agy-acp/src (the override at the bottom of this file,
+				// where they measure 0) and "warn" everywhere else, where they measure debt the ratchet in
+				// scripts/check-quality.mjs now counts down. "warn" is not a softer opinion: biome exits 0 on
+				// warnings, and an "error" outside agy-acp/src would make `npm run lint` red on day one and
+				// take the gate's own biome measurement down with it (it refuses to read counts out of a
+				// non-zero run). Counts when switched on, 2026-11-04.
+				//
+				// noShadow: 2 in agy-acp/src (server.ts's session/new - an inner `params` shadowing the
+				// handler's own, next to a closure reading a `const` declared two statements later),
+				// 46 in extensions, 10 in agy-acp/test, 9 in test, 5 in scripts.
+				"noShadow": "warn",
+				// noReturnAssign: 3 in agy-acp/src (`new Promise((r) => (host.pending = {...}))` - an
+				// assignment worth seeing), 5 in agy-acp/test, 7 in test, 0 in extensions.
+				"noReturnAssign": "warn"
 			},
 			"correctness": {
 				"noUnusedVariables": "error",
 				"noUnusedFunctionParameters": "warn"
+			},
+			// Measured over agy-acp/src with `rules.preset: "all"` (657 diagnostics, 38 rules) and kept only
+			// where the hits were real - see docs/agy-acp-code-quality-review.md §4 for the counts.
+			//
+			// Rejected, with the measurement rather than a preference:
+			//   suspicious/noUnnecessaryConditions   23 hits, 0 true positives. It is flow-insensitive on a
+			//                                        field initialised `false`, so every `if (this.disposed)
+			//                                        return` idempotency guard is a hit - and the two
+			//                                        conditions that ARE dead (bridge-server.ts's
+			//                                        conversation check, permission.ts's plan-mode guard)
+			//                                        are not among them.
+			//   style/noPropertyAccessFromIndexSignature (tsc)  170 in src, 382 in test: every process.env.X.
+			//   performance/noAwaitInLoops           5 hits, all deliberate (SessionRegistry disposes
+			//                                        sequentially so one kill ladder finishes before the next).
+			//   style/useNamingConvention            112 hits: the agy wire fields are snake_case by contract.
+			//   style/noTernary 81, style/noMagicNumbers 24, correctness/noNodejsModules 21,
+			//   style/noProcessEnv 13, performance/noNamespaceImport 12: cost without signal in a Node server.
+			//   correctness/useQwikValidLexicalScope 16: a framework this repo does not use.
+			//   style/useErrorCause                 7 hits, all false after the fix. Probed directly: the rule
+			//                                        reads ErrorOptions at argument index 1, so
+			//                                        `new Error(m, {cause})` and a `MyError(m, options)`
+			//                                        subclass both pass, while agy-acp's code-first
+			//                                        `RpcError(code, message, {cause})` cannot - the options
+			//                                        are at index 2. Reordering to message-first to satisfy a
+			//                                        linter would be the tail wagging the dog, so the 7 sites
+			//                                        pass their cause and test-jsonrpc.ts is the guard.
+			"style": {
+				// noMultiAssign: 1 in agy-acp/src (`this.pendingProbe = this.probePromise = null`).
+				"noMultiAssign": "warn",
+				// useBlockStatements: 183 in agy-acp/src, every one autofixable, and what makes
+				// `if (pid !== undefined) try { ... }` - an unbraced `if` whose body is a bare try
+				// statement - impossible to write again. 473 in extensions, 164 in agy-acp/test,
+				// 144 in test, 131 in scripts: a tree-wide autofix is P2 work, not this change.
+				"useBlockStatements": "warn"
 			},
 			"complexity": {
 				// 51 functions above 20 today (P1 decision D3b): reported here, ratcheted by check-quality,
@@ -61,6 +109,26 @@
 		}
 	},
 	"overrides": [
+		{
+			// agy-acp/src is the one tree where the four rules above measure 0, so it is the one tree where
+			// they are a gate rather than a count: `npm run lint` fails on a new hit here. agy-acp/test is
+			// not included - its 179 hits are debt the ratchet counts, and fixing them is not what this
+			// change is for. Keep this list as the trees that are actually clean; widening it to a tree with
+			// hits turns `npm run lint` red and stops the biome half of the ratchet from measuring anything.
+			"includes": ["agy-acp/src/**"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noShadow": "error",
+						"noReturnAssign": "error"
+					},
+					"style": {
+						"noMultiAssign": "error",
+						"useBlockStatements": "error"
+					}
+				}
+			}
+		},
 		{
 			// ANSI stripping *is* control characters, so these regexes have to contain them. One override
 			// rather than eleven `// biome-ignore` comments, which can drift away from the file they sit in.

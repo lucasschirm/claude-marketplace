@@ -59,19 +59,29 @@ export class StreamCalls {
 	): void {
 		// A subagent step (a different conversation id): its tool call is not in our stream, and its
 		// low-restarting step index would otherwise collide with a recorded main step (spurious update).
-		if (req.conversationId !== (this.host.conversationId() ?? "")) return;
+		if (req.conversationId !== (this.host.conversationId() ?? "")) {
+			return;
+		}
 		const rec = this.byStep.get(req.stepIdx);
-		if (!rec) return; // a step that never went ACTIVE in our stream
+		if (!rec) {
+			return; // a step that never went ACTIVE in our stream
+		}
 		const rewritten = argsDifferFrom(rec.parameters, req.toolCall.args);
-		if (!asking && !rewritten) return;
+		if (!asking && !rewritten) {
+			return;
+		}
 		if (rewritten) {
 			this.host.log(
 				`permission: args rewritten before our hook saw them (step ${req.stepIdx}, ${req.toolCall.name}): the tool runs with the args the hook evaluated`,
 			);
 		}
 		const meta: Record<string, unknown> = {};
-		if (asking) meta.permission = { state: "pending", deadlineMs: this.host.clientDeadlineMs, sinceMs: Date.now() };
-		if (rewritten) meta.argsRewritten = true;
+		if (asking) {
+			meta.permission = { state: "pending", deadlineMs: this.host.clientDeadlineMs, sinceMs: Date.now() };
+		}
+		if (rewritten) {
+			meta.argsRewritten = true;
+		}
 		this.host.notify({
 			sessionUpdate: "tool_call_update",
 			toolCallId: toolCallIdOf(this.host.conversationId() ?? "", req.stepIdx),

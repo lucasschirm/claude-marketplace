@@ -34,7 +34,9 @@ const SWEEP_GRACE_MS = 100;
 export function cancelAgy(driver: AgyProcess, escalateMs: number, log: (line: string) => void): void {
 	const pgid = driver.pid;
 	driver.interrupt();
-	if (pgid === undefined) return; // never spawned: there is no group to keep
+	if (pgid === undefined) {
+		return; // never spawned: there is no group to keep
+	}
 	const escalate = (): void => {
 		if (!driver.exited) {
 			log(`agy ignored SIGINT for ${escalateMs} ms - running the teardown ladder on its process group`);
@@ -62,12 +64,16 @@ export function cancelAgy(driver: AgyProcess, escalateMs: number, log: (line: st
  * A no-op in the common case, where the group is already empty, so every cancel can afford it.
  */
 function sweepGroup(pgid: number, escalateMs: number, log: (line: string) => void): void {
-	if (!groupExists(pgid)) return;
+	if (!groupExists(pgid)) {
+		return;
+	}
 	log(`process group ${pgid} still has members after agy exited - SIGTERM, then SIGKILL`);
 	signalGroup(pgid, "SIGTERM", log);
 	const killAfter = Math.max(escalateMs, SWEEP_GRACE_MS);
 	const killer = setTimeout(() => {
-		if (groupExists(pgid)) signalGroup(pgid, "SIGKILL", log);
+		if (groupExists(pgid)) {
+			signalGroup(pgid, "SIGKILL", log);
+		}
 	}, killAfter);
 	killer.unref();
 }

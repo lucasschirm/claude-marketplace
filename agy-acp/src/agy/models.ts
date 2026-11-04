@@ -54,11 +54,15 @@ export function parseModelsTable(stdout: string): AgyModel[] {
 	const models: AgyModel[] = [];
 	for (const line of stdout.split("\n")) {
 		const trimmed = line.trim();
-		if (trimmed === "") continue;
+		if (trimmed === "") {
+			continue;
+		}
 		const [, modelId, name] = /^([^\s\t]+)\t+(.*)$/.exec(trimmed) ?? [];
 		// The line is trimmed before the match, so `(.*)` cannot come back empty: a row whose name is
 		// missing has no tab left by then and is skipped with everything else that is not a model row.
-		if (modelId === undefined || name === undefined) continue;
+		if (modelId === undefined || name === undefined) {
+			continue;
+		}
 		models.push({ modelId, name: name.trim() });
 	}
 	return models;
@@ -78,7 +82,9 @@ export function listAgyModels(argv: AgyArgv, timeoutMs: number, env: NodeJS.Proc
 		let stderr = "";
 		let settled = false;
 		const fail = (message: string) => {
-			if (settled) return;
+			if (settled) {
+				return;
+			}
 			settled = true;
 			clearTimeout(watchdog);
 			reject(new Error(`${message}; stderr: ${stderr.trim() || "(empty)"}`));
@@ -92,12 +98,13 @@ export function listAgyModels(argv: AgyArgv, timeoutMs: number, env: NodeJS.Proc
 		// The spawn timeout SIGTERMs the child's pid once; a binary that ignores it must not hold the
 		// session/new hostage, so the watchdog kills the group and says so (agy/version.ts, same shape).
 		const watchdog = setTimeout(() => {
-			if (child.pid !== undefined)
+			if (child.pid !== undefined) {
 				try {
 					process.kill(-child.pid, "SIGKILL");
 				} catch {
 					// the group is already gone
 				}
+			}
 			fail(`agy models timed out after ${timeoutMs} ms`);
 		}, timeoutMs);
 		watchdog.unref();
@@ -106,7 +113,9 @@ export function listAgyModels(argv: AgyArgv, timeoutMs: number, env: NodeJS.Proc
 		child.on("close", (code, signal) => {
 			const models = parseModelsTable(stdout);
 			if (code === 0 && models.length > 0) {
-				if (settled) return;
+				if (settled) {
+					return;
+				}
 				settled = true;
 				clearTimeout(watchdog);
 				resolve(models);
@@ -166,8 +175,12 @@ export function modelEffort(modelId: string): string | undefined {
  * pair goes through: per-model effort support is not on the documented surface, so agy judges it.
  */
 export function effortConflict(modelId: string, effort: string): string | null {
-	if (effort === AGY_DEFAULT_CHOICE || modelId === AGY_DEFAULT_CHOICE) return null;
+	if (effort === AGY_DEFAULT_CHOICE || modelId === AGY_DEFAULT_CHOICE) {
+		return null;
+	}
 	const carried = modelEffort(modelId);
-	if (carried === undefined || carried === effort) return null;
+	if (carried === undefined || carried === effort) {
+		return null;
+	}
 	return `agy refuses --model ${modelId} together with --effort ${effort}: the model id carries ${carried} effort`;
 }

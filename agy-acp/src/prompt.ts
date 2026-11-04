@@ -9,10 +9,14 @@ import { INVALID_PARAMS, RpcError } from "./errors.ts";
 function blockText(b: Record<string, unknown>, i: number): string {
 	switch (b.type) {
 		case "text":
-			if (typeof b.text !== "string") throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a text block needs a text string`);
+			if (typeof b.text !== "string") {
+				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a text block needs a text string`);
+			}
 			return b.text;
 		case "resource_link": {
-			if (typeof b.uri !== "string") throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource_link block needs a uri string`);
+			if (typeof b.uri !== "string") {
+				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource_link block needs a uri string`);
+			}
 			// The name (or title) is the human-meaningful part of the block; it is flattened with the uri.
 			const label =
 				(typeof b.name === "string" && b.name !== "" ? b.name : null) ?? (typeof b.title === "string" && b.title !== "" ? b.title : null);
@@ -20,12 +24,14 @@ function blockText(b: Record<string, unknown>, i: number): string {
 		}
 		case "resource": {
 			const resource = b.resource;
-			if (typeof resource !== "object" || resource === null)
+			if (typeof resource !== "object" || resource === null) {
 				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource block needs a resource object`);
+			}
 			const text = (resource as Record<string, unknown>).text;
 			// Only embedded text is flammable; a blob resource cannot be flattened, not even away.
-			if (typeof text !== "string")
+			if (typeof text !== "string") {
 				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource block carries no embedded text (blobs are not supported)`);
+			}
 			return text;
 		}
 		case "image":
@@ -39,14 +45,22 @@ function blockText(b: Record<string, unknown>, i: number): string {
 
 /** The session/prompt flattening: text, resource-link and embedded-text blocks into one text. */
 export function flattenPrompt(blocks: unknown): string {
-	if (!Array.isArray(blocks)) throw new RpcError(INVALID_PARAMS, "prompt must be an array of content blocks");
-	if (blocks.length === 0) throw new RpcError(INVALID_PARAMS, "prompt must not be empty");
+	if (!Array.isArray(blocks)) {
+		throw new RpcError(INVALID_PARAMS, "prompt must be an array of content blocks");
+	}
+	if (blocks.length === 0) {
+		throw new RpcError(INVALID_PARAMS, "prompt must not be empty");
+	}
 	const parts: string[] = [];
 	for (const [i, block] of blocks.entries()) {
-		if (typeof block !== "object" || block === null) throw new RpcError(INVALID_PARAMS, `prompt block ${i} must be an object`);
+		if (typeof block !== "object" || block === null) {
+			throw new RpcError(INVALID_PARAMS, `prompt block ${i} must be an object`);
+		}
 		parts.push(blockText(block as Record<string, unknown>, i));
 	}
 	const flattened = parts.join("\n");
-	if (flattened.trim() === "") throw new RpcError(INVALID_PARAMS, "prompt flattens to no text");
+	if (flattened.trim() === "") {
+		throw new RpcError(INVALID_PARAMS, "prompt flattens to no text");
+	}
 	return flattened;
 }

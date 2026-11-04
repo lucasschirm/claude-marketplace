@@ -115,18 +115,24 @@ function bridgeReferenceIn(args: unknown, bridgeDir: string, socketPath: string,
 		return;
 	}
 	if (Array.isArray(args)) {
-		for (const v of args) bridgeReferenceIn(v, bridgeDir, socketPath, found);
+		for (const v of args) {
+			bridgeReferenceIn(v, bridgeDir, socketPath, found);
+		}
 		return;
 	}
 	if (typeof args === "object" && args !== null) {
-		for (const v of Object.values(args)) bridgeReferenceIn(v, bridgeDir, socketPath, found);
+		for (const v of Object.values(args)) {
+			bridgeReferenceIn(v, bridgeDir, socketPath, found);
+		}
 	}
 }
 
 export function bridgeReferenceReason(args: Record<string, unknown>, bridgeDir: string, socketPath: string): string | undefined {
 	const found: string[] = [];
 	bridgeReferenceIn(args, bridgeDir, socketPath, found);
-	if (found.length === 0) return undefined;
+	if (found.length === 0) {
+		return undefined;
+	}
 	return `denied by agy-acp: the tool call references the permission bridge (${found[0]}). Do not retry this call.`;
 }
 
@@ -146,7 +152,9 @@ export function resolveSymlinkSafe(candidate: string, baseDir: string): string {
 		} catch {
 			// this level does not exist; walk up (realpathSync throws on missing paths)
 			const parent = path.dirname(dir);
-			if (parent === dir) return abs; // nothing exists below the filesystem root
+			if (parent === dir) {
+				return abs; // nothing exists below the filesystem root
+			}
 			dir = parent;
 		}
 	}
@@ -161,9 +169,13 @@ export function isPathWithinWorkspace(candidate: string, roots: string[], baseDi
 /** The decision for one tool call, before any client interaction. */
 export function decidePolicy(input: PolicyInput): PolicyDecision {
 	const bridgeRef = bridgeReferenceReason(input.args, input.bridgeDir, input.socketPath);
-	if (bridgeRef !== undefined) return { kind: "deny", reason: bridgeRef };
+	if (bridgeRef !== undefined) {
+		return { kind: "deny", reason: bridgeRef };
+	}
 	const { mode, toolName } = input;
-	if (mode === "bypass") return { kind: "allow" }; // logged by the caller
+	if (mode === "bypass") {
+		return { kind: "allow" }; // logged by the caller
+	}
 	if (mode === "plan" && KNOWN_TOOLS.has(toolName) && STATE_CHANGING_TOOLS.has(toolName)) {
 		return { kind: "deny", reason: PLAN_DENY_REASON };
 	}
@@ -197,13 +209,23 @@ export type PermissionOutcome = "allow" | "allow-always" | "deadline" | "reject"
  * (the non-object outcome), any unknown id, and anything unparseable all mean deny.
  */
 export function parsePermissionOutcome(result: unknown): "allow" | "allow-always" | "reject" {
-	if (typeof result !== "object" || result === null) return "reject";
+	if (typeof result !== "object" || result === null) {
+		return "reject";
+	}
 	const outcome = (result as Record<string, unknown>).outcome;
-	if (typeof outcome !== "object" || outcome === null) return "reject"; // "cancelled" and friends
+	if (typeof outcome !== "object" || outcome === null) {
+		return "reject"; // "cancelled" and friends
+	}
 	const o = outcome as Record<string, unknown>;
-	if (o.outcome !== "selected" || typeof o.optionId !== "string") return "reject";
-	if (o.optionId === "allow_once") return "allow";
-	if (o.optionId === "allow_always") return "allow-always";
+	if (o.outcome !== "selected" || typeof o.optionId !== "string") {
+		return "reject";
+	}
+	if (o.optionId === "allow_once") {
+		return "allow";
+	}
+	if (o.optionId === "allow_always") {
+		return "allow-always";
+	}
 	return "reject";
 }
 
@@ -232,7 +254,9 @@ export function normalizeCommand(command: string): string {
 }
 
 function canonicalize(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(canonicalize);
+	if (Array.isArray(value)) {
+		return value.map(canonicalize);
+	}
 	if (value !== null && typeof value === "object") {
 		const out: Record<string, unknown> = {};
 		for (const k of Object.keys(value as Record<string, unknown>).sort()) {
@@ -272,6 +296,8 @@ export function grantKeyOf(toolName: string, args: Record<string, unknown>, base
 		return `run_command:${normalizeCommand(c)}`;
 	}
 	const p = pathParam(args);
-	if (p !== undefined) return `${toolName}:${resolveSymlinkSafe(p, baseDir)}`;
+	if (p !== undefined) {
+		return `${toolName}:${resolveSymlinkSafe(p, baseDir)}`;
+	}
 	return toolName;
 }

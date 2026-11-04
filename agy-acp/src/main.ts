@@ -102,7 +102,9 @@ export function main(args: string[]): void {
 const thisFile = fileURLToPath(import.meta.url);
 const invoked = process.argv[1];
 const isDirectRun = (() => {
-	if (!invoked) return false;
+	if (!invoked) {
+		return false;
+	}
 	try {
 		return fs.realpathSync(invoked) === thisFile;
 	} catch {
@@ -111,4 +113,6 @@ const isDirectRun = (() => {
 	}
 })();
 
-if (isDirectRun) main(process.argv.slice(2));
+if (isDirectRun) {
+	main(process.argv.slice(2));
+}

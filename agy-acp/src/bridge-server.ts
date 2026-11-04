@@ -82,7 +82,9 @@ export class BridgeServer {
 		try {
 			// 0700 for the parent too: a sibling user must not be able to drop a hooks.json into it.
 			await fs.promises.mkdir(path.dirname(layout.dir), { recursive: true, mode: 0o700 });
-			for (const d of [layout.dir, path.join(layout.dir, ".agents")]) await fs.promises.mkdir(d, { mode: 0o700 });
+			for (const d of [layout.dir, path.join(layout.dir, ".agents")]) {
+				await fs.promises.mkdir(d, { mode: 0o700 });
+			}
 			await fs.promises.writeFile(path.join(layout.dir, ".agents", "hooks.json"), layout.hooksJson, { mode: 0o600 });
 			await chmod(layout.dir, 0o700);
 			const server = createNetServer((conn) => {
@@ -110,13 +112,19 @@ export class BridgeServer {
 
 	/** Closes the socket and removes the dir. Idempotent. */
 	async stop(): Promise<void> {
-		if (this.disposed) return;
+		if (this.disposed) {
+			return;
+		}
 		this.disposed = true;
 		const server = this.server;
 		this.server = null;
-		for (const conn of this.connections) conn.destroy();
+		for (const conn of this.connections) {
+			conn.destroy();
+		}
 		this.connections.clear();
-		if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+		if (server) {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
 		try {
 			await fs.promises.rm(this.dir, { recursive: true, force: true });
 		} catch (err) {
@@ -148,10 +156,14 @@ export class BridgeServer {
 		let buf = "",
 			handled = false;
 		conn.on("data", (d: Buffer) => {
-			if (handled) return;
+			if (handled) {
+				return;
+			}
 			buf += d.toString("utf8");
 			const i = buf.indexOf("\n");
-			if (i < 0) return;
+			if (i < 0) {
+				return;
+			}
 			handled = true;
 			const line = buf.slice(0, i);
 			const req = normalizeBridgeRequest(line);
@@ -209,12 +221,20 @@ function normalizeBridgeRequest(line: string): BridgeRequest | null {
 	} catch {
 		return null;
 	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return null;
+	}
 	const o = raw as Record<string, unknown>;
-	if (typeof o.token !== "string" || typeof o.conversationId !== "string") return null;
-	if (typeof o.stepIdx !== "number" || !Number.isInteger(o.stepIdx)) return null;
+	if (typeof o.token !== "string" || typeof o.conversationId !== "string") {
+		return null;
+	}
+	if (typeof o.stepIdx !== "number" || !Number.isInteger(o.stepIdx)) {
+		return null;
+	}
 	const t = o.toolCall;
-	if (typeof t !== "object" || t === null) return null;
+	if (typeof t !== "object" || t === null) {
+		return null;
+	}
 	const o2 = t as Record<string, unknown>;
 	const args = typeof o2.args === "object" && o2.args !== null ? (o2.args as Record<string, unknown>) : {};
 	return {
@@ -250,7 +270,9 @@ export function createBridgeLayout(opts: BridgeLayoutOptions): { dir: string; so
 			const hookName = `agy-acp-${hex(n)}`;
 			const dir = path.join(root, hookName);
 			const socketPath = path.join(dir, "socket");
-			if (Buffer.byteLength(socketPath, "utf8") > SOCKET_PATH_MAX_BYTES) continue;
+			if (Buffer.byteLength(socketPath, "utf8") > SOCKET_PATH_MAX_BYTES) {
+				continue;
+			}
 			const hooksJson = JSON.stringify(
 				{
 					[hookName]: {
@@ -288,7 +310,9 @@ function shellQuote(s: string): string {
 export function bridgeRuntimeDirs(): string[] {
 	const out: string[] = [];
 	const xdg = process.env.XDG_RUNTIME_DIR;
-	if (xdg && xdg.trim() !== "") out.push(path.join(xdg, "agy-acp"));
+	if (xdg && xdg.trim() !== "") {
+		out.push(path.join(xdg, "agy-acp"));
+	}
 	out.push(os.tmpdir());
 	return out;
 }

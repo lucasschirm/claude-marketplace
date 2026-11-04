@@ -35,9 +35,13 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
  */
 export function envInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
 	const raw = env[name];
-	if (raw === undefined || raw.trim() === "") return fallback;
+	if (raw === undefined || raw.trim() === "") {
+		return fallback;
+	}
 	// Only a decimal literal counts: Number("0x10") and Number("1e3") would silently widen a window.
-	if (!/^\d+$/.test(raw.trim())) return fallback;
+	if (!/^\d+$/.test(raw.trim())) {
+		return fallback;
+	}
 	const value = Number(raw.trim());
 	return Number.isSafeInteger(value) ? value : fallback;
 }

@@ -56,7 +56,9 @@ export class SessionRegistry {
 
 	/** The dispose of every session, joined by a second caller rather than repeated (see the header). */
 	disposeAll(): Promise<void> {
-		this.disposing ??= this.disposeOnce().finally(() => (this.disposing = null));
+		this.disposing ??= this.disposeOnce().finally(() => {
+			this.disposing = null;
+		});
 		return this.disposing;
 	}
 
@@ -73,6 +75,8 @@ export class SessionRegistry {
 			}
 		}
 		// A late add can land while the sessions above are being awaited, so drain until quiet.
-		while (this.pendingDisposes.length > 0) await Promise.all(this.pendingDisposes.splice(0));
+		while (this.pendingDisposes.length > 0) {
+			await Promise.all(this.pendingDisposes.splice(0));
+		}
 	}
 }

@@ -39,7 +39,9 @@ export interface RunTurnHost extends TurnSettleHost {
 export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromptResult> {
 	// Pending before the child is chosen: a session/cancel that lands during a multi-second respawn
 	// has a prompt to answer, and an absent `host.pending` below is how this turn learns of it.
-	const promise = new Promise<AcpPromptResult>((resolve, reject) => (host.pending = { resolve, reject, settled: false }));
+	const promise = new Promise<AcpPromptResult>((resolve, reject) => {
+		host.pending = { resolve, reject, settled: false };
+	});
 	// A rejection that arrives while this function is suspended below (a child that dies mid-respawn
 	// settles the turn from its exit handler) would otherwise sit unhandled until `return promise`, and
 	// Node reports that as an unhandled rejection - correctly, since nothing had been listening yet.
@@ -70,7 +72,7 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
 		if (pending && !pending.settled) {
 			pending.settled = true;
 			host.pending = null;
-			pending.reject(new RpcError(INTERNAL_ERROR, `cannot send to agy: ${(err as Error).message}`));
+			pending.reject(new RpcError(INTERNAL_ERROR, `cannot send to agy: ${(err as Error).message}`, { cause: err }));
 		}
 	}
 	return promise;
@@ -83,7 +85,9 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
  */
 export function settleCancelled(host: TurnSettleHost, reason: string): boolean {
 	const pending = host.pending;
-	if (!pending || pending.settled) return false;
+	if (!pending || pending.settled) {
+		return false;
+	}
 	pending.settled = true;
 	host.pending = null;
 	failActiveTools(host, reason);
@@ -95,14 +99,18 @@ export function settleCancelled(host: TurnSettleHost, reason: string): boolean {
 
 /** Fail every tool still ACTIVE: a client must never show a tool running forever. */
 export function failActiveTools(host: TurnSettleHost, message: string): void {
-	for (const id of host.activeTools) host.emit(toolCallFailed(id, message));
+	for (const id of host.activeTools) {
+		host.emit(toolCallFailed(id, message));
+	}
 	host.activeTools.clear();
 }
 
 /** The `result`-driven end of a turn (see the file header for the mapping). */
 export function settleTurn(host: TurnSettleHost, e: Extract<AgyDriverEvent, { event: "result" }>, driver: AgyProcess): void {
 	const pending = host.pending;
-	if (!pending) return;
+	if (!pending) {
+		return;
+	}
 	pending.settled = true;
 	host.pending = null;
 	failActiveTools(host, "the turn ended before the tool reported a terminal state");
@@ -124,8 +132,7 @@ export function settleTurn(host: TurnSettleHost, e: Extract<AgyDriverEvent, { ev
 	} else {
 		pending.reject(
 			new RpcError(INTERNAL_ERROR, `agy turn failed: ${e.result.error ?? "unknown error"}`, {
-				agyError: e.result.error ?? "unknown error",
-				stderrTail: driver.stderrTail,
+				data: { agyError: e.result.error ?? "unknown error", stderrTail: driver.stderrTail },
 			}),
 		);
 	}

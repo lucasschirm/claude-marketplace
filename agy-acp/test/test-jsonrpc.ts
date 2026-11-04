@@ -277,7 +277,7 @@ test("unserializable error data is dropped, but the error is still sent", async 
 	const circular: { self?: unknown } = {};
 	circular.self = circular;
 	peer.conn.registerMethod("bad", () => {
-		throw new RpcError(INVALID_PARAMS, "still answered", circular);
+		throw new RpcError(INVALID_PARAMS, "still answered", { data: circular });
 	});
 	peer.input.write(requestLine(1, "bad"));
 	await settle();
@@ -298,4 +298,21 @@ test("stdin EOF semantics: empty lines are skipped, not answered", async () => {
 	peer.input.write("\n\n   \n\n");
 	await settle();
 	assert.strictEqual(peer.raw(), "");
+});
+
+// The 7 `throw new RpcError(...)` sites in the session layer each wrapped a caught error's *message*
+// and dropped the error, so a stack trace stopped at the rethrow. `useErrorCause` is what keeps them
+// honest; this is what gives them somewhere to put it.
+test("RpcError keeps the error it wrapped as its cause", () => {
+	const origin = new Error("bridge refused");
+	const err = new RpcError(INTERNAL_ERROR, "the permission bridge could not start: bridge refused", { cause: origin });
+	assert.strictEqual(err.cause, origin);
+	assert.strictEqual(err.code, INTERNAL_ERROR);
+	assert.strictEqual(err.data, undefined);
+});
+
+test("RpcError without a cause is unchanged", () => {
+	const err = new RpcError(INVALID_PARAMS, "cwd must be a string", { data: { field: "cwd" } });
+	assert.strictEqual(err.cause, undefined);
+	assert.deepStrictEqual(err.data, { field: "cwd" });
 });

@@ -71,7 +71,9 @@ export function withEnvDefaults(overrides?: AgyLaunchOptions): AgyLaunchOptions 
 	// the two probes below would happily check `$PATH`'s agy and report a version and a model list for a
 	// binary no session ever runs. Resolve an empty prefix to "unset" once, here, so the gates and the
 	// sessions can only ever point at the same binary.
-	if (out.argvPrefix !== undefined && out.argvPrefix.length === 0) out.argvPrefix = undefined;
+	if (out.argvPrefix !== undefined && out.argvPrefix.length === 0) {
+		out.argvPrefix = undefined;
+	}
 	return out;
 }
 
@@ -123,13 +125,19 @@ export function parseLaunchArgs(args: string[]): AgyLaunchOptions | undefined {
 	const out: AgyLaunchOptions = {};
 	for (let i = 0; i < tokens.length; i++) {
 		const name = tokens[i];
-		if (name === undefined) break;
-		if (name === "--help" || name === "-h" || name === "--version" || name === "-v") continue;
+		if (name === undefined) {
+			break;
+		}
+		if (name === "--help" || name === "-h" || name === "--version" || name === "-v") {
+			continue;
+		}
 		const valued = VALUE_FLAGS[name];
 		const switched = SWITCH_FLAGS[name];
 		if (valued !== undefined) {
 			const value = tokens[++i];
-			if (value === undefined || value === "" || value.startsWith("-")) return undefined;
+			if (value === undefined || value === "" || value.startsWith("-")) {
+				return undefined;
+			}
 			out[valued] = value;
 		} else if (switched !== undefined) {
 			out[switched] = true;

@@ -52,7 +52,9 @@ export class SelectionCommands {
 	 * changes nothing: the value already held (a pick, or an earlier report) is what a client sees.
 	 */
 	setReportedModel(model: string | undefined): void {
-		if (typeof model === "string" && model !== "") this.selection.setReportedModel(model);
+		if (typeof model === "string" && model !== "") {
+			this.selection.setReportedModel(model);
+		}
 	}
 
 	/** The session/new `modes` block: the current mode and the ones this session may be put into. */
@@ -87,7 +89,7 @@ export class SelectionCommands {
 			this.selection.setMode(modeId); // the id and the bypass gate, in one place
 			this.onModeChange(modeId);
 		} catch (err) {
-			throw new RpcError(INVALID_PARAMS, (err as Error).message);
+			throw new RpcError(INVALID_PARAMS, (err as Error).message, { cause: err });
 		}
 		// The agent notifies the mode change (ACP: current_mode_update); the caller knows, but
 		// other listeners of the update stream do not.
@@ -106,7 +108,8 @@ export class SelectionCommands {
 		} catch (err) {
 			const ids = this.selection.knownModels(known);
 			throw new RpcError(INVALID_PARAMS, (err as Error).message, {
-				availableModels: ids.includes(AGY_DEFAULT_CHOICE) ? ids : [AGY_DEFAULT_CHOICE, ...ids],
+				cause: err,
+				data: { availableModels: ids.includes(AGY_DEFAULT_CHOICE) ? ids : [AGY_DEFAULT_CHOICE, ...ids] },
 			});
 		}
 		this.emitConfigOptions();
@@ -117,7 +120,7 @@ export class SelectionCommands {
 		try {
 			this.selection.setEffort(effort);
 		} catch (err) {
-			throw new RpcError(INVALID_PARAMS, (err as Error).message);
+			throw new RpcError(INVALID_PARAMS, (err as Error).message, { cause: err });
 		}
 		this.emitConfigOptions();
 	}
