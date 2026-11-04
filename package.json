@@ -8,7 +8,7 @@
   "scripts": {
     "test": "bash test/run.sh",
     "test:unit": "bash test/run.sh unit agy-acp",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p agy-acp",
     "lint": "biome lint extensions agy-acp",
     "format": "biome format --write .",
     "format:check": "biome format .",

@@ -1,0 +1,17 @@
+{
+	// agy-acp is a standalone Node package, typechecked more strictly than `extensions/**`: it has no
+	// Pi runtime, no ambient globals and no inherited debt, so the flags the extension tree cannot pass
+	// yet are enforced here. Measured when these were switched on (docs/agy-acp-code-quality-review.md
+	// §4): 0 errors each under agy-acp, against 1 / 2 / 1 / 296 under extensions/**.
+	//
+	// tsc owns unused locals and parameters now; biome's `correctness/noUnusedVariables` stays on as the
+	// faster signal in the editor, not as the gate.
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"noImplicitReturns": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"verbatimModuleSyntax": true
+	},
+	"include": ["./**/*.ts"]
+}

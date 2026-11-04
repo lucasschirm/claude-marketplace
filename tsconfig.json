@@ -15,11 +15,12 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true,
-    // P1 (lint owns these): verbatimModuleSyntax, noUnusedLocals, noUnusedParameters.
     "isolatedModules": true
   },
   // `test/**` is typechecked in P1: the Pi-runtime harnesses rely on ambient globals.
-  // agy-acp is a standalone Node package (not a Pi extension), typechecked by the same strict config.
-  "include": ["extensions/**/*.ts", "agy-acp/**/*.ts"],
+  // agy-acp has its own project (agy-acp/tsconfig.json): it is a standalone Node package, and it is
+  // held to flags `extensions/**` does not pass yet (296 verbatimModuleSyntax errors there, 0 there).
+  // `npm run typecheck` runs both projects.
+  "include": ["extensions/**/*.ts"],
   "exclude": ["node_modules", "plugins/**", "skills/**"]
 }
