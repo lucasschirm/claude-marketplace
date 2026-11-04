@@ -216,7 +216,7 @@ test("a wrong token or an empty conversation-id closes the connection with no re
 			});
 			assert.strictEqual(line, "", `${token}/${conv}: no reply data`);
 			assert.ok(closed, "the connection is closed");
-			assert.match(logs.join("\n"), /token mismatch|conversation mismatch/, "the mismatch was logged");
+			assert.match(logs.join("\n"), /token mismatch|unusable conversation id/, "the refusal was logged");
 		} finally {
 			await server.stop();
 		}

@@ -172,19 +172,19 @@ export class BridgeServer {
 				conn.destroy();
 				return;
 			}
-			// The token (per-session, 256-bit) is the real boundary; the conversation check is
-			// defence in depth. A subagent's internal tool call may carry its own (sub) conversation
-			// id: same agy process, same token, and the call still goes through policy + the client.
+			// The token (per-session, 256-bit) is the real boundary; the conversation check below is
+			// defence in depth, and only against an EMPTY id - an unprobed session or a caller that does
+			// not know its own conversation. A subagent's internal tool call carries its own (sub)
+			// conversation id - same agy process, same token - and is served on purpose, so that check
+			// is not a mismatch test and must not become one.
 			if (req.token !== this.opts.token) {
 				this.opts.log(`bridge: token mismatch (step ${req.stepIdx}) - closing`);
 				conn.destroy();
 				return;
 			}
 			const expected = this.opts.conversationId();
-			if (expected === null || (req.conversationId !== expected && req.conversationId === "")) {
-				this.opts.log(
-					`bridge: conversation mismatch (got ${req.conversationId || "(none)"}, want ${expected ?? "(not probed)"}) - closing`,
-				);
+			if (expected === null || req.conversationId === "") {
+				this.opts.log(`bridge: unusable conversation id (${req.conversationId || "(none)"} vs ${expected ?? "(not probed)"}) - closing`);
 				conn.destroy();
 				return;
 			}

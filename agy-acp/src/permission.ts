@@ -66,10 +66,10 @@ export const KNOWN_TOOLS: ReadonlySet<string> = new Set(
 );
 
 /**
- * The tools plan mode denies. Browser mutation tools count: they change the page. The interactive
- * non-mutants (ask_*, wait, finish, send_message) fall through to the ask policy.
+ * The tools plan mode denies, and the only list that decides it: a state-changing tool is denied whether or not KNOWN_TOOLS has
+ * heard of it. Browser mutation tools count (they change the page); ask_*, wait, finish and send_message fall through to the asks.
  */
-const STATE_CHANGING_TOOLS: ReadonlySet<string> = new Set(
+export const STATE_CHANGING_TOOLS: ReadonlySet<string> = new Set(
 	(
 		"run_command run_workflow send_command_input notebook_execution notebook_edit " +
 		"write_file write_to_file edit_file replace_file_content multi_replace_file_content " +
@@ -176,7 +176,7 @@ export function decidePolicy(input: PolicyInput): PolicyDecision {
 	if (mode === "bypass") {
 		return { kind: "allow" }; // logged by the caller
 	}
-	if (mode === "plan" && KNOWN_TOOLS.has(toolName) && STATE_CHANGING_TOOLS.has(toolName)) {
+	if (mode === "plan" && STATE_CHANGING_TOOLS.has(toolName)) {
 		return { kind: "deny", reason: PLAN_DENY_REASON };
 	}
 	// The auto-allow set: reads (default) plus writes (accept-edits), in-workspace only.
