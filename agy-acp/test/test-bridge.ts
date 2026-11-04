@@ -1034,3 +1034,23 @@ test("the gate: onTurnEnd forgets the recorded stream steps (a next-turn index c
 test("AGY_ACP_VERSION is a constant", () => {
 	assert.match(AGY_ACP_VERSION, /^\d+\.\d+\.\d+$/);
 });
+
+// F2: `process.exit()` abandons whatever stdout still has queued. Node's stdout is async for pipes on
+// macOS, and a payload past the pipe buffer is queued on every platform, so "wrote the decision, then
+// exited" can mean the decision never arrived - and in agy, empty stdout means allow. A 256 KiB reason
+// is well past any pipe buffer, so the write cannot complete in one go.
+test("the hook's decision is not truncated by its own exit, even when it does not fit one write", async () => {
+	const reason = `denied by agy-acp: ${"x".repeat(256 * 1024)}. Do not retry this call.`;
+	const s = await listenOnce((c) => {
+		c.once("data", () => c.write(`${JSON.stringify({ decision: "deny", reason })}\n`));
+	});
+	try {
+		const r = await runHook({ AGY_ACP_SOCK: s.path, AGY_ACP_TOKEN: "tok-1" }, `${PAYLOAD}\n`);
+		assert.strictEqual(r.code, 0);
+		const decision = JSON.parse(r.stdout) as { decision: string; reason: string };
+		assert.strictEqual(decision.decision, "deny");
+		assert.strictEqual(decision.reason.length, reason.length, "the whole reason reached agy");
+	} finally {
+		await s.close();
+	}
+});

@@ -328,6 +328,24 @@ printf 'process.stdout.write("agy-acp --version");\n' >>agy-acp/src/main.ts
 qa pass "but main.ts may write --version/--help on stdout" --only agyStdoutFramesOnly --full
 cp "$WORK/main.ts.orig" agy-acp/src/main.ts
 adrop
+# stdoutExitDrain: the decision must reach the pipe before the process ends. bridge-hook.ts truncated a
+# 256 KiB deny reason exactly this way, and agy reads a half-written decision as no decision at all.
+aprobe src/zz-drain.ts 'export function decide(line: string): void {
+	process.stdout.write(line);
+	process.exit(0);
+}'
+qa fail "a stdout write followed by process.exit without a drain fails stdoutExitDrain" --only stdoutExitDrain --full
+expect_line "the undrained write is reported" "agy-acp/src/zz-drain.ts:2"
+aprobe src/zz-drain.ts 'export function decide(line: string): void {
+	process.stdout.write(line, () => process.exit(0));
+}'
+qa pass "a write that passes a completion callback is the exemption (flush-stdout.ts earns its pass this way)" --only stdoutExitDrain --full
+aprobe src/zz-drain.ts 'export function decide(line: string): void {
+	process.stdout.write(line);
+	process.exitCode = 1;
+}'
+qa pass "process.exitCode, the shape that lets Node drain by itself, is not a hit" --only stdoutExitDrain --full
+adrop
 # The orphan's name is assembled for the same reason as the test/ one below: checkWiredTests searches
 # every test/*.sh for each filename, and this script is one of them.
 AGY_ORPHAN=test-zz-agy-orphan

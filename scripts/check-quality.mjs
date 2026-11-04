@@ -575,6 +575,56 @@ function countAgyStdoutViolations() {
 	return { count: hits.length, hits };
 }
 
+/** How many top-level arguments a call text ("(a, b)") carries; commas inside nested brackets, literals or
+ * comments do not count. Used to tell `write(x)` from `write(x, cb)`. */
+function topLevelArgCount(call) {
+	const inner = call.slice(1, -1).trim();
+	if (inner === "") return 0;
+	let count = 1;
+	let depth = 0;
+	let prev = "";
+	for (let i = 0; i < call.length; i++) {
+		const jump = skipCompound(call, i, prev);
+		if (jump >= i) {
+			i = jump;
+			prev = call[i] ?? prev;
+			continue;
+		}
+		const c = call[i];
+		if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") depth--;
+		else if (c === "," && depth === 1) count++;
+		if (!/\s/.test(c)) prev = c;
+	}
+	return count;
+}
+
+/**
+ * A stdout write whose bytes the process's own exit may discard. `process.exit` abandons everything
+ * still queued on stdout, and the queue is not hypothetical: stdout is async for pipes on macOS, and
+ * nothing larger than the pipe buffer (64 KiB) leaves in one write on any platform. bridge-hook.ts is
+ * where this bit - its stdout IS the permission decision, and in agy a missing or unparseable decision
+ * means allow - so the fix is structural: write with a completion callback and exit from it.
+ *
+ * The rule is per file, not per function: a function-level scan would be a parser, and a file that both
+ * writes stdout and calls `process.exit` is the hazard whichever function does which. The exemption is
+ * the callback itself (flush-stdout.ts earns its pass that way, not by name), and `process.exitCode = n`
+ * is deliberately not a hit - that is the shape that lets Node drain on its own.
+ */
+function countStdoutExitDrains() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const src = fs.readFileSync(file, "utf-8");
+		const exits = [...src.matchAll(/\bprocess\s*\.\s*exit\s*\(/g)].filter((m) => isRealCode(src, m.index));
+		if (exits.length === 0) continue;
+		for (const m of src.matchAll(/\bprocess\s*\.\s*stdout\s*\.\s*write\s*\(/g)) {
+			if (!isRealCode(src, m.index)) continue;
+			if (topLevelArgCount(callTextAt(src, m.index)) < 2) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
 /**
  * A mutating external call whose result is never read. `execOrca([... "worker-stop" ...])` with no
  * assignment is how `/orchestration stop` came to announce success on a failed call, so the shape
@@ -850,6 +900,11 @@ const INVARIANTS = [
 		name: "agyStdoutFramesOnly",
 		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
+	},
+	{
+		name: "stdoutExitDrain",
+		description: "in agy-acp/src, a file that calls process.exit may not write stdout without a completion callback",
+		measure: countStdoutExitDrains,
 	},
 	{
 		name: "emptyCatch",

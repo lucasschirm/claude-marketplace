@@ -5,17 +5,19 @@
 // decision.
 //
 // Fail-closed by construction: every exit path goes through finish(), the only writer on
-// stdout, which always prints one JSON decision object first. Empty stdout is impossible -
-// in agy, empty stdout means allow, so this is the security line. The "Do not retry this
-// call" wording matters: without it the model retried 5 times (spike). All paths exit 0:
-// a non-zero exit would make agy report its own generic "hook failed" text instead of the
-// reason the model needs.
+// stdout, which always prints one JSON decision object first AND waits for it to reach the
+// pipe before exiting. Empty stdout is impossible - in agy, empty stdout means allow, so
+// this is the security line, and a half-written line is the same failure: unparseable JSON
+// is not a denial. The "Do not retry this call" wording matters: without it the model
+// retried 5 times (spike). All paths exit 0: a non-zero exit would make agy report its own
+// generic "hook failed" text instead of the reason the model needs.
 //
 // The deadline ladder (enforced by the caller, mirrored here): the client deadline (default
 // 10 min) is below AGY_ACP_HOOK_DEADLINE_MS (this file's own timer), which is below the
 // hooks.json timeout, which is the only timer agy itself enforces.
 
 import { connect } from "node:net";
+import { FLUSH_TIMEOUT_MS } from "./flush-stdout.ts";
 
 const NO_RETRY = "Do not retry this call.";
 const local = (why: string): string => `denied by agy-acp: ${why}`;
@@ -28,19 +30,24 @@ function finish(decision: "allow" | "deny", reason?: string): void {
 		return;
 	}
 	written.value = true;
+	const why = reason ?? "the permission bridge failed";
 	const out =
 		decision === "deny"
-			? (() => {
-					const r = reason ?? "the permission bridge failed";
-					return JSON.stringify({ decision, reason: r.includes(NO_RETRY) ? r : `${r}. ${NO_RETRY}` });
-				})()
+			? JSON.stringify({ decision, reason: why.includes(NO_RETRY) ? why : `${why}. ${NO_RETRY}` })
 			: JSON.stringify({ decision });
+	// The exit must not outrun the bytes: a bare `process.exit` abandons whatever stdout still has
+	// queued, and a decision stops fitting one write as soon as a deny reason is long (the pipe buffer
+	// is 64 KiB) - exiting here truncated the JSON into something agy cannot parse, which it reads as
+	// no decision at all. So leave from the write's own completion callback, with a bounded fallback
+	// for a stdout nobody drains: a hook that never exits is worse than a late one.
+	const leave = (): void => process.exit(0);
+	setTimeout(leave, FLUSH_TIMEOUT_MS);
 	try {
-		process.stdout.write(out);
+		process.stdout.write(out, leave);
 	} catch {
 		// a dead stdout cannot be revived; the bytes already queued still say the decision
+		leave();
 	}
-	process.exit(0);
 }
 
 const deadlineMs = Number(process.env.AGY_ACP_HOOK_DEADLINE_MS ?? 0);

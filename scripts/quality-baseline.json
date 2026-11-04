@@ -7,6 +7,7 @@
     "jsonParseLocation": 8,
     "noStdioWrites": 0,
     "agyStdoutFramesOnly": 0,
+    "stdoutExitDrain": 0,
     "emptyCatch": 47,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
@@ -58,7 +59,7 @@
     "agy-acp/src/agy/process.ts": 327,
     "agy-acp/src/agy/version.ts": 100,
     "agy-acp/src/bridge-cleanup.ts": 54,
-    "agy-acp/src/bridge-hook.ts": 127,
+    "agy-acp/src/bridge-hook.ts": 134,
     "agy-acp/src/bridge-server.ts": 319,
     "agy-acp/src/cancel.ts": 100,
     "agy-acp/src/config-options.ts": 279,
@@ -400,8 +401,15 @@
       "changes": [
         "agy-acp/src/update-map.ts: 166 lines > baseline 164 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "the F2 drain fix costs bridge-hook.ts seven lines: the write callback, its bounded fallback and the comment that says why an exit here truncated the decision; the IIFE that only held a local is gone, which paid two of them back",
+      "changes": [
+        "agy-acp/src/bridge-hook.ts: 134 lines > baseline 127 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "049b370",
+  "generatedFrom": "c5b4726",
   "biomeConfigHash": "c8dc254289df38ab"
 }
