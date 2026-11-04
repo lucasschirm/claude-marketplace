@@ -7,6 +7,7 @@
     "jsonParseLocation": 8,
     "noStdioWrites": 0,
     "agyStdoutFramesOnly": 0,
+    "settleOwnership": 0,
     "inboundBufferCap": 0,
     "envAccessLocation": 2,
     "stdoutExitDrain": 0,
@@ -21,10 +22,10 @@
     "biome.suspicious/noReturnAssign": 5,
     "biome.complexity/useOptionalChain": 8,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
@@ -85,11 +86,11 @@
     "agy-acp/src/server.ts": 247,
     "agy-acp/src/session-registry.ts": 83,
     "agy-acp/src/session-selection.ts": 134,
-    "agy-acp/src/session.ts": 370,
+    "agy-acp/src/session.ts": 365,
     "agy-acp/src/shutdown.ts": 120,
     "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 94,
-    "agy-acp/src/turn.ts": 140,
+    "agy-acp/src/turn.ts": 144,
     "agy-acp/src/update-map.ts": 166
   },
   "notes": [
@@ -429,8 +430,15 @@
         "agy-acp/src/bridge-server.ts: 336 lines > baseline 319 (files may only shrink)",
         "agy-acp/src/jsonrpc.ts: 354 lines > baseline 327 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "settleOwnership and the settleOnce refactor: turn.ts grows by the shared settler and session.ts shrinks by two hand-rolled copies of it",
+      "changes": [
+        "agy-acp/src/turn.ts: 144 lines > baseline 140 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "1c49901",
+  "generatedFrom": "9041ac3",
   "biomeConfigHash": "c8dc254289df38ab"
 }

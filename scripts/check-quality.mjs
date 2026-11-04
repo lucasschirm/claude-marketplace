@@ -576,6 +576,33 @@ function countAgyStdoutViolations() {
 }
 
 /**
+ * Turn bookkeeping written outside its owner. A turn settles exactly once - that is what keeps a client
+ * from being answered twice, or told a turn failed after it was told the turn was cancelled - and the
+ * guard was five hand-written copies of "if (pending && !pending.settled) { pending.settled = true;
+ * host.pending = null; ... }". One of them (session.ts's onExit) had already drifted into doing the
+ * bookkeeping itself, which is how a sixth copy arrives.
+ *
+ * So: `.settled =` and the two shapes that retire a turn (`.pending = null`, `.pending = {`) belong to
+ * turn.ts, where settleOnce is. Reading `.settled` is nobody's business but still allowed, and
+ * framing.ts's `this.pending = Buffer.concat(...)` is a byte buffer that happens to share the name -
+ * which is why this matches the assignment shapes rather than the word.
+ */
+const SETTLE_OWNER = "agy-acp/src/turn.ts";
+const SETTLE_WRITE_RE = /\.settled\s*=(?!=)|\.pending\s*=\s*(?:null|\{)/g;
+
+function countSettleWritesOutsideOwner() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		if (rel(file) === SETTLE_OWNER) continue;
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(SETTLE_WRITE_RE)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
  * An inbound accumulator with no ceiling. A `buf += d.toString()` inside a stream handler grows for as
  * long as the peer keeps writing, and three of agy-acp's readers had no bound at all: the bridge's
  * request line (an unauthenticated peer could hold the socket and grow this process's memory until
@@ -961,6 +988,11 @@ const INVARIANTS = [
 		name: "agyStdoutFramesOnly",
 		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
+	},
+	{
+		name: "settleOwnership",
+		description: "a turn's `.settled` / `.pending` bookkeeping is written only in agy-acp/src/turn.ts (settleOnce)",
+		measure: countSettleWritesOutsideOwner,
 	},
 	{
 		name: "inboundBufferCap",

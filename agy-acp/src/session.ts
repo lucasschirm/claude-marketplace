@@ -17,7 +17,7 @@ import {
 	newPermissionToken,
 	PermissionGate,
 } from "./permission-gate.ts";
-import { runTurn, failActiveTools, settleCancelled, settleTurn, type PendingTurn } from "./turn.ts";
+import { runTurn, failActiveTools, settleCancelled, settleOnce, settleTurn, type PendingTurn } from "./turn.ts";
 import { mapStepToUpdates } from "./map-steps.ts";
 import { spawnSessionAgy } from "./spawn-agy.ts";
 import { TurnHeartbeat } from "./heartbeat.ts";
@@ -201,12 +201,10 @@ export class AgySession {
 		this.driver = null;
 		this.live = false;
 		this.heartbeat.stop();
-		const pending = this.pending;
-		if (pending && !pending.settled) {
-			// An interruption we caused is a cancellation, not an error (the session/cancel rule); stdin
-			// EOF is a half-close, so the client may still be reading what we already settled.
-			settleCancelled(this, "the session was disposed");
-		}
+		// An interruption we caused is a cancellation, not an error (the session/cancel rule); stdin EOF is
+		// a half-close, so the client may still be reading what we already settled. A turn that ended on
+		// its own settles nothing here - settleCancelled says so by returning false.
+		settleCancelled(this, "the session was disposed");
 		if (driver) {
 			await driver.dispose();
 		}
@@ -327,17 +325,14 @@ export class AgySession {
 		}
 		// A cancel settled the turn when it was asked, so a cancelled child exiting is the expected
 		// ending here and reaches nothing below.
-		const pending = this.pending;
-		if (pending && !pending.settled) {
+		settleOnce(this, (pending) => {
 			// A child that dies on its own mid-turn: fail its still-active tools, then error the prompt.
 			failActiveTools(this, "the agy process exited before the turn finished");
 			const why = `exit code=${info.code ?? "none"} signal=${info.signal ?? "none"}`;
-			pending.settled = true;
-			this.pending = null;
 			pending.reject(
 				new RpcError(INTERNAL_ERROR, `agy exited without a result (${why})`, { data: { agyError: why, stderrTail: info.stderrTail } }),
 			);
-		}
+		});
 	}
 
 	/** The session/update emitter (public: turn.ts settles turns through the session). */

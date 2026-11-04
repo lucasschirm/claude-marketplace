@@ -328,6 +328,28 @@ printf 'process.stdout.write("agy-acp --version");\n' >>agy-acp/src/main.ts
 qa pass "but main.ts may write --version/--help on stdout" --only agyStdoutFramesOnly --full
 cp "$WORK/main.ts.orig" agy-acp/src/main.ts
 adrop
+# settleOwnership: a turn settles exactly once, and only turn.ts's settleOnce may say so (F8).
+aprobe src/zz-settle.ts 'export function endTurn(host: { pending: { settled: boolean } | null }): void {
+	if (host.pending) {
+		host.pending.settled = true;
+		host.pending = null;
+	}
+}'
+qa fail "turn bookkeeping outside turn.ts fails settleOwnership" --only settleOwnership --full
+expect_line "the settled write is reported" "agy-acp/src/zz-settle.ts:3"
+expect_line "the pending clear is reported" "agy-acp/src/zz-settle.ts:4"
+aprobe src/zz-settle.ts 'export function isDone(host: { pending: { settled: boolean } | null }): boolean {
+	// host.pending = null is what this must NOT do; reading the flag is fine.
+	return host.pending !== null && host.pending.settled;
+}
+export class Frames {
+	private pending: Buffer = Buffer.alloc(0);
+	push(chunk: Buffer): void {
+		this.pending = Buffer.concat([this.pending, chunk]);
+	}
+}'
+qa pass "reading .settled, and framing.ts's byte buffer called pending, are not turn bookkeeping" --only settleOwnership --full
+adrop
 # inboundBufferCap: a reader that accumulates must name its ceiling. The bridge's request line had
 # none, so an unauthenticated peer could grow this process's memory until maxHoldMs ran out (F12).
 aprobe src/zz-buf.ts 'export function collect(stream: NodeJS.EventEmitter): void {
