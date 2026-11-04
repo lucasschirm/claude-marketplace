@@ -99,12 +99,14 @@ function newRepo(prefix = "commit-hooks-"): Repo {
 		commit,
 		trailer: (rev = "HEAD", cwd = dir) => at(cwd, "log", "-1", "--format=%(trailers:key=Quality-Gate,valueonly)", rev).trim(),
 		patchId: (rev = "HEAD", cwd = dir) => {
-			const patch = at(cwd, "diff-tree", "-p", "--root", "--no-color", rev);
-			if (patch.trim() === "") {
+			// Bytes, not a string: a diff is not necessarily valid UTF-8, and decoding one before
+			// hashing it is the defect this helper is used to detect (see the latin-1 case).
+			const patch = execFileSync("git", ["-C", cwd, "diff-tree", "-p", "--root", "--no-color", rev], { maxBuffer: 64 * 1024 * 1024 });
+			if (patch.length === 0) {
 				return "";
 			}
-			const out = execFileSync("git", ["patch-id", "--stable"], { cwd, encoding: "utf-8", input: patch });
-			return out.trim().split(/\s+/)[0] ?? "";
+			const out = execFileSync("git", ["patch-id", "--stable"], { cwd, input: patch, maxBuffer: 64 * 1024 * 1024 });
+			return out.toString("utf8").trim().split(/\s+/)[0] ?? "";
 		},
 		tree: (rev = "HEAD", cwd = dir) => at(cwd, "rev-parse", `${rev}^{tree}`).trim(),
 		gateRuns: (cwd = dir) => {
@@ -417,4 +419,17 @@ test("a cutover this checkout does not have is ignored, out loud", () => {
 	const result = hygiene(r, base, "HEAD", ["--cutover", "0".repeat(39) + "1"]);
 	assert.equal(result.code, 0, result.out);
 	assert.match(result.out, /cutover/, "it says the cutover was not applied");
+});
+
+test("a diff that is not valid UTF-8 still gets its own patch-id", () => {
+	const r = newRepo();
+	// Latin-1 text: no NUL bytes, so git diffs it as text and the 0xe9 byte lands in the patch.
+	// Decoding that patch as UTF-8 turns the byte into U+FFFD, and the patch-id of the re-encoded
+	// text is not this commit's patch-id - a trailer that says otherwise is simply wrong.
+	fs.writeFileSync(path.join(r.dir, "latin1.txt"), Buffer.from("caf\xe9 au lait\n", "latin1"));
+	r.git("add", "latin1.txt");
+	assert.equal(r.commit(["-m", "a latin-1 line"]).code, 0);
+	assert.deepEqual(bindings(r.trailer()), { patch: r.patchId(), tree: r.tree() }, "the trailer names the real patch-id");
+	const base = r.git("rev-parse", "HEAD~1").trim();
+	assert.equal(hygiene(r, base).code, 0, "and CI agrees with it");
 });

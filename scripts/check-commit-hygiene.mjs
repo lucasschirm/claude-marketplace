@@ -44,8 +44,11 @@ function die(msg) {
 	process.exit(1);
 }
 
-function git(args, { input, allowFailure = false } = {}) {
-	const r = spawnSync("git", args, { encoding: "utf8", input, maxBuffer: MAX_OUTPUT_BYTES, timeout: TIMEOUT_MS });
+/** git, as bytes. A diff is not text, and decoding one as UTF-8 before hashing it turns every byte
+ * that is not valid UTF-8 into U+FFFD - the patch-id of the re-encoded result is nobody's patch. The
+ * hook has the same rule in scripts/quality-gate-trailer.mjs; the two must agree byte for byte. */
+function gitBytes(args, { input, allowFailure = false } = {}) {
+	const r = spawnSync("git", args, { input, maxBuffer: MAX_OUTPUT_BYTES, timeout: TIMEOUT_MS });
 	if (r.error) {
 		die(`commit hygiene: git ${args.join(" ")} could not run (${r.error.message})`);
 	}
@@ -53,9 +56,14 @@ function git(args, { input, allowFailure = false } = {}) {
 		if (allowFailure) {
 			return null;
 		}
-		die(`commit hygiene: git ${args.join(" ")} failed (${(r.stderr ?? "").trim()})`);
+		die(`commit hygiene: git ${args.join(" ")} failed (${(r.stderr ?? "").toString("utf8").trim()})`);
 	}
-	return r.stdout ?? "";
+	return r.stdout ?? Buffer.alloc(0);
+}
+
+/** The same, for output that is git's own text: a sha, a format string we wrote ourselves. */
+function git(args, options) {
+	return gitBytes(args, options)?.toString("utf8") ?? null;
 }
 
 function parseArgs(argv) {
@@ -139,8 +147,8 @@ const commits = git(["log", "--no-merges", `--format=${format}`, range])
 // One pass for every patch-id in the range: `git patch-id` reads a diff stream and reports the
 // commit each patch belongs to, so this is one process rather than two per commit.
 const patchIds = new Map();
-const stream = git(["log", "--no-merges", "-p", "--no-color", "--format=commit %H", range]);
-if (stream.trim() !== "") {
+const stream = gitBytes(["log", "--no-merges", "-p", "--no-color", "--format=commit %H", range]);
+if (stream.length > 0) {
 	for (const line of git(["patch-id", "--stable"], { input: stream }).split("\n")) {
 		const [id, sha] = line.trim().split(/\s+/);
 		if (id && sha) {

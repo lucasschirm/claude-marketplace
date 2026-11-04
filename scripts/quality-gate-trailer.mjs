@@ -52,6 +52,10 @@ const VERSION = "v1";
 
 const say = (msg) => process.stderr.write(`${msg}\n`);
 const git = (args) => execFileSync("git", args, { encoding: "utf8", maxBuffer: MAX_DIFF_BYTES });
+/** git, as bytes. A diff is not text: a latin-1 source file or a binary git diffs as text puts bytes in
+ * it that are not valid UTF-8, and decoding those into U+FFFD before hashing produces a patch-id that
+ * is nobody's patch - not the commit's, and not what `git diff | git patch-id` says it is. */
+const gitBytes = (args) => execFileSync("git", args, { maxBuffer: MAX_DIFF_BYTES });
 /** git, for questions whose answer may be "no": a non-zero exit becomes null rather than a throw. */
 function gitAsk(args) {
 	try {
@@ -97,12 +101,12 @@ function stagedTree() {
 
 /** The patch-id of the staged change against `base`, or "" when there is nothing to describe. */
 function patchId(base) {
-	const diff = git(["diff", "--cached", "--no-color", base]);
-	if (diff.trim() === "") {
+	const diff = gitBytes(["diff", "--cached", "--no-color", base]);
+	if (diff.length === 0) {
 		return "";
 	}
-	const out = execFileSync("git", ["patch-id", "--stable"], { encoding: "utf8", input: diff, maxBuffer: MAX_DIFF_BYTES });
-	return out.trim().split(/\s+/)[0] ?? "";
+	const out = execFileSync("git", ["patch-id", "--stable"], { input: diff, maxBuffer: MAX_DIFF_BYTES });
+	return out.toString("utf8").trim().split(/\s+/)[0] ?? "";
 }
 
 /** `npm run <script>`, inheriting stdio so the developer sees the gate's own output, not a summary. */
