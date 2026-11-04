@@ -1,7 +1,7 @@
 // Run with: node --test agy-acp/test/test-jsonrpc.ts
 import * as assert from "node:assert";
 import { test } from "node:test";
-import { PassThrough } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, JsonRpcConnection, PARSE_ERROR, RpcError } from "../src/jsonrpc.ts";
 
 interface Peer {
@@ -315,4 +315,20 @@ test("RpcError without a cause is unchanged", () => {
 	const err = new RpcError(INVALID_PARAMS, "cwd must be a string", { data: { field: "cwd" } });
 	assert.strictEqual(err.cause, undefined);
 	assert.deepStrictEqual(err.data, { field: "cwd" });
+});
+
+// F11: send() caught the write failure, logged it, and returned true - "sent". The request then sat in
+// `pending` until its timeout (or forever, without one), and the caller was told nothing went wrong.
+test("a write that throws is a failed send: the request rejects instead of waiting for a timeout", async () => {
+	const logs: string[] = [];
+	const output = {
+		write: () => {
+			throw new Error("EPIPE: broken pipe");
+		},
+		once: () => {},
+		on: () => {},
+	} as unknown as Writable;
+	const conn = new JsonRpcConnection({ input: new PassThrough(), output, log: (l) => logs.push(l) });
+	await assert.rejects(conn.request("session/request_permission", { a: 1 }, 2000), /could not be sent/);
+	assert.match(logs.join("\n"), /write failed: EPIPE/);
 });

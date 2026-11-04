@@ -22,6 +22,13 @@ import { fileURLToPath } from "node:url";
 export const SOCKET_PATH_MAX_BYTES = 107;
 /** A bridge dir older than this is a leftover of a crashed run and is removed at startup. */
 export const STALE_BRIDGE_MS = 60 * 60 * 1000;
+/**
+ * The ceiling on one hook request line: a tool name plus its args, which is kilobytes, not megabytes.
+ * Anything past it is dropped before the token is even looked at - until this existed, an
+ * unauthenticated peer could hold the socket and grow this process's memory until maxHoldMs (minutes)
+ * ran out, because the token check only happens once a "\n" arrives.
+ */
+export const BRIDGE_MAX_REQUEST_BYTES = 64 * 1024;
 /** The name hex lengths tried in order when the socket path does not fit. */
 export const NAME_HEX_LENGTHS = [16, 12, 8];
 export const BRIDGE_DIR_NAME_RE = /^agy-acp-[0-9a-f]{8,16}$/;
@@ -155,8 +162,18 @@ export class BridgeServer {
 		conn.on("error", () => {}); // a broken hook connection is the hook's own fail-closed to handle
 		let buf = "",
 			handled = false;
+		let bytes = 0;
 		conn.on("data", (d: Buffer) => {
 			if (handled) {
+				return;
+			}
+			// Size before anything else, the way framing.ts bounds a frame: the cheapest judgement, and the
+			// only one available while the line is still incomplete.
+			bytes += d.length;
+			if (bytes > BRIDGE_MAX_REQUEST_BYTES) {
+				handled = true;
+				this.opts.log(`bridge: oversized request (${bytes} bytes > ${BRIDGE_MAX_REQUEST_BYTES}) - closing`);
+				conn.destroy();
 				return;
 			}
 			buf += d.toString("utf8");

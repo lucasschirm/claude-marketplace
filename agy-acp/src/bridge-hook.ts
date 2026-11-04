@@ -20,6 +20,13 @@ import { connect } from "node:net";
 import { FLUSH_TIMEOUT_MS } from "./flush-stdout.ts";
 
 const NO_RETRY = "Do not retry this call.";
+/**
+ * The ceiling on each stream this hook reads - its own stdin payload, and the bridge's answer. agy
+ * writes the first and agy-acp writes the second, but the hook is the security boundary and must not be
+ * the one reader that buffers whatever it is handed: past the ceiling it denies, which is the answer it
+ * would have to give anyway. A deny reason is kilobytes (the longest recorded is under 300 KiB).
+ */
+const MAX_STREAM_BYTES = 1024 * 1024;
 const local = (why: string): string => `denied by agy-acp: ${why}`;
 
 const written = { value: false };
@@ -98,7 +105,13 @@ function onPayload(): void {
 			finish("deny", local("writing to the permission bridge failed"));
 		}
 	});
+	let replyBytes = 0;
 	conn.on("data", (d: Buffer) => {
+		replyBytes += d.length;
+		if (replyBytes > MAX_STREAM_BYTES) {
+			finish("deny", local(`the answer from the permission bridge exceeded ${MAX_STREAM_BYTES} bytes`));
+			return;
+		}
 		buf += d.toString("utf8");
 		const i = buf.indexOf("\n");
 		if (i < 0) {
@@ -127,7 +140,13 @@ function onPayload(): void {
 }
 
 process.stdin.setEncoding("utf8");
+let inputBytes = 0;
 process.stdin.on("data", (d: string) => {
+	inputBytes += Buffer.byteLength(d, "utf8");
+	if (inputBytes > MAX_STREAM_BYTES) {
+		finish("deny", local(`the hook payload exceeded ${MAX_STREAM_BYTES} bytes`));
+		return;
+	}
 	input += d;
 });
 process.stdin.on("end", () => onPayload());

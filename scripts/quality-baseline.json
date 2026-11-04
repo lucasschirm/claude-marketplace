@@ -7,6 +7,7 @@
     "jsonParseLocation": 8,
     "noStdioWrites": 0,
     "agyStdoutFramesOnly": 0,
+    "inboundBufferCap": 0,
     "envAccessLocation": 2,
     "stdoutExitDrain": 0,
     "emptyCatch": 47,
@@ -21,9 +22,9 @@
     "biome.complexity/useOptionalChain": 8,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.suspicious/noExplicitAny": 151,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
   },
@@ -57,12 +58,13 @@
     "agy-acp/src/agy/contract.ts": 311,
     "agy-acp/src/agy/events.ts": 31,
     "agy-acp/src/agy/models.ts": 147,
-    "agy-acp/src/agy/one-shot.ts": 80,
-    "agy-acp/src/agy/process.ts": 327,
+    "agy-acp/src/agy/one-shot.ts": 89,
+    "agy-acp/src/agy/process.ts": 324,
     "agy-acp/src/agy/version.ts": 64,
     "agy-acp/src/bridge-cleanup.ts": 54,
-    "agy-acp/src/bridge-hook.ts": 134,
-    "agy-acp/src/bridge-server.ts": 319,
+    "agy-acp/src/bridge-hook.ts": 153,
+    "agy-acp/src/bridge-server.ts": 336,
+    "agy-acp/src/byte-budget.ts": 40,
     "agy-acp/src/cancel.ts": 100,
     "agy-acp/src/config-options.ts": 279,
     "agy-acp/src/config.ts": 104,
@@ -70,7 +72,7 @@
     "agy-acp/src/flush-stdout.ts": 41,
     "agy-acp/src/framing.ts": 89,
     "agy-acp/src/heartbeat.ts": 74,
-    "agy-acp/src/jsonrpc.ts": 327,
+    "agy-acp/src/jsonrpc.ts": 354,
     "agy-acp/src/launch.ts": 150,
     "agy-acp/src/lib/child-process.ts": 40,
     "agy-acp/src/main.ts": 119,
@@ -417,8 +419,18 @@
       "changes": [
         "envAccessLocation: undefined -> 2"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "bounding the four inbound readers and reporting a failed write costs 72 lines across four files: a named ceiling plus its doc in bridge-server, bridge-hook and one-shot, and in jsonrpc the SendOutcome a boolean could not carry (a write that threw was reported as sent) plus backpressure logged once per transition; inboundBufferCap is recorded at 0",
+      "changes": [
+        "agy-acp/src/agy/one-shot.ts: 89 lines > baseline 80 (files may only shrink)",
+        "agy-acp/src/bridge-hook.ts: 153 lines > baseline 134 (files may only shrink)",
+        "agy-acp/src/bridge-server.ts: 336 lines > baseline 319 (files may only shrink)",
+        "agy-acp/src/jsonrpc.ts: 354 lines > baseline 327 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "5d32bd8",
+  "generatedFrom": "1c49901",
   "biomeConfigHash": "c8dc254289df38ab"
 }

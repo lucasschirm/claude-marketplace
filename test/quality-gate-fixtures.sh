@@ -328,6 +328,36 @@ printf 'process.stdout.write("agy-acp --version");\n' >>agy-acp/src/main.ts
 qa pass "but main.ts may write --version/--help on stdout" --only agyStdoutFramesOnly --full
 cp "$WORK/main.ts.orig" agy-acp/src/main.ts
 adrop
+# inboundBufferCap: a reader that accumulates must name its ceiling. The bridge's request line had
+# none, so an unauthenticated peer could grow this process's memory until maxHoldMs ran out (F12).
+aprobe src/zz-buf.ts 'export function collect(stream: NodeJS.EventEmitter): void {
+	let buf = "";
+	stream.on("data", (d: Buffer) => {
+		buf += d.toString("utf8");
+	});
+}'
+qa fail "an inbound accumulator in a file that names no byte ceiling fails inboundBufferCap" --only inboundBufferCap --full
+expect_line "the accumulation is reported" "agy-acp/src/zz-buf.ts:4"
+aprobe src/zz-buf.ts 'const MAX_INPUT_BYTES = 1024;
+export function collect(stream: NodeJS.EventEmitter): void {
+	let buf = "";
+	stream.on("data", (d: Buffer) => {
+		if (buf.length + d.length > MAX_INPUT_BYTES) { return; }
+		buf += d.toString("utf8");
+	});
+}'
+qa pass "the same reader passes once the file names its ceiling" --only inboundBufferCap --full
+adrop
+aprobe src/zz-buf2.ts 'export class Collector {
+	private pending: Buffer = Buffer.alloc(0);
+	push(chunk: Buffer): void {
+		this.pending = Buffer.concat([this.pending, chunk]);
+	}
+}'
+qa fail "a byte accumulation with no ceiling fails too (framing.ts's shape, uncapped)" --only inboundBufferCap --full
+expect_line "the concat is reported" "agy-acp/src/zz-buf2.ts:4"
+adrop
+qa pass "and framing.ts, which accumulates the same way under maxFrameBytes, does not" --only inboundBufferCap --full
 # envAccessLocation: the environment comes in as a parameter, except at the doors. agy/version.ts read
 # the strict-version flag off process.env while spawning the child with the env it was handed (F5).
 aprobe src/zz-env.ts 'export function strict(): boolean {

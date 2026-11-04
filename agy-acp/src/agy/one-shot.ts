@@ -17,6 +17,15 @@
 
 import type { AgyArgv } from "./args.ts";
 import { spawnProcessGroup } from "../lib/child-process.ts";
+import { trimToByteBudget } from "../byte-budget.ts";
+
+/**
+ * The ceiling on what one probe may buffer per stream. `agy --version` prints a line and `agy models`
+ * prints a table; a binary that prints a gigabyte is not a case worth holding memory for, and the
+ * timeout is no defence - it bounds the time, not the bytes. The tail is kept, because that is where
+ * a failing command puts its error.
+ */
+export const ONE_SHOT_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export interface OneShotResult {
 	code: number | null;
@@ -53,10 +62,10 @@ export function runAgyOneShot(argv: AgyArgv, timeoutMs: number, env: NodeJS.Proc
 			resolve({ code, signal, stdout, stderr, timedOut, spawnError });
 		};
 		child.stdout?.on("data", (d: Buffer) => {
-			stdout += d.toString("utf8");
+			stdout = trimToByteBudget(stdout + d.toString("utf8"), ONE_SHOT_MAX_OUTPUT_BYTES);
 		});
 		child.stderr?.on("data", (d: Buffer) => {
-			stderr += d.toString("utf8");
+			stderr = trimToByteBudget(stderr + d.toString("utf8"), ONE_SHOT_MAX_OUTPUT_BYTES);
 		});
 		const watchdog = setTimeout(() => {
 			timedOut = true;

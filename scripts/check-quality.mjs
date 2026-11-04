@@ -576,6 +576,35 @@ function countAgyStdoutViolations() {
 }
 
 /**
+ * An inbound accumulator with no ceiling. A `buf += d.toString()` inside a stream handler grows for as
+ * long as the peer keeps writing, and three of agy-acp's readers had no bound at all: the bridge's
+ * request line (an unauthenticated peer could hold the socket and grow this process's memory until
+ * maxHoldMs ran out), the hook's payload and reply, and the one-shot probes' stdout and stderr. A
+ * timeout is not a bound - it limits the time, not the bytes.
+ *
+ * The rule is per file, like stdoutExitDrain: an accumulation (`x += chunk`, `x += chunk.toString()`,
+ * or a `Buffer.concat` into the same variable) must live in a file that also NAMES a byte ceiling - a
+ * `*_BYTES` constant, `maxFrameBytes`, `stderrLimit`, a `Buffer.byteLength` measurement, or a
+ * `trimToByteBudget` call. Naming it is what a reader can check at a glance; the tests check that the
+ * ceiling is enforced (test-bridge.ts's oversized request, test-process.ts's megabyte trim).
+ */
+const BYTE_CEILING_RE = /_BYTES\b|\bmaxFrameBytes\b|\bstderrLimit\b|\bBuffer\.byteLength\(|\btrimToByteBudget\(/;
+const ACCUMULATION_RE =
+	/(?:this\.)?[A-Za-z_$][\w$]*\s*\+=\s*(?:this\.)?[A-Za-z_$][\w$]*(?:\.toString\([^()]*\))?\s*;|((?:this\.)?[A-Za-z_$][\w$]*)\s*=\s*\1\s*\+|\bBuffer\.concat\(/g;
+
+function countUncappedInboundBuffers() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const src = fs.readFileSync(file, "utf-8");
+		if (BYTE_CEILING_RE.test(src)) continue;
+		for (const m of src.matchAll(ACCUMULATION_RE)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
  * Where the environment may be read. `process.env` is a global the whole process shares, and a module
  * that reaches for it is a module that cannot be handed a different one: agy/version.ts took an `env`
  * parameter, spawned the child with it, and then read the strict-version flag off `process.env`, so a
@@ -932,6 +961,11 @@ const INVARIANTS = [
 		name: "agyStdoutFramesOnly",
 		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
+	},
+	{
+		name: "inboundBufferCap",
+		description: "in agy-acp/src, a file that accumulates stream data must name a byte ceiling (*_BYTES, stderrLimit, byteLength)",
+		measure: countUncappedInboundBuffers,
 	},
 	{
 		name: "envAccessLocation",

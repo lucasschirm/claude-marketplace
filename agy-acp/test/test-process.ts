@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { agyArgs, AgyProcess, checkAgyVersion, type AgyDriverEvent, type AgyExitInfo, type AgyProcessOptions } from "../src/agy-driver.ts";
 import { runAgyOneShot } from "../src/agy/one-shot.ts";
+import { trimToByteBudget } from "../src/byte-budget.ts";
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const STREAM_DIR = fileURLToPath(new URL("./fixtures/stream", import.meta.url));
@@ -541,4 +542,24 @@ test("runAgyOneShot kills the process group when the binary ignores SIGTERM", as
 	assert.strictEqual(result.timedOut, true, "the watchdog had to step in");
 	assert.notStrictEqual(result.signal, null, "the child was signalled, not exited");
 	assert.strictEqual(result.spawnError, null, "it did start");
+});
+
+// F6: the stderr tail was trimmed one code point per pass, re-measuring the whole buffer each time -
+// quadratic in the chunk, and agy writes its stack traces in one write.
+test("a megabyte of text in one call is trimmed to the budget promptly (linear, not per code point)", () => {
+	const started = Date.now();
+	const trimmed = trimToByteBudget("x".repeat(1024 * 1024), 64 * 1024);
+	const took = Date.now() - started;
+	assert.strictEqual(Buffer.byteLength(trimmed, "utf8"), 64 * 1024);
+	assert.ok(took < 250, `trimming took ${took} ms`);
+});
+
+test("the trim keeps the tail and never half a character", () => {
+	assert.strictEqual(trimToByteBudget("short", 64), "short", "under the budget is untouched");
+	// "\u20ac" is 3 bytes: a 10-byte budget holds three of them and never a split one.
+	assert.strictEqual(trimToByteBudget("\u20ac\u20ac\u20ac\u20ac\u20ac", 10), "\u20ac\u20ac\u20ac");
+	// A surrogate pair is 4 bytes and is dropped whole or kept whole.
+	assert.strictEqual(trimToByteBudget("ab\u{1F600}", 4), "\u{1F600}");
+	assert.strictEqual(trimToByteBudget("ab\u{1F600}", 3), "");
+	assert.strictEqual(trimToByteBudget("ab\u{1F600}", 0), "");
 });

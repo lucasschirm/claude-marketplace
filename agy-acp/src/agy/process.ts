@@ -5,6 +5,7 @@ import { AGY_PROBE_EVENT, agyArgs, resolveArgv } from "./args.ts";
 import type { AgyProcessOptions } from "./args.ts";
 import type { AgyExitInfo, AgyResultEventDelta } from "./events.ts";
 import { initialStateOf, type AgyCumulative, cumulativeOf, parseAgyLine, resultDeltas } from "./contract.ts";
+import { trimToByteBudget } from "../byte-budget.ts";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 const DEFAULT_STDERR_BYTES = 64 * 1024;
@@ -273,12 +274,8 @@ export class AgyProcess extends EventEmitter {
 	}
 
 	private appendStderr(chunk: string): void {
-		this.stderrBuf += chunk;
-		// The budget is in bytes; trim one whole code point at a time so a multi-byte character never straddles the cut.
-		while (Buffer.byteLength(this.stderrBuf, "utf8") > this.stderrLimit && this.stderrBuf.length > 0) {
-			const cp = this.stderrBuf.codePointAt(0) ?? 0;
-			this.stderrBuf = this.stderrBuf.slice(cp > 0xffff ? 2 : 1);
-		}
+		// The budget is in bytes and the tail is what matters (the failure is at the end of what agy said).
+		this.stderrBuf = trimToByteBudget(this.stderrBuf + chunk, this.stderrLimit);
 	}
 
 	private handleLine(line: string): void {

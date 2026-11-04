@@ -32,6 +32,13 @@ interface ConnectionOptions {
 	maxFrameBytes?: number;
 }
 
+/**
+ * Why a frame did not go out; "sent" is the only success. The reason is load-bearing: a peer told "could not be
+ * serialized" when the pipe died learns the wrong thing, and a result whose write FAILED must not be answered with a
+ * second frame on the same dead pipe.
+ */
+type SendOutcome = "sent" | "closed" | "unserializable" | "write-failed";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -52,6 +59,7 @@ export class JsonRpcConnection {
 	private notificationHandler: NotificationHandler | null = null;
 	private closeCallback: ((reason: string) => void) | null = null;
 	private nextId = 1;
+	private backpressured = false;
 	// `inputEnded` is half-close: the peer's write side is gone, so nothing more can arrive and our
 	// outgoing requests can never be answered - but a request already inside a handler still gets its
 	// response written (the peer may keep reading). `closed` is the hard close: nothing more is sent.
@@ -124,21 +132,29 @@ export class JsonRpcConnection {
 				timer.unref();
 			}
 			this.pending.set(id, { resolve, reject, timer });
-			if (!this.send({ jsonrpc: "2.0", id, method, params })) {
+			const outcome = this.send({ jsonrpc: "2.0", id, method, params });
+			if (outcome !== "sent") {
 				this.pending.delete(id);
 				if (timer) {
 					clearTimeout(timer);
 				}
+				// A request that never left is answered here or never: the peer has no id to answer with.
+				const why = outcome === "write-failed" ? "sent: the write failed" : "serialized";
 				reject(
-					this.closed ? new Error("connection is closed") : new RpcError(INTERNAL_ERROR, `request "${method}" could not be serialized`),
+					outcome === "closed" || this.closed
+						? new Error("connection is closed")
+						: new RpcError(INTERNAL_ERROR, `request "${method}" could not be ${why}`),
 				);
 			}
 		});
 	}
 
 	notify(method: string, params?: unknown): void {
-		if (!this.send({ jsonrpc: "2.0", method, params }) && !this.closed) {
+		const outcome = this.send({ jsonrpc: "2.0", method, params });
+		if (outcome === "unserializable") {
 			this.log(`notification "${method}" dropped: params are not JSON-serializable`);
+		} else if (outcome === "write-failed") {
+			this.log(`notification "${method}" dropped: the write failed`);
 		}
 	}
 
@@ -196,29 +212,40 @@ export class JsonRpcConnection {
 		}
 	}
 
-	/** Returns false when nothing was written: closed connection, or the message cannot serialize. */
-	private send(msg: Record<string, unknown>): boolean {
+	/** The one writer. Anything but "sent" means the frame is not on the wire - see SendOutcome. */
+	private send(msg: Record<string, unknown>): SendOutcome {
 		if (this.closed) {
-			return false;
+			return "closed";
 		}
 		let frame: string;
 		try {
 			frame = `${JSON.stringify(msg)}\n`;
 		} catch {
-			return false;
+			return "unserializable";
 		}
 		try {
-			this.output.write(frame);
+			if (!this.output.write(frame) && !this.backpressured) {
+				// Once per transition, as sendRaw does it: a client that has stopped reading is worth
+				// knowing about, but a line per frame would be the problem rather than the report.
+				this.backpressured = true;
+				this.log("stdout backpressure - frames are queueing");
+				this.output.once("drain", () => {
+					this.backpressured = false;
+					this.log("stdout drained");
+				});
+			}
 		} catch (err) {
 			this.log(`write failed: ${err instanceof Error ? err.message : String(err)}`);
+			return "write-failed";
 		}
-		return true;
+		return "sent";
 	}
 
 	private sendResult(id: unknown, result: unknown): void {
-		// A result that cannot serialize must not silence the request: fall back to an error response
-		// so the peer is never left waiting for an answer that cannot exist.
-		if (!this.send({ jsonrpc: "2.0", id: id ?? null, result: result ?? null }) && !this.closed) {
+		// A result that cannot serialize must not silence the request: fall back to an error response so
+		// the peer is never left waiting for an answer that cannot exist. A write that FAILED is the
+		// opposite case - the pipe is gone, and a second frame on it would only throw again.
+		if (this.send({ jsonrpc: "2.0", id: id ?? null, result: result ?? null }) === "unserializable") {
 			this.log(`result for id ${JSON.stringify(id)} is not JSON-serializable - answering with an internal error`);
 			this.sendError(id, INTERNAL_ERROR, "Internal error: result is not JSON-serializable");
 		}
@@ -230,7 +257,7 @@ export class JsonRpcConnection {
 			error.data = data;
 		}
 		// If `data` is what cannot serialize, the error still goes out - just without it.
-		if (!this.send({ jsonrpc: "2.0", id: id ?? null, error }) && data !== undefined && !this.closed) {
+		if (this.send({ jsonrpc: "2.0", id: id ?? null, error }) === "unserializable" && data !== undefined) {
 			this.send({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 		}
 	}

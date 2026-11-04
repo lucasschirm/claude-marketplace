@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AGY_ACP_VERSION } from "../src/server.ts";
-import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs } from "../src/bridge-server.ts";
+import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs, BRIDGE_MAX_REQUEST_BYTES } from "../src/bridge-server.ts";
 import { cleanupStaleBridges } from "../src/bridge-cleanup.ts";
 import { PermissionGate } from "../src/permission-gate.ts";
 import { PLAN_DENY_REASON } from "../src/permission.ts";
@@ -1052,5 +1052,52 @@ test("the hook's decision is not truncated by its own exit, even when it does no
 		assert.strictEqual(decision.reason.length, reason.length, "the whole reason reached agy");
 	} finally {
 		await s.close();
+	}
+});
+
+/** Raw bytes to the socket, with no newline: what an oversized request looks like before it is a line. */
+function writeRaw(sockPath: string, payload: string): Promise<{ closed: boolean }> {
+	return new Promise((resolve) => {
+		const conn = net.createConnection(sockPath);
+		let finished = false;
+		const finish = (closed: boolean) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			conn.destroy();
+			resolve({ closed });
+		};
+		conn.on("error", () => finish(true));
+		conn.on("close", () => finish(true));
+		conn.on("connect", () => conn.write(payload));
+		setTimeout(() => finish(false), 3000);
+	});
+}
+
+// F12: the request line was accumulated with no ceiling, and the token check only happens once a "\n"
+// arrives - so an unauthenticated peer could hold a socket open and grow the server's memory until
+// maxHoldMs (5 min for a real session) ran out. The cheapest check has to come first.
+test("the bridge drops a request line that exceeds the cap, before any token check", async () => {
+	const logs: string[] = [];
+	const server = new BridgeServer({
+		log: (l) => logs.push(l),
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK,
+		hookTimeoutSec: 60,
+		maxHoldMs: 60_000,
+		conversationId: () => "conv-1",
+		handle: async () => ({ decision: "allow" }),
+		onConnectionLost: () => {},
+	});
+	await server.start();
+	try {
+		const { closed } = await writeRaw(server.socketPath, "y".repeat(BRIDGE_MAX_REQUEST_BYTES + 1));
+		assert.ok(closed, "the connection is closed well before maxHoldMs");
+		assert.match(logs.join("\n"), /oversized request/, "and the refusal says why");
+		assert.doesNotMatch(logs.join("\n"), /token mismatch/, "the size was judged first - no token was parsed");
+	} finally {
+		await server.stop();
 	}
 });
