@@ -6,7 +6,7 @@
 // replays) and `agy models` (the list a client picks from, issue #55). Both run once and cache, and a
 // failed answer is cached too: neither check may be hammered on every session/new.
 
-import { checkAgyVersion, type AgyVersionStatus } from "./agy-driver.ts";
+import { checkAgyVersion, resolveArgv, type AgyVersionStatus } from "./agy-driver.ts";
 import { DEFAULT_MODELS_TIMEOUT_MS, makeModelCatalog, type ModelCatalog } from "./agy/models.ts";
 import { lifecycleConfigFromEnv } from "./config.ts";
 
@@ -75,10 +75,8 @@ export function withEnvDefaults(overrides?: AgyLaunchOptions): AgyLaunchOptions 
 	return out;
 }
 
-/** The argv the sessions will run: the configured prefix, or the command on its own. */
-function launchArgv(launch: AgyLaunchOptions): string[] {
-	return launch.argvPrefix ?? [launch.command ?? "agy"];
-}
+/** The argv the sessions will run (shared with the driver: one resolver, one non-empty guarantee). */
+export const launchArgv = resolveArgv;
 
 /** The version gate: run once before the first session/new, cached (a failed check may retry). */
 export function makeVersionGate(launch: AgyLaunchOptions): () => Promise<AgyVersionStatus> {
@@ -125,14 +123,16 @@ export function parseLaunchArgs(args: string[]): AgyLaunchOptions | undefined {
 	const out: AgyLaunchOptions = {};
 	for (let i = 0; i < tokens.length; i++) {
 		const name = tokens[i];
+		if (name === undefined) break;
 		if (name === "--help" || name === "-h" || name === "--version" || name === "-v") continue;
 		const valued = VALUE_FLAGS[name];
+		const switched = SWITCH_FLAGS[name];
 		if (valued !== undefined) {
 			const value = tokens[++i];
-			if (typeof value !== "string" || value === "" || value.startsWith("-")) return undefined;
+			if (value === undefined || value === "" || value.startsWith("-")) return undefined;
 			out[valued] = value;
-		} else if (SWITCH_FLAGS[name] !== undefined) {
-			out[SWITCH_FLAGS[name]] = true;
+		} else if (switched !== undefined) {
+			out[switched] = true;
 		} else {
 			return undefined; // a token that is not a flag we know, or the leftover of a bare switch
 		}

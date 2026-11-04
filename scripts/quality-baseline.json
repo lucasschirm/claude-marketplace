@@ -48,17 +48,17 @@
     "extensions/tools.ts": 627,
     "agy-acp/src/acp.ts": 198,
     "agy-acp/src/agy-driver.ts": 40,
-    "agy-acp/src/agy/args.ts": 64,
+    "agy-acp/src/agy/args.ts": 77,
     "agy-acp/src/agy/contract.ts": 289,
     "agy-acp/src/agy/events.ts": 31,
-    "agy-acp/src/agy/models.ts": 173,
+    "agy-acp/src/agy/models.ts": 174,
     "agy-acp/src/agy/process.ts": 298,
-    "agy-acp/src/agy/version.ts": 91,
+    "agy-acp/src/agy/version.ts": 92,
     "agy-acp/src/bridge-cleanup.ts": 50,
     "agy-acp/src/bridge-hook.ts": 121,
     "agy-acp/src/bridge-server.ts": 295,
     "agy-acp/src/cancel.ts": 94,
-    "agy-acp/src/config-options.ts": 266,
+    "agy-acp/src/config-options.ts": 271,
     "agy-acp/src/config.ts": 100,
     "agy-acp/src/errors.ts": 24,
     "agy-acp/src/flush-stdout.ts": 39,
@@ -338,8 +338,18 @@
         "agy-acp/src/config-options.ts: 266 lines > baseline 262 (files may only shrink)",
         "agy-acp/src/server.ts: 224 lines > baseline 220 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "noUncheckedIndexedAccess on agy-acp/src costs 20 lines across four files: one shared resolveArgv/AgyArgv in agy/args.ts replacing the two copies of the non-empty-argv rule that process.ts and launch.ts each held (both shrank), two type imports, and a capitalise helper in place of an unguarded value[0]. It buys 11 index reads that can no longer lie and removes two as-casts.",
+      "changes": [
+        "agy-acp/src/agy/args.ts: 77 lines > baseline 64 (files may only shrink)",
+        "agy-acp/src/agy/models.ts: 174 lines > baseline 173 (files may only shrink)",
+        "agy-acp/src/agy/version.ts: 92 lines > baseline 91 (files may only shrink)",
+        "agy-acp/src/config-options.ts: 271 lines > baseline 266 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "15c22be",
+  "generatedFrom": "3d9a759",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

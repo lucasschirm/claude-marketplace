@@ -12,10 +12,13 @@
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"exactOptionalPropertyTypes": true,
+		"noUncheckedIndexedAccess": true,
 		"noImplicitReturns": true,
 		"noUnusedLocals": true,
 		"noUnusedParameters": true,
 		"verbatimModuleSyntax": true
 	},
-	"include": ["./**/*.ts"]
+	// test/ has its own project: noUncheckedIndexedAccess costs 128 errors there, all of it indexing
+	// recorded fixtures, and none of it reaching production. See agy-acp/test/tsconfig.json.
+	"include": ["./src/**/*.ts"]
 }

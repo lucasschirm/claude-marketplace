@@ -14,6 +14,7 @@
 // efforts a given model supports, so the conflict agy-acp can PREDICT is refused up front and every
 // other pair is passed through for agy to judge.
 
+import type { AgyArgv } from "./args.ts";
 import { spawnProcessGroup } from "../lib/child-process.ts";
 
 /** The `--effort` values `agy --help` documents (1.4.2). */
@@ -54,17 +55,17 @@ export function parseModelsTable(stdout: string): AgyModel[] {
 	for (const line of stdout.split("\n")) {
 		const trimmed = line.trim();
 		if (trimmed === "") continue;
-		const match = /^([^\s\t]+)\t+(.*)$/.exec(trimmed);
-		if (!match) continue;
+		const [, modelId, name] = /^([^\s\t]+)\t+(.*)$/.exec(trimmed) ?? [];
 		// The line is trimmed before the match, so `(.*)` cannot come back empty: a row whose name is
 		// missing has no tab left by then and is skipped with everything else that is not a model row.
-		models.push({ modelId: match[1], name: match[2].trim() });
+		if (modelId === undefined || name === undefined) continue;
+		models.push({ modelId, name: name.trim() });
 	}
 	return models;
 }
 
 /** Runs `[...argv, "models"]` in `env`, bounded by `timeoutMs`; throws when it yields no model. */
-export function listAgyModels(argv: string[], timeoutMs: number, env: NodeJS.ProcessEnv): Promise<AgyModel[]> {
+export function listAgyModels(argv: AgyArgv, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<AgyModel[]> {
 	return new Promise((resolve, reject) => {
 		const child = spawnProcessGroup({
 			command: argv[0],
@@ -123,7 +124,7 @@ export function listAgyModels(argv: string[], timeoutMs: number, env: NodeJS.Pro
  * anyway is not blocked by a listing that never worked: agy refuses an unknown id at startup with
  * the available list, which the session reports as its own startup error.
  */
-export function makeModelCatalog(argv: string[], env: NodeJS.ProcessEnv, timeoutMs: number, log: (line: string) => void): ModelCatalog {
+export function makeModelCatalog(argv: AgyArgv, env: NodeJS.ProcessEnv, timeoutMs: number, log: (line: string) => void): ModelCatalog {
 	let pending: Promise<AgyModel[] | null> | null = null;
 	let settled: AgyModel[] | null = null;
 	let reason: string | null = null;

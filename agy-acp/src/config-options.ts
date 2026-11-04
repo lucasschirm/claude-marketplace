@@ -79,6 +79,11 @@ export function agyModeFlag(modeId: string): string | undefined {
 	return AGY_MODE_FLAGS[modeId];
 }
 
+/** `low` -> `Low`, for a selector label; an empty value stays empty rather than throwing. */
+function capitalise(value: string): string {
+	return value === "" ? value : `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
 /** The flag-level view of a session: what its next agy process must be launched with. */
 export interface LaunchFlags {
 	model?: string | undefined;
@@ -257,7 +262,7 @@ export class SessionSelection {
 				currentValue: this.effort,
 				options: [AGY_DEFAULT_CHOICE, ...AGY_EFFORTS].map((value) => ({
 					value,
-					name: value === AGY_DEFAULT_CHOICE ? "agy default" : `${value[0].toUpperCase()}${value.slice(1)}`,
+					name: value === AGY_DEFAULT_CHOICE ? "agy default" : capitalise(value),
 				})),
 			},
 		];

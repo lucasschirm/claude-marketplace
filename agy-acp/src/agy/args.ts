@@ -6,6 +6,19 @@
 
 import type { AgyCumulative } from "./contract.ts";
 
+/**
+ * The argv of an agy launch: non-empty by construction, which is what lets `argv[0]` be read without a
+ * check at every call site. An empty `argvPrefix` is not "the command with no prefix" - see
+ * `resolveArgv` and withEnvDefaults in launch.ts.
+ */
+export type AgyArgv = [string, ...string[]];
+
+/** The non-empty argv a launch resolves to: the configured prefix, or the command on its own. */
+export function resolveArgv(source: { argvPrefix?: string[] | undefined; command?: string | undefined }): AgyArgv {
+	const [first, ...rest] = source.argvPrefix ?? [];
+	return first !== undefined ? [first, ...rest] : [source.command ?? "agy"];
+}
+
 /** The event name a probe sends: agy ignores unknown events (stderr warning) but emits `init`. */
 export const AGY_PROBE_EVENT = "agy-acp-probe";
 

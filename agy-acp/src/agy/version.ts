@@ -4,6 +4,7 @@
 // fixtures were recorded against a tested version, and any other version is at best untested; an
 // untested version produces a warning, and `AGY_ACP_STRICT_VERSION=1` turns it into a refusal.
 
+import type { AgyArgv } from "./args.ts";
 import { spawnProcessGroup } from "../lib/child-process.ts";
 
 /** Versions the fixtures and driver were recorded and tested against. */
@@ -24,7 +25,7 @@ export interface AgyVersionStatus {
 
 /** Runs `argv` (e.g. `["agy", "--version"]`) in `env`, bounded by `timeoutMs`, and judges the printed version. Throws when the binary cannot be run, times out, or prints no version. */
 export async function checkAgyVersion(
-	argv: string[],
+	argv: AgyArgv,
 	timeoutMs: number = DEFAULT_TIMEOUT_MS,
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<AgyVersionStatus> {
@@ -35,7 +36,7 @@ export async function checkAgyVersion(
 	return { version, tested, strictRefusal: !tested && strict, warning };
 }
 
-function runVersionCommand(argv: string[], timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<string> {
+function runVersionCommand(argv: AgyArgv, timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const child = spawnProcessGroup({
 			command: argv[0],

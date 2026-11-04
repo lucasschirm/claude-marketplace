@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { spawnProcessGroup } from "../lib/child-process.ts";
 import { DEFAULT_MAX_FRAME_BYTES, FrameDecoder } from "../framing.ts";
-import { AGY_PROBE_EVENT, agyArgs } from "./args.ts";
+import { AGY_PROBE_EVENT, agyArgs, resolveArgv } from "./args.ts";
 import type { AgyProcessOptions } from "./args.ts";
 import type { AgyExitInfo, AgyResultEventDelta } from "./events.ts";
 import { initialStateOf, type AgyCumulative, cumulativeOf, parseAgyLine, resultDeltas } from "./contract.ts";
@@ -47,10 +47,10 @@ export class AgyProcess extends EventEmitter {
 		this.graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
 		this.termMs = options.termMs ?? DEFAULT_TERM_MS;
 		this.cumulativeState = initialStateOf(options.previous);
-		const argv = [...(options.argvPrefix ?? [options.command ?? "agy"]), ...agyArgs(options)];
+		const [command, ...prefixArgs] = resolveArgv(options);
 		this.child = spawnProcessGroup({
-			command: argv[0],
-			args: argv.slice(1),
+			command,
+			args: [...prefixArgs, ...agyArgs(options)],
 			cwd: options.cwd,
 			// ENOENT reports through "close" with code null - one terminal event either way.
 			env: options.env ?? process.env,
