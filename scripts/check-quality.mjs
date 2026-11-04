@@ -575,6 +575,38 @@ function countAgyStdoutViolations() {
 	return { count: hits.length, hits };
 }
 
+/**
+ * Where the environment may be read. `process.env` is a global the whole process shares, and a module
+ * that reaches for it is a module that cannot be handed a different one: agy/version.ts took an `env`
+ * parameter, spawned the child with it, and then read the strict-version flag off `process.env`, so a
+ * session launched with its own environment was judged against this process's (F5).
+ *
+ * The doors: config.ts (the typed reader every knob goes through), launch.ts and main.ts (the argv/env
+ * entry points), and bridge-hook.ts and bridge-server.ts (a hook child has no caller to be handed an
+ * env by - its environment IS its input). Everywhere else takes `NodeJS.ProcessEnv` as a parameter.
+ * Mentions in comments do not count; the two remaining reads (a session env defaulting to this
+ * process's, in spawn-agy.ts and agy/process.ts) are ratcheted so a third cannot appear quietly.
+ */
+const ENV_DOORS = new Set([
+	"agy-acp/src/config.ts",
+	"agy-acp/src/launch.ts",
+	"agy-acp/src/main.ts",
+	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/bridge-server.ts",
+]);
+
+function countEnvAccessOutsideDoors() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		if (ENV_DOORS.has(rel(file))) continue;
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(/\bprocess\s*\.\s*env\b/g)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
 /** How many top-level arguments a call text ("(a, b)") carries; commas inside nested brackets, literals or
  * comments do not count. Used to tell `write(x)` from `write(x, cb)`. */
 function topLevelArgCount(call) {
@@ -900,6 +932,11 @@ const INVARIANTS = [
 		name: "agyStdoutFramesOnly",
 		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
+	},
+	{
+		name: "envAccessLocation",
+		description: "process.env is read only in agy-acp/src config.ts, launch.ts, main.ts, bridge-hook.ts, bridge-server.ts",
+		measure: countEnvAccessOutsideDoors,
 	},
 	{
 		name: "stdoutExitDrain",

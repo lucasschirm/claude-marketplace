@@ -5,7 +5,8 @@
 // untested version produces a warning, and `AGY_ACP_STRICT_VERSION=1` turns it into a refusal.
 
 import type { AgyArgv } from "./args.ts";
-import { spawnProcessGroup } from "../lib/child-process.ts";
+import { envFlag } from "../config.ts";
+import { runAgyOneShot } from "./one-shot.ts";
 
 /** Versions the fixtures and driver were recorded and tested against. */
 export const TESTED_AGY_VERSIONS = ["1.4.2"];
@@ -26,74 +27,37 @@ export interface AgyVersionStatus {
 /** Runs `argv` (e.g. `["agy", "--version"]`) in `env`, bounded by `timeoutMs`, and judges the printed version. Throws when the binary cannot be run, times out, or prints no version. */
 export async function checkAgyVersion(
 	argv: AgyArgv,
+	env: NodeJS.ProcessEnv,
 	timeoutMs: number = DEFAULT_TIMEOUT_MS,
-	env: NodeJS.ProcessEnv = process.env,
 ): Promise<AgyVersionStatus> {
 	const version = await runVersionCommand(argv, timeoutMs, env);
 	const tested = TESTED_AGY_VERSIONS.includes(version);
-	const strict = process.env.AGY_ACP_STRICT_VERSION === "1";
+	// The env the caller handed us, never this process's: a session can be launched with its own
+	// environment, and the strict-version refusal belongs to that session, not to whoever spawned it.
+	const strict = envFlag(env, "AGY_ACP_STRICT_VERSION");
 	const warning = tested ? null : `agy ${version} is untested; agy-acp is tested against ${TESTED_AGY_VERSIONS.join(", ")}`;
 	return { version, tested, strictRefusal: !tested && strict, warning };
 }
 
-function runVersionCommand(argv: AgyArgv, timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const child = spawnProcessGroup({
-			command: argv[0],
-			args: argv.slice(1),
-			env,
-			// --version exits on its own; the bound is for a hung binary, not for work.
-			timeoutMs,
-		});
-		let stdout = "";
-		let stderr = "";
-		let settled = false;
-		const fail = (message: string) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(watchdog);
-			reject(new Error(`${message}; stderr: ${stderr.trim() || "(empty)"}`));
-		};
-		const finish = (code: number | null, signal: NodeJS.Signals | null) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(watchdog);
-			const version = stdout
-				.split("\n")
-				.map((l) => l.trim())
-				.find((l) => l !== "")
-				?.split(/\s+/)[0];
-			if (code === 0 && version) {
-				resolve(version);
-			} else {
-				fail(`agy --version exited with code=${code} signal=${signal ?? "none"} output=${JSON.stringify(stdout.trim())}`);
-			}
-		};
-		child.stdout?.on("data", (d: Buffer) => {
-			stdout += d.toString("utf8");
-		});
-		child.stderr?.on("data", (d: Buffer) => {
-			stderr += d.toString("utf8");
-		});
-		// The spawn timeout SIGTERMs only the child's pid, once; a binary that ignores SIGTERM must
-		// not keep this promise alive - a watchdog kills the group and reports the timeout explicitly.
-		const watchdog = setTimeout(() => {
-			if (child.pid !== undefined) {
-				try {
-					process.kill(-child.pid, "SIGKILL");
-				} catch {
-					// the group is already gone
-				}
-			}
-			fail(`agy --version timed out after ${timeoutMs} ms`);
-		}, timeoutMs);
-		watchdog.unref();
-		child.on("error", (err: Error) => fail(`cannot run ${argv[0]}: ${err.message}`));
-		// "close" (not "exit"): stdout is fully delivered before the terminal state (process.ts, same).
-		child.on("close", (code, signal) => finish(code, signal));
-	});
+/** The first token of the first non-empty stdout line, or the failure that explains why there is none. */
+async function runVersionCommand(argv: AgyArgv, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<string> {
+	const r = await runAgyOneShot(argv, timeoutMs, env);
+	const context = `stderr: ${r.stderr.trim() || "(empty)"}`;
+	if (r.spawnError !== null) {
+		throw new Error(`cannot run ${argv[0]}: ${r.spawnError.message}; ${context}`);
+	}
+	if (r.timedOut) {
+		throw new Error(`agy --version timed out after ${timeoutMs} ms; ${context}`);
+	}
+	const version = r.stdout
+		.split("\n")
+		.map((l) => l.trim())
+		.find((l) => l !== "")
+		?.split(/\s+/)[0];
+	if (r.code === 0 && version !== undefined && version !== "") {
+		return version;
+	}
+	throw new Error(
+		`agy --version exited with code=${r.code} signal=${r.signal ?? "none"} output=${JSON.stringify(r.stdout.trim())}; ${context}`,
+	);
 }

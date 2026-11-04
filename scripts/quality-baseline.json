@@ -7,6 +7,7 @@
     "jsonParseLocation": 8,
     "noStdioWrites": 0,
     "agyStdoutFramesOnly": 0,
+    "envAccessLocation": 2,
     "stdoutExitDrain": 0,
     "emptyCatch": 47,
     "piExtensionsMatchDisk": 0,
@@ -19,8 +20,8 @@
     "biome.suspicious/noReturnAssign": 5,
     "biome.complexity/useOptionalChain": 8,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
-    "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noExplicitAny": 151,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
@@ -55,9 +56,10 @@
     "agy-acp/src/agy/args.ts": 91,
     "agy-acp/src/agy/contract.ts": 311,
     "agy-acp/src/agy/events.ts": 31,
-    "agy-acp/src/agy/models.ts": 187,
+    "agy-acp/src/agy/models.ts": 147,
+    "agy-acp/src/agy/one-shot.ts": 80,
     "agy-acp/src/agy/process.ts": 327,
-    "agy-acp/src/agy/version.ts": 100,
+    "agy-acp/src/agy/version.ts": 64,
     "agy-acp/src/bridge-cleanup.ts": 54,
     "agy-acp/src/bridge-hook.ts": 134,
     "agy-acp/src/bridge-server.ts": 319,
@@ -408,8 +410,15 @@
       "changes": [
         "agy-acp/src/bridge-hook.ts: 134 lines > baseline 127 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "the new envAccessLocation invariant starts at 2: spawn-agy.ts and agy/process.ts each default a session env to this process's, which is the deliberate inherit lib/child-process.ts refuses to make implicitly; a third read is a regression",
+      "changes": [
+        "envAccessLocation: undefined -> 2"
+      ]
     }
   ],
-  "generatedFrom": "c5b4726",
+  "generatedFrom": "5d32bd8",
   "biomeConfigHash": "c8dc254289df38ab"
 }

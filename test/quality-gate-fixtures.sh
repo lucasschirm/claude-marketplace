@@ -328,6 +328,23 @@ printf 'process.stdout.write("agy-acp --version");\n' >>agy-acp/src/main.ts
 qa pass "but main.ts may write --version/--help on stdout" --only agyStdoutFramesOnly --full
 cp "$WORK/main.ts.orig" agy-acp/src/main.ts
 adrop
+# envAccessLocation: the environment comes in as a parameter, except at the doors. agy/version.ts read
+# the strict-version flag off process.env while spawning the child with the env it was handed (F5).
+aprobe src/zz-env.ts 'export function strict(): boolean {
+	return process.env.AGY_ACP_STRICT_VERSION === "1";
+}'
+qa fail "a process.env read outside the config doors fails envAccessLocation" --only envAccessLocation --full
+expect_line "the read is reported" "agy-acp/src/zz-env.ts:2"
+aprobe src/zz-env.ts 'export function strict(env: NodeJS.ProcessEnv): boolean {
+	// process.env is what this must NOT do - a mention is not a read
+	return env.AGY_ACP_STRICT_VERSION === "1";
+}'
+qa pass "the same file passes once the env is a parameter (and a comment naming process.env is not a read)" --only envAccessLocation --full
+adrop
+cp agy-acp/src/config.ts "$WORK/config.ts.orig"
+printf 'export const doorRead = process.env.AGY_ACP_LOG;\n' >>agy-acp/src/config.ts
+qa pass "but config.ts is a door" --only envAccessLocation --full
+cp "$WORK/config.ts.orig" agy-acp/src/config.ts
 # stdoutExitDrain: the decision must reach the pipe before the process ends. bridge-hook.ts truncated a
 # 256 KiB deny reason exactly this way, and agy reads a half-written decision as no decision at all.
 aprobe src/zz-drain.ts 'export function decide(line: string): void {

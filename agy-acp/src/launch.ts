@@ -85,7 +85,7 @@ export function makeVersionGate(launch: AgyLaunchOptions): () => Promise<AgyVers
 	let cached: Promise<AgyVersionStatus> | null = null;
 	return () => {
 		if (!cached) {
-			cached = checkAgyVersion([...launchArgv(launch), "--version"], undefined, launch.env ?? process.env).catch((err: Error) => {
+			cached = checkAgyVersion([...launchArgv(launch), "--version"], launch.env ?? process.env).catch((err: Error) => {
 				cached = null; // a transient spawn failure is not a verdict about the version
 				throw err;
 			});
