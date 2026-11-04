@@ -100,9 +100,11 @@ export function truncate(text: string, maxChars: number): string {
 		return text;
 	}
 	let cut = text.slice(0, maxChars);
-	const tail = cut.codePointAt(cut.length - 1);
-	if (tail !== undefined && tail >= 0xd800 && tail <= 0xdfff) {
-		cut = cut.slice(0, -1); // a split surrogate pair
+	// Only a HIGH surrogate last (0xD800-0xDBFF) is half a character: its low half is in the part being dropped. A low
+	// surrogate last closes a pair whose high half is already in `cut` - whole; NaN on an empty cut fails both comparisons.
+	const last = cut.charCodeAt(cut.length - 1);
+	if (last >= 0xd800 && last <= 0xdbff) {
+		cut = cut.slice(0, -1);
 	}
 	return `${cut}\n… [truncated, ${text.length} characters total]`;
 }

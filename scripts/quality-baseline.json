@@ -18,8 +18,8 @@
     "biome.suspicious/noReturnAssign": 5,
     "biome.complexity/useOptionalChain": 8,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
-    "biome.suspicious/noExplicitAny": 151,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
@@ -85,7 +85,7 @@
     "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 94,
     "agy-acp/src/turn.ts": 140,
-    "agy-acp/src/update-map.ts": 164
+    "agy-acp/src/update-map.ts": 166
   },
   "notes": [
     {
@@ -393,8 +393,15 @@
         "agy-acp/src/update-map.ts: 164 lines > baseline 152 (files may only shrink)",
         "biome.jsonc changed since these numbers were recorded (32be8dcbbc1d0ce8 -> c8dc254289df38ab): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "the F1 surrogate fix costs update-map.ts two lines: one explanatory comment pair for a rule that is not obvious from the range test, and the house three-line if block",
+      "changes": [
+        "agy-acp/src/update-map.ts: 166 lines > baseline 164 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "739d3f1",
+  "generatedFrom": "049b370",
   "biomeConfigHash": "c8dc254289df38ab"
 }
