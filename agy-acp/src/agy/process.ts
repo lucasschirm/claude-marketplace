@@ -219,11 +219,10 @@ export class AgyProcess extends EventEmitter {
 			setImmediate(onExit);
 			return;
 		}
+		// `settle` is declared before the two closures that call it - it is the one binding here that could be reached
+		// synchronously. Its own reads of `timer` and `onExitEvent` happen when it RUNS (a timeout, or an "exit" event),
+		// by which time both exist: neither `once` nor `setTimeout` can call back before this block ends.
 		let done = false;
-		const onExitEvent = () => settle(onExit);
-		this.once("exit", onExitEvent);
-		const timer = setTimeout(() => settle(onTimeout), ms);
-		timer.unref();
 		const settle = (fn: () => void) => {
 			if (done) {
 				return;
@@ -233,6 +232,10 @@ export class AgyProcess extends EventEmitter {
 			this.off("exit", onExitEvent);
 			fn();
 		};
+		const onExitEvent = () => settle(onExit);
+		this.once("exit", onExitEvent);
+		const timer = setTimeout(() => settle(onTimeout), ms);
+		timer.unref();
 	}
 
 	private onExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -308,6 +311,9 @@ export class AgyProcess extends EventEmitter {
 		// result: cumulative counters become per-turn deltas; the raw state is kept for a resume.
 		const cumulative = cumulativeOf(event.result);
 		const delta = resultDeltas(event.result, this.cumulativeState);
+		if (delta.clamped) {
+			this.log("agy's cumulative counters went backwards (a resume answered with a fresh conversation?) - deltas clamped at 0");
+		}
 		this.cumulativeState = cumulative;
 		this.emit("event", {
 			event: "result",

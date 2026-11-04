@@ -1101,3 +1101,23 @@ test("the bridge drops a request line that exceeds the cap, before any token che
 		await server.stop();
 	}
 });
+
+// A minor from the review: workspaceRoots() ran fs.realpathSync on every hook request, inside the async
+// handler that keeps agy - and the tool call - waiting. A session's cwd is fixed at session/new.
+test("the workspace root is resolved once per session, not once per hook request", async () => {
+	const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-roots-")));
+	const real = path.join(tmp, "real");
+	const link = path.join(tmp, "link");
+	fs.mkdirSync(real);
+	fs.symlinkSync(real, link);
+	let h: GateHarness | null = null;
+	try {
+		h = await startGateHarness({ cwd: link });
+		const first = h.gate.workspaceRoots;
+		assert.deepStrictEqual(first, [real], "the symlinked cwd is resolved");
+		assert.strictEqual(h.gate.workspaceRoots, first, "and the same array comes back: resolved once, cached");
+	} finally {
+		await h?.gate.dispose();
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});

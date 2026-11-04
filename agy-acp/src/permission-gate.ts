@@ -77,6 +77,7 @@ export class PermissionGate {
 	private readonly stream: StreamCalls;
 	private readonly asks: PendingAsks;
 	private disposedFlag = false;
+	private resolvedRoots: string[] | null = null;
 	private cancelledAtTurn = -1; // the prompt count when a session/cancel ran; -1 = never
 
 	constructor(opts: PermissionGateOptions) {
@@ -112,13 +113,21 @@ export class PermissionGate {
 		await this.bridge.start();
 	}
 
-	/** The resolved (realpath) workspace roots: the session cwd, resolved. */
-	private workspaceRoots(): string[] {
-		try {
-			return [fs.realpathSync(this.opts.cwd)];
-		} catch {
-			return [this.opts.cwd];
+	/**
+	 * The resolved (realpath) workspace roots: the session cwd, resolved once. A session's cwd is fixed at session/new so
+	 * this cannot go stale, and it used to be a synchronous realpathSync on the path every hook request takes - inside the
+	 * async handler that answers agy while a tool call waits.
+	 */
+	get workspaceRoots(): string[] {
+		if (this.resolvedRoots === null) {
+			try {
+				this.resolvedRoots = [fs.realpathSync(this.opts.cwd)];
+			} catch {
+				// An unresolvable cwd is reported by session/new; the policy falls back to the raw path.
+				this.resolvedRoots = [this.opts.cwd];
+			}
 		}
+		return this.resolvedRoots;
 	}
 
 	setMode(modeId: string): void {
@@ -154,7 +163,7 @@ export class PermissionGate {
 			return { decision: "deny", reason: sessionEndedReason() };
 		}
 		const { name, args } = req.toolCall;
-		const roots = this.workspaceRoots();
+		const roots = this.workspaceRoots;
 		const policy = decidePolicy({
 			mode: this.mode,
 			toolName: name,

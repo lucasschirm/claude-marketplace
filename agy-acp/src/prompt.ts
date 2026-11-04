@@ -28,7 +28,7 @@ function blockText(b: Record<string, unknown>, i: number): string {
 				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource block needs a resource object`);
 			}
 			const text = (resource as Record<string, unknown>).text;
-			// Only embedded text is flammable; a blob resource cannot be flattened, not even away.
+			// Only embedded text is flattenable; a blob resource cannot be flattened, not even away.
 			if (typeof text !== "string") {
 				throw new RpcError(INVALID_PARAMS, `prompt block ${i}: a resource block carries no embedded text (blobs are not supported)`);
 			}

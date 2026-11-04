@@ -20,11 +20,11 @@
     "biome.style/useBlockStatements": 637,
     "biome.suspicious/noShadow": 56,
     "biome.suspicious/noReturnAssign": 5,
-    "biome.complexity/useOptionalChain": 8,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
-    "biome.suspicious/noGlobalIsNan": 8,
+    "biome.complexity/useOptionalChain": 8,
     "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
+    "biome.suspicious/noGlobalIsNan": 8,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedImports": 1,
     "biome.correctness/noUnusedFunctionParameters": 1
@@ -56,11 +56,11 @@
     "agy-acp/src/acp.ts": 198,
     "agy-acp/src/agy-driver.ts": 40,
     "agy-acp/src/agy/args.ts": 91,
-    "agy-acp/src/agy/contract.ts": 311,
+    "agy-acp/src/agy/contract.ts": 325,
     "agy-acp/src/agy/events.ts": 31,
     "agy-acp/src/agy/models.ts": 147,
     "agy-acp/src/agy/one-shot.ts": 89,
-    "agy-acp/src/agy/process.ts": 324,
+    "agy-acp/src/agy/process.ts": 330,
     "agy-acp/src/agy/version.ts": 64,
     "agy-acp/src/bridge-cleanup.ts": 54,
     "agy-acp/src/bridge-hook.ts": 153,
@@ -76,10 +76,10 @@
     "agy-acp/src/jsonrpc.ts": 354,
     "agy-acp/src/launch.ts": 150,
     "agy-acp/src/lib/child-process.ts": 40,
-    "agy-acp/src/main.ts": 119,
+    "agy-acp/src/main.ts": 124,
     "agy-acp/src/map-steps.ts": 89,
     "agy-acp/src/pending-asks.ts": 113,
-    "agy-acp/src/permission-gate.ts": 299,
+    "agy-acp/src/permission-gate.ts": 308,
     "agy-acp/src/permission.ts": 304,
     "agy-acp/src/prompt.ts": 67,
     "agy-acp/src/selection-methods.ts": 120,
@@ -437,8 +437,18 @@
       "changes": [
         "agy-acp/src/turn.ts: 144 lines > baseline 140 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "the leftovers cost 33 lines across four files: the clamp and its clamped-flag report in contract.ts, that log plus the settle-order comment in process.ts, the cached workspace roots in permission-gate.ts, and main.ts building the server before the shutdown that disposes it",
+      "changes": [
+        "agy-acp/src/agy/contract.ts: 325 lines > baseline 311 (files may only shrink)",
+        "agy-acp/src/agy/process.ts: 330 lines > baseline 324 (files may only shrink)",
+        "agy-acp/src/main.ts: 124 lines > baseline 119 (files may only shrink)",
+        "agy-acp/src/permission-gate.ts: 308 lines > baseline 299 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "9041ac3",
+  "generatedFrom": "9dd5bf2",
   "biomeConfigHash": "c8dc254289df38ab"
 }

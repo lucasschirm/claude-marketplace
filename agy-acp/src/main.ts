@@ -81,6 +81,17 @@ export function main(args: string[]): void {
 	// The exit path (issue #54): a client hang-up or a signal cancels every turn, denies every
 	// pending request, disposes every child and removes every bridge dir before the process exits -
 	// under a deadline, so a wedged child cannot turn a hang-up into a process to kill by hand.
+	// The two know about each other: the shutdown's cleanup disposes the server's sessions, and the server's onClose
+	// begins the shutdown. Building the server first and handing it the shutdown after is what keeps either closure from
+	// reading a `const` declared below it.
+	let begin: (reason: string) => void = () => {};
+	const server = startAgyAcpServer({
+		agy: launch,
+		input: process.stdin,
+		output: process.stdout,
+		log,
+		onClose: (reason) => begin(reason),
+	});
 	const exit = createShutdown({
 		log,
 		timeoutMs: lifecycleConfigFromEnv().shutdownTimeoutMs,
@@ -89,13 +100,7 @@ export function main(args: string[]): void {
 			await cleanupStaleBridges(log); // the dirs of any session whose teardown could not finish
 		},
 	});
-	const server = startAgyAcpServer({
-		agy: launch,
-		input: process.stdin,
-		output: process.stdout,
-		log,
-		onClose: (reason) => void exit.begin(reason),
-	});
+	begin = (reason) => void exit.begin(reason);
 	exit.installSignals(); // after the server exists: the cleanup disposes its sessions
 }
 

@@ -264,7 +264,8 @@ export function parseAgyLine(line: string): ParsedAgyLine {
 	try {
 		raw = JSON.parse(line);
 	} catch {
-		return { kind: "unknown", event: "", raw };
+		// The line itself is the evidence the caller logs; `raw` is still undefined here.
+		return { kind: "unknown", event: "", raw: line };
 	}
 	if (!isRecord(raw) || typeof raw.event !== "string") {
 		return { kind: "unknown", event: "", raw };
@@ -290,21 +291,34 @@ export interface AgyResultDelta {
 	usage: AgyUsage;
 	num_turns: number;
 	duration_seconds: number;
+	/** True when a counter went backwards and was clamped: the caller logs it, the client never sees it. */
+	clamped: boolean;
 }
 
-/** Per-turn delta of a result against the cumulative counters observed before this turn. */
+/**
+ * Per-turn delta of a result against the cumulative counters observed before this turn, every counter clamped at 0. A
+ * cumulative counter is supposed to rise, but a resume agy answers with a FRESH conversation reports counters below the
+ * ones already seen, and the subtraction then told the client "this turn used -45 tokens, in -7 seconds, over -2 turns".
+ * `clamped` says it happened, so the driver can log the jump.
+ */
 export function resultDeltas(result: AgyResultEvent["result"], previous: AgyCumulative): AgyResultDelta {
 	const u = result.usage;
 	const p = previous.usage;
+	let clamped = false;
+	const forward = (now: number, before: number): number => {
+		clamped ||= now < before;
+		return Math.max(0, now - before);
+	};
 	return {
 		usage: {
-			input_tokens: u.input_tokens - p.input_tokens,
-			output_tokens: u.output_tokens - p.output_tokens,
-			thinking_tokens: u.thinking_tokens - p.thinking_tokens,
-			cache_read_tokens: u.cache_read_tokens - p.cache_read_tokens,
-			total_tokens: u.total_tokens - p.total_tokens,
+			input_tokens: forward(u.input_tokens, p.input_tokens),
+			output_tokens: forward(u.output_tokens, p.output_tokens),
+			thinking_tokens: forward(u.thinking_tokens, p.thinking_tokens),
+			cache_read_tokens: forward(u.cache_read_tokens, p.cache_read_tokens),
+			total_tokens: forward(u.total_tokens, p.total_tokens),
 		},
-		num_turns: result.num_turns - previous.num_turns,
-		duration_seconds: result.duration_seconds - previous.duration_seconds,
+		num_turns: forward(result.num_turns, previous.num_turns),
+		duration_seconds: forward(result.duration_seconds, previous.duration_seconds),
+		clamped,
 	};
 }
