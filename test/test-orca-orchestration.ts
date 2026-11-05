@@ -4,6 +4,7 @@ import * as assert from "node:assert";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { must } from "./helpers/must.ts";
 
 export default function testRunner(pi: ExtensionAPI): void {
 	const registeredTools = new Map<string, any>();
@@ -231,7 +232,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 	process.env.ORCA_BIN = mockOrcaBin;
 	process.env.ORCA_CLI_COMMAND = mockOrcaBin;
 
-	const eventListeners: Record<string, Function[]> = {};
+	const eventListeners: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 
 	const mockPi = {
 		...pi,
@@ -288,16 +289,13 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			console.log("✓ Command /orchestration and CLI flag verified");
 
 			// Mock context
-			let currentStatus: string | undefined;
 			const notifiedMessages: string[] = [];
 			const mockCtx = {
 				cwd: ctx.cwd,
 				mode: "tui" as const,
 				hasUI: true,
 				ui: {
-					setStatus: (_key: string, text?: string) => {
-						currentStatus = text;
-					},
+					setStatus: (_key: string, _text?: string) => {},
 					notify: (msg: string) => {
 						notifiedMessages.push(msg);
 					},
@@ -310,7 +308,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 3. Test before_agent_start Prompt Augmentation
 			console.log("Test 3: Testing prompt augmentation...");
-			const beforeAgentStartHandlers = eventListeners["before_agent_start"] || [];
+			const beforeAgentStartHandlers = eventListeners.before_agent_start || [];
 			assert.ok(beforeAgentStartHandlers.length > 0, "before_agent_start handler registered");
 			const dummyEvent = {
 				systemPrompt: "You are an assistant.",
@@ -343,7 +341,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 4. Test orca_orchestration_dispatch Tool Execution
 			console.log("Test 4: Testing orca_orchestration_dispatch execution...");
-			const dispatchTool = registeredTools.get("orca_orchestration_dispatch")!;
+			const dispatchTool = must(registeredTools.get("orca_orchestration_dispatch"), "the orca_orchestration_dispatch tool");
 			const dispatchRes = await dispatchTool.execute(
 				"call-disp-1",
 				{
@@ -395,7 +393,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 6. Test orca_orchestration_status
 			console.log("Test 6: Testing orca_orchestration_status inspection...");
-			const statusTool = registeredTools.get("orca_orchestration_status")!;
+			const statusTool = must(registeredTools.get("orca_orchestration_status"), "the orca_orchestration_status tool");
 
 			// 6a. Single dispatch status
 			const statusRes = await statusTool.execute("call-stat-1", { dispatch_id: "ctx-mock-1" }, undefined, undefined, mockCtx);
@@ -428,7 +426,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 7. Test orca_orchestration_reply
 			console.log("Test 7: Testing orca_orchestration_reply...");
-			const replyTool = registeredTools.get("orca_orchestration_reply")!;
+			const replyTool = must(registeredTools.get("orca_orchestration_reply"), "the orca_orchestration_reply tool");
 			const replyRes = await replyTool.execute(
 				"call-rep-1",
 				{ message_id: "msg-q-1", answer: "Proceed with Option B" },
@@ -441,7 +439,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 8. Test orca_orchestration_release
 			console.log("Test 8: Testing orca_orchestration_release...");
-			const releaseTool = registeredTools.get("orca_orchestration_release")!;
+			const releaseTool = must(registeredTools.get("orca_orchestration_release"), "the orca_orchestration_release tool");
 			const releaseRes = await releaseTool.execute("call-rel-1", { dispatch_id: "ctx-mock-1" }, undefined, undefined, mockCtx);
 			assert.match(releaseRes.content[0].text, /Worker terminal for dispatch ctx-mock-1 has been successfully released/);
 			console.log("✓ orca_orchestration_release released worker terminal");
@@ -450,7 +448,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 			const dirtyDir = path.join(tmpDir, "dirty-wt");
 			fs.mkdirSync(dirtyDir, { recursive: true });
 			// Initialize a git repo and make it dirty
-			const { execSync } = require("child_process");
+			const { execSync } = require("node:child_process");
 			execSync(
 				"git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b feature-test -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt",
 				{ cwd: dirtyDir },
@@ -489,7 +487,7 @@ console.log(JSON.stringify({ ok: true, result: {} }));
 
 			// 9. Test orca_orchestration_observe Tool
 			console.log("Test 9: Testing orca_orchestration_observe status reporting...");
-			const observeTool = registeredTools.get("orca_orchestration_observe")!;
+			const observeTool = must(registeredTools.get("orca_orchestration_observe"), "the orca_orchestration_observe tool");
 			const observeRes = await observeTool.execute("call-obs-1", {}, undefined, undefined, mockCtx);
 			assert.match(observeRes.content[0].text, /Orca Orchestration Observer: Active/);
 

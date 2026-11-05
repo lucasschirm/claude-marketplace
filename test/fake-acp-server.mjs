@@ -54,7 +54,7 @@ function claimNewFailure() {
 }
 
 function send(obj) {
-	process.stdout.write(JSON.stringify(obj) + "\n");
+	process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
 function update(sessionId, u) {

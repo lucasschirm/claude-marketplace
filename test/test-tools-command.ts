@@ -231,7 +231,7 @@ export default function testToolsExtension(pi: ExtensionAPI) {
 	console.log("Test 3: Testing tools extension in Pi runtime...");
 	toolsExtension(pi);
 
-	pi.on("session_start", async (_evt, ctx) => {
+	pi.on("session_start", async (_evt, _ctx) => {
 		assert(typeof pi.getActiveTools === "function", "pi.getActiveTools is available");
 		assert(typeof pi.getAllTools === "function", "pi.getAllTools is available");
 		assert(typeof pi.setActiveTools === "function", "pi.setActiveTools is available");

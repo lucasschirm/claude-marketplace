@@ -10,13 +10,13 @@ import * as os from "node:os";
 // announced/observed/stopped flags persist at the real change points, and re-watched restored
 // runs do not re-notify.
 export default function (pi: any) {
-	const handlers: Record<string, Function> = {};
+	const handlers: Record<string, (...args: unknown[]) => unknown> = {};
 	const tools: Record<string, any> = {};
 	const sent: { content: string; opts: any }[] = [];
 	const appended: Array<{ customType: string; data: any }> = [];
 
 	const mockPi = {
-		on(event: string, handler: Function) {
+		on(event: string, handler: (...args: unknown[]) => unknown) {
 			handlers[event] = handler;
 		},
 		registerTool(t: any) {

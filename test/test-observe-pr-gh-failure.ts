@@ -15,8 +15,6 @@ import * as os from "node:os";
 
 const consoleErrors: string[] = [];
 const consoleWarns: string[] = [];
-const originalConsoleError = console.error;
-const originalConsoleWarn = console.warn;
 console.error = (...args: unknown[]) => {
 	consoleErrors.push(args.join(" "));
 };
@@ -28,7 +26,7 @@ export default function (pi: any) {
 	const tools: Record<string, any> = {};
 	const commands: Record<string, any> = {};
 	const sentMessages: string[] = [];
-	const eventHandlers: Record<string, Function[]> = {};
+	const eventHandlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 	const notifications: Array<{ msg: string; type?: string }> = [];
 
 	let activeToolList: string[] = [];
@@ -206,7 +204,7 @@ exit 0
 
 			// The real session_start ran with the pi process cwd; trigger the branch check
 			// from the test repo (where the mock gh can resolve branch-alpha)
-			for (const h of eventHandlers["turn_end"] || []) {
+			for (const h of eventHandlers.turn_end || []) {
 				await h({ type: "turn_end" }, mockCtx);
 			}
 
@@ -221,7 +219,7 @@ exit 0
 			// T4-prep + outage start: an explicit observe_pr call that races the outage
 			fs.writeFileSync(path.join(tmpDir, "offline"), "1");
 			console.log("— GitHub outage started");
-			const observeTool = tools["observe_pr"];
+			const observeTool = tools.observe_pr;
 			const toolRes = await observeTool.execute("call-1", { pr_number: 202 }, undefined, undefined, mockCtx);
 			const toolText = toolRes.content[0].text;
 			console.log("observe_pr(202) during outage:", toolText);

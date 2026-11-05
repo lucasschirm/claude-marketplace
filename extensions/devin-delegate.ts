@@ -414,7 +414,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 	function getStallTimeoutMs(): number {
 		const flag = pi.getFlag("devin-turn-stall");
 		const n = flag != null ? parseInt(String(flag), 10) : NaN;
-		return (!isNaN(n) && n > 0 ? n : 30) * 60000;
+		return (!Number.isNaN(n) && n > 0 ? n : 30) * 60000;
 	}
 
 	function isPidAlive(pid: number): boolean {
@@ -634,7 +634,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		try {
 			const p = getEventsLogPath(currentPiSessionId, meta.sessionId);
 			fs.mkdirSync(path.dirname(p), { recursive: true });
-			fs.appendFileSync(p, JSON.stringify({ timestamp: new Date().toISOString(), type, data }) + "\n");
+			fs.appendFileSync(p, `${JSON.stringify({ timestamp: new Date().toISOString(), type, data })}\n`);
 		} catch (err) {
 			logError(`Failed to append event for ${meta.sessionId}: ${extractCliError(err)}`);
 		}
@@ -828,8 +828,9 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 		};
 
 		if (immediate) {
-			if (pendingMetaSaves.has(meta.sessionId)) {
-				clearTimeout(pendingMetaSaves.get(meta.sessionId)!.timer);
+			const pendingSave = pendingMetaSaves.get(meta.sessionId);
+			if (pendingSave) {
+				clearTimeout(pendingSave.timer);
 				pendingMetaSaves.delete(meta.sessionId);
 			}
 			save();
@@ -1171,7 +1172,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					});
 				} else if (u.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
 					for (const co of u.configOptions) {
-						if (co && co.id && Array.isArray(co.options)) configOptions.set(co.id, optionValues(co.options));
+						if (co?.id && Array.isArray(co.options)) configOptions.set(co.id, optionValues(co.options));
 					}
 				}
 			}
@@ -1357,7 +1358,13 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 				// this loop does not wait for that, so counting sessions alone emptied the whole queue.
 				const release = slots.tryReserve();
 				if (!release) break;
-				const task = queue.shift()!;
+				const task = queue.shift();
+				if (!task) {
+					// Unreachable while `queue.length > 0` guards the loop, but a slot was reserved one line
+					// above: handing it back is the difference between a no-op and a slot lost for the session.
+					release();
+					break;
+				}
 				persistState();
 				updateStatusUI();
 
@@ -1432,7 +1439,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 			const flagRuns = pi.getFlag("devin-max-runs");
 			if (flagRuns !== undefined && flagRuns !== null) {
 				const parsed = parseInt(String(flagRuns), 10);
-				if (!isNaN(parsed) && parsed > 0) maxRuns = parsed;
+				if (!Number.isNaN(parsed) && parsed > 0) maxRuns = parsed;
 			} else if (state.maxRuns && state.maxRuns > 0) {
 				maxRuns = state.maxRuns;
 			}
@@ -2591,7 +2598,7 @@ export default function devinDelegateExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				const newLimit = parseInt(parts[1], 10);
-				if (isNaN(newLimit) || newLimit <= 0) {
+				if (Number.isNaN(newLimit) || newLimit <= 0) {
 					ctx.ui.notify("Please specify a valid positive number for limit: /devin limit <n>", "warning");
 					return;
 				}

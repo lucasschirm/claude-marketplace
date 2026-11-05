@@ -92,8 +92,11 @@ export class AcpClient {
 			this.child.stdin.on("error", () => {});
 		}
 
+		// stdio is piped at spawn, so stdout is there; a `!` would turn a spawn that did not pipe into a
+		// TypeError raised inside readline, rather than a failure start() can report to its caller.
+		if (!this.child.stdout) throw new Error("the ACP child has no stdout - its protocol stream cannot be read");
 		this.rl = readline.createInterface({
-			input: this.child.stdout!,
+			input: this.child.stdout,
 			crlfDelay: Infinity,
 		});
 
@@ -164,7 +167,7 @@ export class AcpClient {
 
 	request(method: string, params: any, timeoutMs = 60000): Promise<any> {
 		return new Promise((resolve, reject) => {
-			if (!this.child || !this.child.stdin || this.child.killed) {
+			if (!this.child?.stdin || this.child.killed) {
 				return reject(new Error("devin acp process is not running"));
 			}
 			const id = this.nextRpcId++;
@@ -185,7 +188,7 @@ export class AcpClient {
 
 			this.pendingRequests.set(id, { resolve, reject, timer });
 			try {
-				this.child.stdin.write(JSON.stringify(req) + "\n");
+				this.child.stdin.write(`${JSON.stringify(req)}\n`);
 			} catch (err) {
 				// Synchronous write failure (e.g. destroyed stdin): don't leave a zombie
 				// pending entry — reject immediately.
@@ -201,9 +204,9 @@ export class AcpClient {
 	}
 
 	notify(method: string, params: any): void {
-		if (!this.child || !this.child.stdin || this.child.killed) return;
+		if (!this.child?.stdin || this.child.killed) return;
 		const msg: AcpMessage = { jsonrpc: "2.0", method, params };
-		this.child.stdin.write(JSON.stringify(msg) + "\n");
+		this.child.stdin.write(`${JSON.stringify(msg)}\n`);
 	}
 
 	private handleMessage(msg: AcpMessage): void {
@@ -219,16 +222,18 @@ export class AcpClient {
 			if (!taken) this.respondError(msg.id, -32601, `Method not found: ${msg.method}`);
 			return;
 		}
-		if (typeof msg.id === "number" && this.pendingRequests.has(msg.id)) {
-			const { resolve, reject, timer } = this.pendingRequests.get(msg.id)!;
-			if (timer) clearTimeout(timer);
-			this.pendingRequests.delete(msg.id);
-			if (msg.error) {
-				reject(new Error(msg.error.message || `RPC error ${msg.error.code}`));
-			} else {
-				resolve(msg.result);
+		if (typeof msg.id === "number") {
+			const pending = this.pendingRequests.get(msg.id);
+			if (pending) {
+				if (pending.timer) clearTimeout(pending.timer);
+				this.pendingRequests.delete(msg.id);
+				if (msg.error) {
+					pending.reject(new Error(msg.error.message || `RPC error ${msg.error.code}`));
+				} else {
+					pending.resolve(msg.result);
+				}
+				return;
 			}
-			return;
 		}
 
 		if (msg.method === "session/update" && msg.params) {
@@ -246,7 +251,7 @@ export class AcpClient {
 			data,
 		};
 		try {
-			this.logStream.write(JSON.stringify(entry) + "\n");
+			this.logStream.write(`${JSON.stringify(entry)}\n`);
 		} catch {}
 	}
 

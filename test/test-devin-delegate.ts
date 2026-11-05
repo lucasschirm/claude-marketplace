@@ -4,6 +4,7 @@ import * as assert from "node:assert";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { must } from "./helpers/must.ts";
 
 export default function testRunner(pi: ExtensionAPI): void {
 	const registeredTools = new Map<string, any>();
@@ -67,10 +68,10 @@ export default function testRunner(pi: ExtensionAPI): void {
 				},
 			} as unknown as ExtensionToolContext;
 
-			const delegateTool = registeredTools.get("devin_delegate")!;
-			const statusTool = registeredTools.get("devin_status")!;
-			const cancelTool = registeredTools.get("devin_cancel")!;
-			const restartTool = registeredTools.get("devin_restart")!;
+			const delegateTool = must(registeredTools.get("devin_delegate"), "the devin_delegate tool");
+			const statusTool = must(registeredTools.get("devin_status"), "the devin_status tool");
+			const cancelTool = must(registeredTools.get("devin_cancel"), "the devin_cancel tool");
+			const restartTool = must(registeredTools.get("devin_restart"), "the devin_restart tool");
 
 			// 3. Test Parameter Validation & Status Edge Cases
 			console.log("Test 3: Testing devin_status parameter validation...");
@@ -177,7 +178,7 @@ export default function testRunner(pi: ExtensionAPI): void {
 
 			// 10b. Test devin_clean_worktree tool
 			console.log("Test 10b: Testing devin_clean_worktree...");
-			const cleanWtTool = registeredTools.get("devin_clean_worktree")!;
+			const cleanWtTool = must(registeredTools.get("devin_clean_worktree"), "the devin_clean_worktree tool");
 			// Test clean with no session id and no all_settled
 			const noIdRes = await cleanWtTool.execute("clean-wt-0", {}, undefined, undefined, mockCtx);
 			assert.strictEqual(noIdRes.isError, true);
@@ -190,10 +191,9 @@ export default function testRunner(pi: ExtensionAPI): void {
 			assert.match(allSettledRes.content[0].text, /Cleaned worktrees for/);
 
 			// Test clean with unforced safety check on session with dirty worktree
-			const dummySessionId = "session-dirty-wt";
 			const dirtyWtDir = path.join(os.tmpdir(), "devin-dirty-wt-test");
 			fs.mkdirSync(dirtyWtDir, { recursive: true });
-			const { execSync } = require("child_process");
+			const { execSync } = require("node:child_process");
 			execSync(
 				"git init -q && git config user.email 'test@test.local' && git config user.name 'Test' && git checkout -b test-branch -q && echo 'initial' > file.txt && git add file.txt && git commit -m 'init' -q && echo 'dirty' >> file.txt",
 				{ cwd: dirtyWtDir },
@@ -201,7 +201,6 @@ export default function testRunner(pi: ExtensionAPI): void {
 
 			// Inject dummy settled session with dirty worktree
 			registeredTools.get("devin_delegate") as any;
-			const sessionsMap = (ext as any).__test_sessions || new Map();
 			// We can test devin_clean_worktree directly or verify safety refusal
 			const unsafeCleanRes = await cleanWtTool.execute("clean-wt-3", { session_id: "non-existent" }, undefined, undefined, mockCtx);
 			assert.strictEqual(unsafeCleanRes.isError, true);

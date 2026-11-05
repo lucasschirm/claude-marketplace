@@ -17,8 +17,6 @@ import * as os from "node:os";
 
 const consoleErrors: string[] = [];
 const consoleWarns: string[] = [];
-const originalConsoleError = console.error;
-const originalConsoleWarn = console.warn;
 console.error = (...args: unknown[]) => {
 	consoleErrors.push(args.join(" "));
 };
@@ -29,7 +27,7 @@ console.warn = (...args: unknown[]) => {
 export default function (pi: any) {
 	const tools: Record<string, any> = {};
 	const sentMessages: string[] = [];
-	const eventHandlers: Record<string, Function[]> = {};
+	const eventHandlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 	const notifications: Array<{ msg: string; type?: string }> = [];
 
 	let activeToolList: string[] = [];
@@ -282,7 +280,7 @@ process.exit(0);
 			await sleep(4000);
 
 			// Initial sync (online) must have tracked the task
-			const list1 = await tools["pr_tasks_list"].execute("call-1", {}, undefined, undefined, mockCtx);
+			const list1 = await tools.pr_tasks_list.execute("call-1", {}, undefined, undefined, mockCtx);
 			const list1Text = list1.content[0].text;
 			console.log("Initial list:", list1Text.split("\n")[0]);
 			assert(list1Text.includes("1001"), `Initial sync should have tracked conversation 1001: ${list1Text}`);
@@ -294,7 +292,7 @@ process.exit(0);
 			outageStartedAt = outageStart;
 			console.log("— GitHub outage started");
 			const settleStart = Date.now();
-			for (const h of eventHandlers["agent_before_settle"] || []) {
+			for (const h of eventHandlers.agent_before_settle || []) {
 				await h({ type: "agent_before_settle" }, mockCtx);
 			}
 			const settleDuration = Date.now() - settleStart;
@@ -348,7 +346,7 @@ process.exit(0);
 			);
 
 			// T4: a mutation during the outage fails fast and concise
-			const resolve1 = await tools["pr_task_resolve"].execute(
+			const resolve1 = await tools.pr_task_resolve.execute(
 				"call-2",
 				{ conversation_id: "1001", message: "done" },
 				undefined,
@@ -363,7 +361,7 @@ process.exit(0);
 			console.log("✓ T4: mutation failed fast with a concise message (no raw stderr, nothing posted)");
 
 			// T4: the list reports it could not be refreshed while degraded
-			const list2 = await tools["pr_tasks_list"].execute("call-3", {}, undefined, undefined, mockCtx);
+			const list2 = await tools.pr_tasks_list.execute("call-3", {}, undefined, undefined, mockCtx);
 			assert(list2.content[0].text.includes("could not be refreshed"), `T4: list should note the outage: ${list2.content[0].text}`);
 			console.log("✓ T4: pr_tasks_list reports the refresh outage");
 
@@ -372,7 +370,7 @@ process.exit(0);
 			console.log("— GitHub recovered; waiting for the next sync slot —");
 			await sleep(10000);
 
-			const resolve2 = await tools["pr_task_resolve"].execute(
+			const resolve2 = await tools.pr_task_resolve.execute(
 				"call-4",
 				{ conversation_id: "1001", message: "done" },
 				undefined,

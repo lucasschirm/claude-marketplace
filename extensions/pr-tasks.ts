@@ -1150,7 +1150,7 @@ export default function (pi: ExtensionAPI) {
 			let prNum: number | undefined;
 			if (rawPr !== undefined) {
 				const parsed = parseInt(String(rawPr).replace(/^#/, "").trim(), 10);
-				if (!isNaN(parsed) && parsed > 0) prNum = parsed;
+				if (!Number.isNaN(parsed) && parsed > 0) prNum = parsed;
 			}
 
 			await syncAllPRs(ctx.cwd, prNum);

@@ -24,7 +24,7 @@ export default function (pi: any) {
 	const tools: Record<string, any> = {};
 	const commands: Record<string, any> = {};
 	const sentMessages: string[] = [];
-	const eventHandlers: Record<string, Function[]> = {};
+	const eventHandlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 
 	let activeToolList: string[] = [];
 
@@ -136,7 +136,7 @@ exit 0
 
 	// One poll round, driven the way a turn end drives it (deterministic; the interval timer is 60 s).
 	async function pollRound() {
-		for (const h of eventHandlers["turn_end"] || []) {
+		for (const h of eventHandlers.turn_end || []) {
 			await h({ type: "turn_end" }, mockCtx);
 		}
 		// The round is scheduled, not awaited: give it time to finish its gh calls.
@@ -208,7 +208,7 @@ exit 0
 
 			// T7: the explicit observe_pr tool result carries the mergeability, and a PR that
 			// already conflicts when observed is not announced a second time by the first poll.
-			const res = await tools["observe_pr"].execute("call-1", { pr_number: 202 }, undefined, undefined, mockCtx);
+			const res = await tools.observe_pr.execute("call-1", { pr_number: 202 }, undefined, undefined, mockCtx);
 			assert(res.content[0].text.includes("Starting observing 202."), `T7: unexpected tool text: ${res.content[0].text}`);
 			assert(
 				res.details.mergeable === "CONFLICTING" && res.details.mergeStateStatus === "DIRTY",

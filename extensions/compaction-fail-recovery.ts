@@ -444,7 +444,7 @@ function projectedToolResultInputs(
 		const se = pe.sourceEntry;
 		if (se.type !== "message") continue;
 		const msg = se.message;
-		if (!msg || msg.role !== "toolResult" || pe.messages.length === 0) continue;
+		if (msg?.role !== "toolResult" || pe.messages.length === 0) continue;
 		const visible = pe.messages[0];
 		out.push({
 			entryId: se.id,

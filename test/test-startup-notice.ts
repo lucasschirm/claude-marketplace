@@ -7,13 +7,13 @@ import * as os from "node:os";
 // Covers the startup/resume flow: the "now being observed" notice rides on the user's next plain message,
 // PR updates are discarded until that turn starts, and notifications use steer delivery.
 export default function (pi: any) {
-	const handlers: Record<string, Function> = {};
+	const handlers: Record<string, (...args: unknown[]) => unknown> = {};
 	const tools: Record<string, any> = {};
 	const sent: { content: string; opts: any }[] = [];
 	const appended: Array<{ customType: string; data: any }> = [];
 
 	const mockPi = {
-		on(event: string, handler: Function) {
+		on(event: string, handler: (...args: unknown[]) => unknown) {
 			handlers[event] = handler;
 		},
 		registerTool(t: any) {

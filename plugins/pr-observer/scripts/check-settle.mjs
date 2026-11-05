@@ -52,7 +52,13 @@ try {
 
 	const engine = await loadEngine(pluginRoot);
 	if (!engine.vendored) {
-		logLine(SCRIPT, sessionId, "warn", "vendored engine failed to load; using the inline fallback classifier", engine.err?.message ?? String(engine.err));
+		logLine(
+			SCRIPT,
+			sessionId,
+			"warn",
+			"vendored engine failed to load; using the inline fallback classifier",
+			engine.err?.message ?? String(engine.err),
+		);
 	}
 
 	const snap = await readPrSnapshot(engine, cwd);
@@ -61,7 +67,13 @@ try {
 		process.exit(0);
 	}
 	if (snap.none) {
-		logLine(SCRIPT, sessionId, "info", "no open non-draft PR on this branch; allowing the stop", snap.state ? `state=${snap.state}` : undefined);
+		logLine(
+			SCRIPT,
+			sessionId,
+			"info",
+			"no open non-draft PR on this branch; allowing the stop",
+			snap.state ? `state=${snap.state}` : undefined,
+		);
 		process.exit(0);
 	}
 
@@ -95,7 +107,13 @@ try {
 
 	// No CI configured, or an unreadable checks call: nothing to wait for - fail open.
 	if (snap.ci.verdict !== "unknown" || snap.ci.ghFailed || snap.ci.pendingCount === 0) {
-		logLine(SCRIPT, sessionId, "info", "PR is landable (or CI is unreadable); allowing the stop", `verdict=${snap.ci.verdict} mergeState=${snap.mergeState}`);
+		logLine(
+			SCRIPT,
+			sessionId,
+			"info",
+			"PR is landable (or CI is unreadable); allowing the stop",
+			`verdict=${snap.ci.verdict} mergeState=${snap.mergeState}`,
+		);
 		process.exit(0);
 	}
 
@@ -132,24 +150,38 @@ try {
 			continue;
 		}
 		if (next.none) {
-			logLine(SCRIPT, sessionId, "info", "PR closed or merged while watching; allowing the stop", next.state ? `state=${next.state}` : undefined);
+			logLine(
+				SCRIPT,
+				sessionId,
+				"info",
+				"PR closed or merged while watching; allowing the stop",
+				next.state ? `state=${next.state}` : undefined,
+			);
 			process.exit(0);
 		}
 		waitedMs = Date.now() - watchStartedAt;
 		if (next.prNumber !== prNumber) {
 			// The branch's PR was retargeted/closed and a different one opened: report it rather
 			// than watching the old number forever.
-			block(`The branch's pull request changed from #${prNumber} to #${next.prNumber} while CI was being watched. Re-run observe_pr to pick it up.`);
+			block(
+				`The branch's pull request changed from #${prNumber} to #${next.prNumber} while CI was being watched. Re-run observe_pr to pick it up.`,
+			);
 		}
 		if (next.mergeState === "conflicting") {
-			block(`PR #${prNumber} began conflicting with its base branch while CI ran (mergeable: CONFLICTING). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`);
+			block(
+				`PR #${prNumber} began conflicting with its base branch while CI ran (mergeable: CONFLICTING). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`,
+			);
 		}
 		if (next.mergeState === "behind") {
-			block(`The base branch of PR #${prNumber} moved ahead while CI ran (mergeStateStatus: BEHIND). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`);
+			block(
+				`The base branch of PR #${prNumber} moved ahead while CI ran (mergeStateStatus: BEHIND). Rebase or merge the base into the PR branch. To end the session anyway, press Esc to cancel.`,
+			);
 		}
 		if (next.ci.verdict === "failed") {
 			const names = next.ci.failedNames.slice(0, 5).join(", ");
-			block(`CI failed for PR #${prNumber} while it was being watched${names ? ` (failing: ${names})` : ""}. Investigate and fix the failure before stopping. To end the session anyway, press Esc to cancel.`);
+			block(
+				`CI failed for PR #${prNumber} while it was being watched${names ? ` (failing: ${names})` : ""}. Investigate and fix the failure before stopping. To end the session anyway, press Esc to cancel.`,
+			);
 		}
 		if (next.ci.verdict === "passed" && next.mergeState !== "conflicting" && next.mergeState !== "behind") {
 			logLine(SCRIPT, sessionId, "info", "CI passed while watching; allowing the stop", `pr=${prNumber} waitedMs=${waitedMs}`);

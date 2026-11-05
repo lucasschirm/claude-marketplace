@@ -11,9 +11,9 @@ import {
 	type GitHubReviewThreadNode,
 } from "../extensions/lib/github-review-threads.ts";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { tmpGitRepo } from "./helpers/git-repo.ts";
+import { must } from "./helpers/must.ts";
 
 interface ThreadOpts {
 	id: string;
@@ -174,7 +174,10 @@ test("a vanished thread marks open and blocked tasks STALE, excluded from unreso
 	assert.strictEqual(m.getUnresolvedTasks().length, 0);
 	assert.strictEqual(m.getVisibleTasks().length, 2);
 	assert.deepStrictEqual(m.getCounts(), { open: 0, blocked: 0, resolved: 0, stale: 2, total: 2 });
-	assert.match(formatTaskDetail(m.findTask("100")!), /\*\*Stale Reason\*\*: Review thread PRRT_1 no longer exists on PR #1/);
+	assert.match(
+		formatTaskDetail(must(m.findTask("100"), "task 100")),
+		/\*\*Stale Reason\*\*: Review thread PRRT_1 no longer exists on PR #1/,
+	);
 });
 
 test("a STALE task recovers when its thread reappears", () => {
@@ -273,7 +276,7 @@ test("replies the agent saw before blocking do not unblock the task; a later rep
 	const m = new PRTasksManager();
 	const before = [{ id: "PRRC_early", body: "also this" }];
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, replies: before })]);
-	m.markShown("100", m.findTask("100")!.replies);
+	m.markShown("100", must(m.findTask("100"), "task 100").replies);
 	block(m, "100");
 
 	const blockReply = { id: "PRRC_block", body: "Need input", author: "bot" };
@@ -532,7 +535,7 @@ test("a reviewer's repeated identical reply still unblocks a BLOCKED task", () =
 	const m = new PRTasksManager();
 	const ok = { id: "PRRC_ok1", body: "ok" };
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, replies: [ok] })]);
-	m.markShown("100", m.findTask("100")!.replies);
+	m.markShown("100", must(m.findTask("100"), "task 100").replies);
 	block(m, "100");
 
 	const { unblockedTasks } = m.syncFromGitHubThreads(1, [
@@ -624,7 +627,7 @@ test("an agent reply a sync lists before the reply call returns does not unblock
 test("an applied suggestion is remembered across resolve and re-open, so it is never applied twice", () => {
 	const m = new PRTasksManager();
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100 })]);
-	const task = m.findTask("100")!;
+	const task = must(m.findTask("100"), "task 100");
 	task.appliedSuggestion = "const x = 1;";
 
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_1", dbId: 100, isResolved: true })]);
@@ -656,7 +659,7 @@ test("a thread GitHub accepts again is no longer dead, and its STALE task is res
 test("a resolve's posted reply is remembered through a STALE spell, so a later retry doesn't post it again", () => {
 	const m = new PRTasksManager();
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_A", dbId: 100 })]);
-	const task = m.findTask("100")!;
+	const task = must(m.findTask("100"), "task 100");
 	task.resolveReply = { author: "bot" };
 
 	m.markStale(task, "rejected", { deadThread: true });
@@ -685,11 +688,11 @@ test("a STALE task on a rejected thread is only worth retrying while GitHub stil
 	m.markStale("100", "rejected", { deadThread: true });
 
 	m.syncFromGitHubThreads(1, [thread({ id: "PRRT_A", dbId: 100 })]);
-	assert.strictEqual(isListedDeadThread(m.findTask("100")!), true);
+	assert.strictEqual(isListedDeadThread(must(m.findTask("100"), "task 100")), true);
 
 	m.syncFromGitHubThreads(1, []);
 	assert.strictEqual(m.findTask("100")?.status, "STALE");
-	assert.strictEqual(isListedDeadThread(m.findTask("100")!), false);
+	assert.strictEqual(isListedDeadThread(must(m.findTask("100"), "task 100")), false);
 });
 
 test("a resolved thread listed without comments records GitHub's resolve", () => {
@@ -1012,7 +1015,7 @@ test("showing only replies never marks the suggestion or comment as seen", () =>
 	m.syncFromGitHubThreads(1, [
 		thread({ id: "PRRT_1", dbId: 100, body: "Use\n```suggestion\nB\n```", replies: [{ id: "PRRC_1", body: "hm" }] }),
 	]);
-	const task = m.findTask("100")!;
+	const task = must(m.findTask("100"), "task 100");
 	m.markRepliesShown(task, task.replies);
 	assert.strictEqual(task.seenMessage, undefined);
 	assert.deepStrictEqual(m.getUnseenReplies(task), []);
@@ -1023,7 +1026,7 @@ test("showing only replies never marks the suggestion or comment as seen", () =>
 test("a file-level thread is shown as the whole file, not line 1", () => {
 	const m = new PRTasksManager();
 	m.syncFromGitHubThreads(1, [{ ...thread({ id: "PRRT_1", dbId: 100, path: "src/a.ts" }), line: null, originalLine: null }]);
-	assert.match(formatTaskDetail(m.findTask("100")!), /\*\*File\*\*: src\/a\.ts \(whole file\)/);
+	assert.match(formatTaskDetail(must(m.findTask("100"), "task 100")), /\*\*File\*\*: src\/a\.ts \(whole file\)/);
 });
 
 test("a suggestion fenced with more backticks keeps the ``` lines inside it", () => {
