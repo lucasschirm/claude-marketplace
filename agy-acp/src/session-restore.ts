@@ -257,11 +257,8 @@ export async function listSessions(deps: RestoreDeps, params: unknown): Promise<
 	}
 	const notes: Record<string, unknown> = {};
 	if (result.unusable > 0) notes.unusableRecords = result.unusable;
-	if (result.scanned >= result.scanLimit) {
-		// Says what was bounded rather than claiming the missing part is old: the bound is on how many
-		// records one call reads, and which ones those are is directory order, not age.
+	if (result.scanned >= result.scanLimit)
 		notes.truncated = `the store holds more than ${result.scanLimit} session records; ${result.scanned} were read, so this list is not complete`;
-	}
 	return {
 		sessions: result.sessions.map(sessionInfo),
 		nextCursor: result.nextCursor,
