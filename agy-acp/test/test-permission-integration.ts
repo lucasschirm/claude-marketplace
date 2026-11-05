@@ -14,6 +14,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
+import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const LOGS: Array<string> = [];

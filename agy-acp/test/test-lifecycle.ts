@@ -29,6 +29,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { BRIDGE_DIR_NAME_RE } from "../src/bridge-server.ts";
+import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));

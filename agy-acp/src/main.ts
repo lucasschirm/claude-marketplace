@@ -34,6 +34,8 @@ Environment:
   AGY_ACP_CANCEL_ESCALATE_MS SIGINT -> process-group SIGTERM/SIGKILL window (default 5000)
   AGY_ACP_HEARTBEAT_MS       heartbeat interval during a turn (default 15000, 0 disables)
   AGY_ACP_SHUTDOWN_TIMEOUT_MS  exit deadline after a hang-up or signal (default 10000)
+  AGY_ACP_STATE_DIR            the session store directory (default: $XDG_STATE_HOME/agy-acp);
+                               an absolute path, and a session is only loadable from its own workspace
   AGY_ACP_MODEL / AGY_ACP_EFFORT / AGY_ACP_SANDBOX / AGY_ACP_ALLOW_BYPASS / AGY_ACP_MODELS_TIMEOUT_MS
                              the same selection knobs as the flags (1 turns a switch on)
 `;

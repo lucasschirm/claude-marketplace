@@ -130,10 +130,16 @@ export class JsonRpcConnection {
 		});
 	}
 
-	notify(method: string, params?: unknown): void {
-		if (!this.send({ jsonrpc: "2.0", method, params }) && !this.closed) {
-			this.log(`notification "${method}" dropped: params are not JSON-serializable`);
-		}
+	/**
+	 * Send a notification, and answer with whether it reached the transport. The boolean is for the
+	 * callers that have to stop doing something when it turns false (a `session/load` replaying a
+	 * transcript must not claim it replayed twenty updates into a connection that closed on the third),
+	 * and a caller that cannot act on it simply ignores it, as every caller here has so far.
+	 */
+	notify(method: string, params?: unknown): boolean {
+		const sent = this.send({ jsonrpc: "2.0", method, params });
+		if (!sent && !this.closed) this.log(`notification "${method}" dropped: params are not JSON-serializable`);
+		return sent;
 	}
 
 	close(reason: string): void {

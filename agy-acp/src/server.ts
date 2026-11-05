@@ -4,14 +4,15 @@
 // main.ts is a thin wrapper over startAgyAcpServer(); the tests run the same assembly in-process
 // (PassThrough stdio) with the agy launch pointed at the fixture-replaying fake.
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { INVALID_PARAMS, INTERNAL_ERROR, RpcError } from "./errors.ts";
+import { INVALID_PARAMS, RpcError } from "./errors.ts";
 import { JsonRpcConnection } from "./jsonrpc.ts";
-import { assertStartSelection, registerSelectionMethods, sessionParams } from "./selection-methods.ts";
+import { registerSelectionMethods, sessionParams } from "./selection-methods.ts";
 import { makeModelGate, makeVersionGate, withEnvDefaults, type AgyLaunchOptions } from "./launch.ts";
-import { AgySession } from "./session.ts";
+import { createSessionOpener } from "./session-open.ts";
+import { createSessionRestore } from "./session-restore.ts";
+import { resolveStoreRoot } from "./session-store/paths.ts";
+import { SessionStore } from "./session-store/store.ts";
 import { SessionRegistry } from "./session-registry.ts";
 
 // The launch options are part of this module's public surface (main.ts and the suites import them from
@@ -35,6 +36,13 @@ export interface AgyAcpServerOptions {
 	 * them itself on close, so no child outlives it either way.
 	 */
 	onClose?: (reason: string) => void;
+	/**
+	 * The session store (issue #56). By default it is resolved from the environment (`AGY_ACP_STATE_DIR`,
+	 * `$XDG_STATE_HOME`, `$HOME/.local/state`) and built here, because the store belongs to the agent,
+	 * not to a connection. A host that wants a directory of its own - a test, or a wrapper that keeps the
+	 * state beside a profile - passes one.
+	 */
+	store?: SessionStore;
 }
 
 export interface AgyAcpServer {
@@ -55,7 +63,12 @@ function handleInitialize(params: unknown): unknown {
 	return {
 		protocolVersion: PROTOCOL_VERSION,
 		agentCapabilities: {
-			loadSession: false,
+			// Session persistence (issue #56): the history is agy-acp's own, so all three lifecycle
+			// methods are answered from it. `session/close` is deliberately absent - the registry already
+			// disposes a session when its connection dies, and advertising close would promise a way to
+			// end a session that leaves the conversation running in agy.
+			loadSession: true,
+			sessionCapabilities: { list: {}, resume: {} },
 			promptCapabilities: { audio: false, embeddedContext: true, image: false },
 		},
 		authMethods: [],
@@ -70,9 +83,21 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	const registry = new SessionRegistry(log);
 	const checkVersion = makeVersionGate(launch);
 	const models = makeModelGate(launch, log);
+	const store =
+		options.store ??
+		(() => {
+			const root = resolveStoreRoot();
+			// Where the sessions live is the first thing an operator looks for when one will not load, and
+			// the answer is not always the directory they expected.
+			log(`session store: ${root.root} (${root.source})`);
+			return new SessionStore({ log, root });
+		})();
+
+	// session/new, and the one place a session is built (the store record, the launch, the registry).
+	const opener = createSessionOpener({ log, launch, models, store, registry, connection, checkVersion });
 
 	connection.registerMethod("initialize", handleInitialize);
-	connection.registerMethod("session/new", (params) => handleSessionNew(params));
+	connection.registerMethod("session/new", (params) => opener.handleNew(params));
 	connection.registerMethod("session/prompt", (params) => handleSessionPrompt(params));
 	// Notification ordering (the reason this queues): the connection defers every request handler by
 	// a microtask, so a notification handled inline would overtake the request in front of it - a
@@ -133,88 +158,31 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		}
 	}
 
-	/** The session/new params: an object with an absolute cwd and an optional mcpServers array. */
-	function parseSessionNew(params: unknown): { cwd: string; mcpServers: unknown[] | undefined } {
-		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/new params must be an object");
-		const p = params as Record<string, unknown>;
-		const cwd = p.cwd;
-		if (typeof cwd !== "string") throw new RpcError(INVALID_PARAMS, "cwd must be a string");
-		if (!path.isAbsolute(cwd)) throw new RpcError(INVALID_PARAMS, `cwd must be an absolute path: ${cwd}`);
-		const mcpServers = p.mcpServers;
-		if (mcpServers !== undefined && (!Array.isArray(mcpServers) || mcpServers.some((s) => typeof s !== "object" || s === null))) {
-			throw new RpcError(INVALID_PARAMS, "mcpServers must be an array of server descriptors");
-		}
-		return { cwd, mcpServers: mcpServers as unknown[] | undefined };
-	}
-
-	async function handleSessionNew(params: unknown): Promise<Record<string, unknown>> {
-		const { cwd, mcpServers } = parseSessionNew(params);
-		let isDirectory = false;
-		try {
-			isDirectory = (await fs.promises.stat(cwd)).isDirectory();
-		} catch {
-			throw new RpcError(INVALID_PARAMS, `cwd does not exist: ${cwd}`);
-		}
-		if (!isDirectory) throw new RpcError(INVALID_PARAMS, `cwd is not a directory: ${cwd}`);
-		const status = await checkVersion();
-		if (status.strictRefusal) {
-			throw new RpcError(INTERNAL_ERROR, status.warning ?? "the agy version is refused by AGY_ACP_STRICT_VERSION", {
-				agyVersion: status.version,
-			});
-		}
-		if (status.warning) log(`agy version warning: ${status.warning}`);
-		// Before the session exists: its session/new result carries the list, and a client must not be
-		// able to pick a model we never advertised. A failure is not fatal - it yields `null`.
-		const modelList = await models.list();
-		assertStartSelection(launch.model, modelList);
-		const session = new AgySession({
-			cwd,
-			...launch,
-			modelCatalog: models,
-			log,
-			notify: (sessionId, update) => connection.notify("session/update", { sessionId, update }),
-			requestPermission: (params, timeoutMs) => connection.request("session/request_permission", { ...params, sessionId }, timeoutMs),
-		});
-		const sessionId = await session.start(); // a failure disposes the child and throws the RpcError
-		registry.add(sessionId, session);
-		// The selection, advertised: the modes the bridge enforces (session/set_mode) and the ACP
-		// selectors for the model list and the effort levels (session/set_config_option). `models` is
-		// the ids-only block agy-acp has published since sub-issue 3; the names are on the selector.
-		const result: Record<string, unknown> = {
-			sessionId,
-			modes: session.modes(),
-			models: session.modelsState(),
-			configOptions: session.configOptions(),
-		};
-		// One object, several notes: whatever agy-acp could not do or does not support is reported here
-		// rather than left for the client to discover (the model list, the mcpServers, the version).
-		const meta: Record<string, unknown> = {};
-		if (modelList === null) {
-			// The reason travels with the fact: a client that is told "no model list" and gets agy's own
-			// "sign in" in the same field knows what to do, and one that gets the timeout knows the
-			// listing was never going to answer. The full text is in the server log either way.
-			const reason = models.failure() ?? "`agy models` gave no reason";
-			meta.models = { listed: false, reason, note: `the model list is only what agy reports per session (${reason})` };
-		}
-		if (mcpServers) {
-			// The recorded agy 1.4.2 flag surface has no per-session MCP configuration flag, so the
-			// servers are accepted, reported as unsupported and echoed back - never silently dropped.
-			// (agy's built-in tool list carries call_mcp_tool, so it may manage MCP servers
-			// out-of-band; whether per-session configuration exists needs investigating.)
-			log(`session ${sessionId}: ${mcpServers.length} mcpServers requested - unsupported by agy, reported via _meta`);
-			meta.mcpServers = { supported: false, requested: mcpServers };
-		}
-		if (status.warning) {
-			meta.agyVersion = { version: status.version, tested: status.tested, warning: status.warning };
-		}
-		if (Object.keys(meta).length > 0) result._meta = meta;
-		return result;
-	}
-
 	function handleSessionPrompt(params: unknown): unknown {
 		const { session, fields } = sessionParams("session/prompt", params, registry);
 		return session.prompt(fields.prompt);
 	}
+
+	// session/load, session/resume, session/list (issue #56). Everything about them - the store's rules,
+	// the workspace check, the replay - is in session-restore.ts; this is the connection's half of it.
+	const restore = createSessionRestore({
+		store,
+		registryAdd: (sessionId, session) => registry.add(sessionId, session),
+		// `send`, not `notify`: a replay has to know when the connection stopped taking frames, or it
+		// would push a whole transcript into a transport that already went away and report a replay that
+		// never happened.
+		// `notify` answers with whether the frame went out: a replay has to know when the connection
+		// stopped taking frames, or it would push a whole transcript into a transport that had already gone
+		// away and then report a replay that never happened.
+		send: (sessionId, update) => connection.notify("session/update", { sessionId, update }),
+		log,
+		// The record's cwd, not the client's: they name the same workspace (the store checked), but only one
+		// of them is the path the conversation started in, and that is the one agy should be launched in.
+		build: (record) => opener.build(record.cwd, record),
+	});
+	connection.registerMethod("session/load", (params) => restore.load(params));
+	connection.registerMethod("session/resume", (params) => restore.resume(params));
+	connection.registerMethod("session/list", (params) => restore.list(params));
 
 	// session/set_mode, session/set_model, session/set_config_option - one subject, one module.
 	registerSelectionMethods(connection, registry);

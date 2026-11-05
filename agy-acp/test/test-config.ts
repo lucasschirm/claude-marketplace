@@ -25,6 +25,7 @@ import { makeModelGate, parseLaunchArgs, withEnvDefaults } from "../src/launch.t
 import { SelectionCommands } from "../src/session-selection.ts";
 import { AGY_EFFORTS, DEFAULT_MODELS_TIMEOUT_MS, effortConflict, modelEffort, parseModelsTable, type AgyModel } from "../src/agy/models.ts";
 import { agyModeFlag, offeredModes, SessionSelection, type AcpConfigOption } from "../src/config-options.ts";
+import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const MODELS_TSV = fileURLToPath(new URL("./fixtures/models/agy-1.4.2.tsv", import.meta.url));
