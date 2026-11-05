@@ -41,6 +41,7 @@
 
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 
 /** A repo-sized diff does not fit the 1 MiB default, and a truncated diff would be a wrong patch-id. */
@@ -132,17 +133,43 @@ const GIT_REDIRECTING_VARS = [
 ];
 
 /** `npm run <script>`, inheriting stdio so the developer sees the gate's own output, not a summary. */
-function runGate(script) {
+function runGate(script, cwd = process.cwd()) {
 	const env = { ...process.env };
 	for (const name of GIT_REDIRECTING_VARS) {
 		delete env[name];
 	}
 	try {
-		execFileSync("npm", ["run", "--silent", script], { env, stdio: "inherit" });
+		execFileSync("npm", ["run", "--silent", script], { cwd, env, stdio: "inherit" });
 		return 0;
 	} catch (err) {
 		return typeof err?.status === "number" && err.status !== 0 ? err.status : 1;
 	}
+}
+
+/**
+ * A checkout of the index, so the gate judges the tree the commit will have.
+ *
+ * Running the checks where the hook stands checks the WORKING tree, which is not what is being
+ * committed, and the trailer this hook stamps names the staged tree - so the claim and the
+ * measurement are about two different things. Both directions bite: a failure staged but not on
+ * disk (`git add x && rm x`, or any partial `git add`) comes out stamped although nothing checked
+ * it, and a scratch file that trips a lint rule blocks every commit until it is deleted. This
+ * branch shipped the first one: a merge commit went out whose tree fails `npm run check`, with a
+ * trailer saying it passed.
+ *
+ * node_modules is symlinked rather than copied: biome and tsc both need it, biome ignores the
+ * directory by name, and the tsconfigs exclude it.
+ */
+function stagedTreeCheckout() {
+	const dir = fs.mkdtempSync(path.join(tmpdir(), "quality-gate-"));
+	// --prefix is a string git prepends, so the separator is part of it, and `--all` reads the index
+	// git handed this hook - the temporary one, for `git commit -a` and `git commit <path>`.
+	git(["checkout-index", "--all", "--force", `--prefix=${dir}${path.sep}`]);
+	const mods = path.join(process.cwd(), "node_modules");
+	if (fs.existsSync(mods) && !fs.existsSync(path.join(dir, "node_modules"))) {
+		fs.symlinkSync(mods, path.join(dir, "node_modules"), "dir");
+	}
+	return dir;
 }
 
 /** A gate that cannot run must not be reported as a gate that passed. */
@@ -158,12 +185,22 @@ function preCommit() {
 		return 0;
 	}
 	requireToolchain();
-	const code = runGate("qa:static");
+	const tree = stagedTree();
+	const checkout = stagedTreeCheckout();
+	let code = 1;
+	try {
+		code = runGate("qa:static", checkout);
+	} finally {
+		fs.rmSync(checkout, { recursive: true, force: true });
+	}
 	if (code !== 0) {
-		say("\nquality gate: failed, so nothing was committed. Fix the above, or commit with QA_SKIP_HOOKS=1 and expect CI to reject it.");
+		say(
+			`\nquality gate: failed, so nothing was committed. The checks ran on the STAGED tree (what the commit would contain), checked out in ${checkout} - a path above is inside that directory, not your working copy.`,
+		);
+		say("Fix the above, or commit with QA_SKIP_HOOKS=1 and expect CI to reject it.");
 		return code;
 	}
-	fs.writeFileSync(sentinelFor(stagedTree()), `${process.pid}\n`);
+	fs.writeFileSync(sentinelFor(tree), `${process.pid}\n`);
 	return 0;
 }
 
@@ -208,6 +245,9 @@ function prePush() {
 		return 0;
 	}
 	requireToolchain();
+	// In place, unlike pre-commit: this is about the commits being pushed, which are already made,
+	// and a push from a dirty working tree is the developer's own business. There is no trailer here
+	// to make a claim about one tree rather than another.
 	const code = runGate("test:unit");
 	if (code !== 0) {
 		say("\nquality gate: the tests failed, so nothing was pushed. Fix them, or push with QA_SKIP_HOOKS=1 and expect CI to fail.");

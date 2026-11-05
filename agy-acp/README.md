@@ -304,6 +304,7 @@ runs the unit tests under `agy-acp/test/`.
 - four invariants in `scripts/check-quality.mjs` exist for this package - `stdoutExitDrain`,
   `envAccessLocation`, `inboundBufferCap` and `settleOwnership`. Each has a fixture in
   `test/quality-gate-fixtures.sh` that proves it still bites;
-- commits are gated before they exist: `.githooks/pre-commit` runs `npm run qa:static` and
+- commits are gated before they exist: `.githooks/pre-commit` runs `npm run qa:static` on a checkout
+  of the staged tree (what the commit will contain, not what is on disk) and
   `.githooks/commit-msg` stamps a `Quality-Gate` trailer, which CI's `commit-hygiene` job requires.
   `npm run hooks:install` (automatic on `npm install`) is what turns that on.

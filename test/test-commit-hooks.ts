@@ -50,10 +50,18 @@ interface Repo {
 	write: (rel: string, text: string, cwd?: string) => void;
 }
 
+// The markers go to GATE_LOG_DIR (the repo the commit is happening in) rather than to the working
+// directory, because the gate does not run in that repo: pre-commit checks out the staged tree and
+// runs there. `gate-fails` is looked for in the working directory on purpose - it is how a case
+// says "the tree being gated is bad", and which tree that is, is the thing under test.
 const GATE_STUB = `import * as fs from "node:fs";
-fs.appendFileSync("gate-ran", "x\\n");
+import * as path from "node:path";
+const out = (name) => path.join(process.env.GATE_LOG_DIR ?? ".", name);
+fs.appendFileSync(out("gate-ran"), "x\\n");
 // What the gate was handed, so a case can assert what it was NOT handed.
-fs.writeFileSync("gate-env", Object.keys(process.env).filter((k) => k.startsWith("GIT_")).sort().join("\\n"));
+fs.writeFileSync(out("gate-env"), Object.keys(process.env).filter((k) => k.startsWith("GIT_")).sort().join("\\n"));
+// Where it ran, so a case can assert WHICH tree was checked.
+fs.writeFileSync(out("gate-cwd"), process.cwd());
 process.exit(fs.existsSync("gate-fails") ? 1 : 0);
 `;
 
@@ -91,7 +99,9 @@ function newRepo(prefix = "commit-hooks-"): Repo {
 	const commit = (args: string[], env: Record<string, string> = {}, cwd = dir): CommitResult => {
 		// spawnSync, not execFileSync: what the hooks say on stderr is an assertion in two cases,
 		// and a successful execFileSync throws its stderr away.
-		const r = spawnSync("git", ["commit", ...args], { cwd, encoding: "utf-8", env: gitSandboxEnv(env) });
+		// GATE_LOG_DIR: the gate runs in a checkout of the staged tree, so its markers need somewhere
+		// stable to land - the repo (or worktree) the commit is being made in.
+		const r = spawnSync("git", ["commit", ...args], { cwd, encoding: "utf-8", env: gitSandboxEnv({ GATE_LOG_DIR: cwd, ...env }) });
 		return { code: r.status ?? -1, stderr: r.stderr ?? "" };
 	};
 	const at = (cwd: string, ...args: string[]): string =>
@@ -240,10 +250,51 @@ test("a failing gate blocks the commit", () => {
 	const head = r.git("rev-parse", "HEAD").trim();
 	r.write("gate-fails", "");
 	r.write("a.txt", "eight\n");
-	r.git("add", "a.txt");
+	// Staged, because the gate judges the tree the commit will have.
+	r.git("add", "a.txt", "gate-fails");
 	const result = r.commit(["-m", "should not land"]);
 	assert.notEqual(result.code, 0, "the commit fails");
 	assert.equal(r.git("rev-parse", "HEAD").trim(), head, "and nothing was committed");
+});
+
+test("a failure that exists only in the staged tree blocks the commit", () => {
+	const r = newRepo();
+	const head = r.git("rev-parse", "HEAD").trim();
+	// The failure is in the index and NOT in the working directory: the commit carries it, `ls` does
+	// not show it. A gate that runs `npm run qa:static` where it stands passes this and stamps a
+	// trailer onto a commit nothing checked - which is how this branch's own merge commit went out
+	// with a tree that fails `npm run check`.
+	r.write("gate-fails", "");
+	r.git("add", "gate-fails");
+	fs.rmSync(path.join(r.dir, "gate-fails"));
+	const result = r.commit(["-m", "a failure only the index has"]);
+	assert.notEqual(result.code, 0, `the commit must be blocked: ${result.stderr}`);
+	assert.equal(r.git("rev-parse", "HEAD").trim(), head, "nothing was committed");
+	assert.equal(r.trailer(), "", "and nothing claimed the gate passed");
+});
+
+test("a failure that exists only in the working directory does not block the commit that leaves it out", () => {
+	const r = newRepo();
+	// Untracked, so the commit does not contain it. The old behaviour failed here too - a scratch
+	// file that happens to break a lint rule stopped every commit until it was deleted.
+	r.write("gate-fails", "");
+	r.write("a.txt", "staged and clean\n");
+	r.git("add", "a.txt");
+	const result = r.commit(["-m", "the tree being committed is fine"]);
+	assert.equal(result.code, 0, `the commit succeeds: ${result.stderr}`);
+	assert.deepEqual(bindings(r.trailer()), { patch: r.patchId(), tree: r.tree() }, "and it is stamped for its own content");
+});
+
+test("the gate runs somewhere other than the repository, on a checkout of the staged tree", () => {
+	const r = newRepo();
+	r.write("a.txt", "ten\n");
+	r.git("add", "a.txt");
+	assert.equal(r.commit(["-m", "where did the gate run"]).code, 0);
+	const where = fs.readFileSync(path.join(r.dir, "gate-cwd"), "utf-8").trim();
+	assert.notEqual(where, r.dir, "not in the working directory");
+	assert.notEqual(where, fs.realpathSync(r.dir), "nor in it under another name");
+	// Checked after the fact, which is why `where` cannot be realpath'd: the directory is gone.
+	assert.ok(!fs.existsSync(where), "and the checkout is removed afterwards, whatever the gate did in it");
 });
 
 test("QA_SKIP_HOOKS=1 commits without the gate, says so, and claims nothing", () => {
@@ -461,7 +512,15 @@ test("the gate is not handed git's own GIT_DIR", () => {
 	// <elsewhere>`. The gate runs the test suite, which builds throwaway repos and commits in them,
 	// so handing these on is how a hook comes to rewrite the branch it was guarding.
 	const hook = path.join(r.dir, "scripts", "quality-gate-trailer.mjs");
-	const env = { ...process.env, GIT_DIR: path.join(r.dir, ".git"), GIT_INDEX_FILE: path.join(r.dir, ".git", "index"), GIT_PREFIX: "" };
+	// GATE_LOG_DIR because this case runs the hook directly rather than through `git commit`, and the
+	// stub gate writes its markers wherever that points - the gate itself runs in a staged checkout.
+	const env = {
+		...process.env,
+		GATE_LOG_DIR: r.dir,
+		GIT_DIR: path.join(r.dir, ".git"),
+		GIT_INDEX_FILE: path.join(r.dir, ".git", "index"),
+		GIT_PREFIX: "",
+	};
 	const res = spawnSync("node", [hook, "pre-commit"], { cwd: r.dir, encoding: "utf-8", env });
 	assert.equal(res.status, 0, res.stderr);
 	const seen = fs.readFileSync(path.join(r.dir, "gate-env"), "utf-8").split("\n");

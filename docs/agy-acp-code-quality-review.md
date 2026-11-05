@@ -274,8 +274,15 @@ was tested in a throwaway repo before being written down.
 | The hook-side `git diff --cached --no-color HEAD \| git patch-id --stable` equals the CI-side `git diff-tree -p <sha> \| git patch-id --stable` | Hook and CI compute the same identity with no shared state |
 | `git commit <path>` and `git commit -a` give the hooks the right index (`GIT_INDEX_FILE`) | Partial and `-a` commits verify correctly — observed |
 | A merge commit runs `pre-merge-commit`, not `pre-commit`, and gets no trailer | CI exempts commits with more than one parent |
+| `prepare-commit-msg` runs **before** the editor, so stamping there defeats git's empty-message abort and mangles a typed subject | Stamping moved to `commit-msg`, which runs after the message is final — observed |
+| `git commit --amend -m msg` reports its message source as `message`, identically to a normal commit | No hook can tell an amend apart, so the trailer carries a **tree** binding as well as the patch-id |
+| A hook in a linked worktree is given `GIT_DIR` as an absolute path, and it beats `git -C <elsewhere>` for every child | The gate scrubs the redirecting variables before running anything — it had rewritten this repo's own branch once |
+| The working tree and the staged tree are different trees | The gate runs on a `git checkout-index` of the staged tree: the trailer names that tree, so that is the tree the checks must be about |
 
-So: `pre-commit` runs the 5-second static gate and leaves a sentinel keyed to the staged patch-id;
-`prepare-commit-msg` turns that sentinel into a `Quality-Gate:` trailer; CI's `commit-hygiene` job walks
-`base..head` and fails on any non-merge, non-bot commit whose trailer is missing or whose patch-id does
-not match. A bypass is then a red CI job that names the commit — not a silent landing.
+So, as built: `pre-commit` runs the 5-second static gate against a checkout of the staged tree and
+leaves a sentinel keyed to that tree; `commit-msg` turns the sentinel into a
+`Quality-Gate: v1 patch=<patch-id> tree=<tree>` trailer; CI's `commit-hygiene` job walks `base..head`
+and fails on any non-merge, non-bot, post-cutover commit whose trailer is missing or whose bindings
+describe some other commit. Two bindings because neither alone survives the trip: the tree is exact
+for an amend, the patch-id survives a rebase. A bypass is then a red CI job that names the commit —
+not a silent landing.
