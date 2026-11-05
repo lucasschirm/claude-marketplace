@@ -940,7 +940,16 @@ function readJsonStringLiteral(raw, i) {
  * answers "enabled" for every rule, and a metric that stopped being measured is called an improvement. And a
  * comment is allowed to look like a string: several in biome.jsonc quote the severity they discuss, so
  * splitting on string literals first would strip a comment's prose and leave its quoted fragment behind.
+ *
+ * Trailing commas go the same way, in the same pass. biome accepts `"noConsole": "off",` before a closing
+ * brace and exits 0, so a config that lints perfectly well would otherwise reach JSON.parse and throw - the
+ * same dead end the glob used to reach, arrived at through legal syntax instead of a quirk.
  */
+function dropTrailingComma(out) {
+	const trimmed = out.trimEnd();
+	return trimmed.endsWith(",") ? trimmed.slice(0, -1) : out;
+}
+
 function stripJsoncComments(raw) {
 	let out = "";
 	let i = 0;
@@ -950,6 +959,9 @@ function stripJsoncComments(raw) {
 			const literal = readJsonStringLiteral(raw, i);
 			out += literal.text;
 			i = literal.next;
+		} else if (c === "}" || c === "]") {
+			out = dropTrailingComma(out) + c;
+			i++;
 		} else if (c === "/" && raw[i + 1] === "*") {
 			const close = raw.indexOf("*/", i + 2);
 			i = close === -1 ? raw.length : close + 2;
@@ -966,15 +978,23 @@ function stripJsoncComments(raw) {
 
 /**
  * Whether biome.jsonc still runs a rule ("suspicious/noExplicitAny"). Consulted for the stale-metric check,
- * where the counts are ambiguous. An unreadable config answers "enabled": the conservative direction is to
- * keep measuring, never to let a metric quietly disappear.
+ * where the counts are ambiguous.
+ *
+ * An unreadable config answers "not enabled". The question being asked is "did this debt get fixed, or did the
+ * rule stop running?", and a config that will not parse cannot vouch for the first answer; saying so routes
+ * the metric to the path that demands a written reason. Either answer fails --check today, so this decides the
+ * diagnosis rather than the verdict - which is the whole value of asking.
+ *
+ * No fixture drives that fallback, and deliberately so: with comments and trailing commas both handled, every
+ * config biome itself accepts now parses here, and one it rejects fails the run earlier with "the biome run is
+ * not a measurement". The two fixtures next to it pin the two shapes that used to reach it instead.
  */
 function ruleEnabledInConfig(rule) {
 	let cfg;
 	try {
 		cfg = JSON.parse(stripJsoncComments(fs.readFileSync(path.join(ROOT, "biome.jsonc"), "utf-8").replace(/^\uFEFF/, "")));
 	} catch {
-		return true;
+		return false;
 	}
 	if (cfg?.linter?.enabled === false || cfg?.linter?.rules === "off") return false;
 	const [group, name] = rule.split("/");
@@ -989,19 +1009,21 @@ function ruleEnabledInConfig(rule) {
 	// (`includes: ["extensions/**/*.ts"]`), which is invisible at the top level. Any override whose include
 	// patterns could match a gated file and turns the rule off wins: the conservative answer is that the rule
 	// is no longer running, which sends the metric down the reasoned path instead of calling it an improvement.
+	// The prefixes come from GATED_TREES rather than a list of their own, because the two drifted apart the
+	// moment lint grew past `extensions` and `agy-acp`: an override naming only `test/**` and `scripts/**` was
+	// skipped as out of scope while holding 251 of the 434 `useTopLevelRegex` sites the baseline gates.
 	// Glob matching is deliberately approximate - the zero-drop rule in run() is what actually guarantees the
 	// record, this only names the cause in the message.
 	for (const o of Array.isArray(cfg?.overrides) ? cfg.overrides : []) {
 		const includes = Array.isArray(o?.includes) ? o.includes : [];
-		const reachesExtensions = includes.some(
+		const reachesGatedTree = includes.some(
 			(pattern) =>
 				pattern === "**" ||
 				pattern.startsWith("**") ||
-				pattern.startsWith("extensions/") ||
-				pattern.startsWith("agy-acp/") ||
-				pattern.includes("**."),
+				pattern.includes("**.") ||
+				GATED_TREES.some((tree) => pattern.startsWith(`${tree}/`)),
 		);
-		if (!reachesExtensions) continue;
+		if (!reachesGatedTree) continue;
 		if (o?.linter?.rules === "off") return false;
 		const oGroup = o?.linter?.rules?.[group];
 		if (oGroup === "off") return false;

@@ -544,6 +544,9 @@ lines.on("line", (line) => {
 	}
 	// (requests are handled concurrently: a `gh` call must not hold the next message hostage)
 	handleRequest(request).catch((err) => {
+		// stdout carries this server's JSON-RPC frames, so a stray console.log corrupts the protocol and the
+		// host stops listing the tools. stderr is the only channel left for a failure that cannot be answered.
+		// biome-ignore lint/suspicious/noConsole: stderr is the only channel left; stdout is the protocol stream.
 		console.error(`pr-observer: ${err?.stack ?? err}`);
 		sendError(request?.id, -32603, err?.message ?? String(err));
 	});

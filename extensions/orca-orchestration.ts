@@ -482,6 +482,10 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 		// read, and saying so once beats a TypeError from inside readline on every spawn.
 		if (!proc.stdout) {
 			logError("orca-orchestration", "check process has no stdout - its output cannot be read");
+			// The caller has already published this process as the current one, and the `close` handler that
+			// would clear it is wired below. Returning without clearing it here would leave a handle no line
+			// ever arrives on, which the restart timer and every `!checkProcess` guard read as "still watching".
+			if (checkProcess === proc) checkProcess = null;
 			return;
 		}
 		const rl = readline.createInterface({

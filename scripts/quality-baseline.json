@@ -13,12 +13,12 @@
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.performance/useTopLevelRegex": 434,
-    "biome.performance/noNamespaceImport": 185,
     "biome.performance/noAwaitInLoops": 89,
-    "biome.complexity/noExcessiveCognitiveComplexity": 65,
+    "biome.performance/noNamespaceImport": 185,
     "biome.complexity/noExcessiveLinesPerFunction": 8,
-    "biome.suspicious/noConsole": 10,
-    "biome.suspicious/noExplicitAny": 151
+    "biome.complexity/noExcessiveCognitiveComplexity": 65,
+    "biome.suspicious/noExplicitAny": 151,
+    "biome.suspicious/noConsole": 10
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
@@ -41,7 +41,7 @@
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
     "extensions/observe-pr.ts": 2192,
-    "extensions/orca-orchestration.ts": 1738,
+    "extensions/orca-orchestration.ts": 1742,
     "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 625,
     "agy-acp/src/acp.ts": 198,
@@ -366,8 +366,16 @@
         "extensions/orca-orchestration.ts: 1738 lines > baseline 1732 (files may only shrink)",
         "biome.jsonc changed since these numbers were recorded (0502f1625958dd0c -> fda3c63ebc0d8b59): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
       ]
+    },
+    {
+      "at": "2026-11-05",
+      "reason": "Review of PR 76: the override scan now reads GATED_TREES so an entry naming only test/scripts/plugins counts, the JSONC scanner drops trailing commas and an unreadable config answers not-enabled, noConsole stays on for a plugin's MCP server, and orca-orchestration grew four lines clearing the stale check handle in the new stdout guard",
+      "changes": [
+        "extensions/orca-orchestration.ts: 1742 lines > baseline 1738 (files may only shrink)",
+        "biome.jsonc changed since these numbers were recorded (fda3c63ebc0d8b59 -> 53be27d25534b862): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
     }
   ],
-  "generatedFrom": "79b8f02",
-  "biomeConfigHash": "fda3c63ebc0d8b59"
+  "generatedFrom": "06adee0",
+  "biomeConfigHash": "53be27d25534b862"
 }
