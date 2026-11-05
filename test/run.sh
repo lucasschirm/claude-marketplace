@@ -14,6 +14,13 @@
 #   test-orca-orchestration.sh        - needs a live Orca CLI/orchestration backend
 set -e
 
+# Git exports GIT_DIR to its hooks - in a linked worktree an absolute path to THAT repository - and
+# `git commit` adds GIT_INDEX_FILE. Both override `git -C <dir>`, so a suite that builds throwaway
+# repositories would commit into the repository whose hook invoked this runner. It happened once,
+# from .githooks/pre-push. The runner refuses to pass them on, whoever invoked it.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+unset GIT_COMMON_DIR GIT_PREFIX GIT_QUARANTINE_PATH GIT_REFLOG_ACTION
+
 cd "$(dirname "$0")/.."
 
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.

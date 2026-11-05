@@ -109,10 +109,36 @@ function patchId(base) {
 	return out.toString("utf8").trim().split(/\s+/)[0] ?? "";
 }
 
+/**
+ * The variables git exports to a hook that say WHERE a later `git` command operates. A hook in a
+ * linked worktree is given `GIT_DIR=<repo>/.git/worktrees/<name>` (absolute, verified), and `git
+ * commit` adds `GIT_INDEX_FILE`; both override a `git -C <dir>` run underneath. The gate runs other
+ * people's code - the test suite builds throwaway repositories and commits in them - so passing
+ * these on means those commits land in the repository being guarded. They did once, from pre-push:
+ * this repo's branch had to be restored from its reflog. This hook's OWN git calls still use them,
+ * which is how `git commit -a` and `git commit <path>` are seen correctly; only the child loses them.
+ * test/helpers/git-repo.ts has the same list for the suites' own sake.
+ */
+const GIT_REDIRECTING_VARS = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_PREFIX",
+	"GIT_QUARANTINE_PATH",
+	"GIT_REFLOG_ACTION",
+];
+
 /** `npm run <script>`, inheriting stdio so the developer sees the gate's own output, not a summary. */
 function runGate(script) {
+	const env = { ...process.env };
+	for (const name of GIT_REDIRECTING_VARS) {
+		delete env[name];
+	}
 	try {
-		execFileSync("npm", ["run", "--silent", script], { stdio: "inherit" });
+		execFileSync("npm", ["run", "--silent", script], { env, stdio: "inherit" });
 		return 0;
 	} catch (err) {
 		return typeof err?.status === "number" && err.status !== 0 ? err.status : 1;

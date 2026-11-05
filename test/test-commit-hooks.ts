@@ -22,7 +22,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { after, test } from "node:test";
-import { cleanupTmpDirs, tmpDir } from "./helpers/git-repo.ts";
+import { cleanupTmpDirs, gitSandboxEnv, tmpDir } from "./helpers/git-repo.ts";
 
 const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf-8" }).trim();
 const HOOKS = ["pre-commit", "commit-msg", "pre-push"];
@@ -52,13 +52,15 @@ interface Repo {
 
 const GATE_STUB = `import * as fs from "node:fs";
 fs.appendFileSync("gate-ran", "x\\n");
+// What the gate was handed, so a case can assert what it was NOT handed.
+fs.writeFileSync("gate-env", Object.keys(process.env).filter((k) => k.startsWith("GIT_")).sort().join("\\n"));
 process.exit(fs.existsSync("gate-fails") ? 1 : 0);
 `;
 
 /** A throwaway repo wired to this repo's hooks, with one commit already in it. */
 function newRepo(prefix = "commit-hooks-"): Repo {
 	const dir = tmpDir(prefix);
-	const git = (...args: string[]): string => execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8" });
+	const git = (...args: string[]): string => execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8", env: gitSandboxEnv() });
 	git("init", "-q", "-b", "main");
 	git("config", "user.email", "hooks@example.test");
 	git("config", "user.name", "Hook Test");
@@ -89,10 +91,11 @@ function newRepo(prefix = "commit-hooks-"): Repo {
 	const commit = (args: string[], env: Record<string, string> = {}, cwd = dir): CommitResult => {
 		// spawnSync, not execFileSync: what the hooks say on stderr is an assertion in two cases,
 		// and a successful execFileSync throws its stderr away.
-		const r = spawnSync("git", ["commit", ...args], { cwd, encoding: "utf-8", env: { ...process.env, ...env } });
+		const r = spawnSync("git", ["commit", ...args], { cwd, encoding: "utf-8", env: gitSandboxEnv(env) });
 		return { code: r.status ?? -1, stderr: r.stderr ?? "" };
 	};
-	const at = (cwd: string, ...args: string[]): string => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
+	const at = (cwd: string, ...args: string[]): string =>
+		execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8", env: gitSandboxEnv() });
 	return {
 		dir,
 		git,
@@ -101,11 +104,14 @@ function newRepo(prefix = "commit-hooks-"): Repo {
 		patchId: (rev = "HEAD", cwd = dir) => {
 			// Bytes, not a string: a diff is not necessarily valid UTF-8, and decoding one before
 			// hashing it is the defect this helper is used to detect (see the latin-1 case).
-			const patch = execFileSync("git", ["-C", cwd, "diff-tree", "-p", "--root", "--no-color", rev], { maxBuffer: 64 * 1024 * 1024 });
+			const patch = execFileSync("git", ["-C", cwd, "diff-tree", "-p", "--root", "--no-color", rev], {
+				env: gitSandboxEnv(),
+				maxBuffer: 64 * 1024 * 1024,
+			});
 			if (patch.length === 0) {
 				return "";
 			}
-			const out = execFileSync("git", ["patch-id", "--stable"], { cwd, input: patch, maxBuffer: 64 * 1024 * 1024 });
+			const out = execFileSync("git", ["patch-id", "--stable"], { cwd, env: gitSandboxEnv(), input: patch, maxBuffer: 64 * 1024 * 1024 });
 			return out.toString("utf8").trim().split(/\s+/)[0] ?? "";
 		},
 		tree: (rev = "HEAD", cwd = dir) => at(cwd, "rev-parse", `${rev}^{tree}`).trim(),
@@ -200,7 +206,7 @@ test("a commit from a linked worktree runs the gate there (the hooks path is rel
 	r.git("worktree", "add", "-q", "-b", "second", wt);
 	try {
 		r.write("a.txt", "six\n", wt);
-		execFileSync("git", ["-C", wt, "add", "a.txt"], { encoding: "utf-8" });
+		execFileSync("git", ["-C", wt, "add", "a.txt"], { encoding: "utf-8", env: gitSandboxEnv() });
 		assert.equal(r.commit(["-m", "from the worktree"], {}, wt).code, 0);
 		assert.equal(r.gateRuns(wt), 1, "the gate ran in the worktree, not in the main checkout");
 		assert.deepEqual(
@@ -302,7 +308,7 @@ test("a message typed in an editor keeps its own subject, with the trailer below
 /** The hygiene check, run from this repo against a throwaway repo's history. */
 function hygiene(r: Repo, base: string, head = "HEAD", extra: string[] = []): { code: number; out: string } {
 	const args = [path.join(ROOT, "scripts", "check-commit-hygiene.mjs"), "--base", base, "--head", head, ...extra];
-	const p = spawnSync("node", args, { cwd: r.dir, encoding: "utf-8" });
+	const p = spawnSync("node", args, { cwd: r.dir, encoding: "utf-8", env: gitSandboxEnv() });
 	return { code: p.status ?? -1, out: `${p.stdout ?? ""}${p.stderr ?? ""}` };
 }
 
@@ -432,4 +438,57 @@ test("a diff that is not valid UTF-8 still gets its own patch-id", () => {
 	assert.deepEqual(bindings(r.trailer()), { patch: r.patchId(), tree: r.tree() }, "the trailer names the real patch-id");
 	const base = r.git("rev-parse", "HEAD~1").trim();
 	assert.equal(hygiene(r, base).code, 0, "and CI agrees with it");
+});
+
+// --- the hooks run other people's code (the gate, the suite). What they hand it matters.
+
+/** The variables git exports to a hook that redirect where a later `git` command operates. */
+const GIT_REDIRECTS = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_PREFIX",
+	"GIT_QUARANTINE_PATH",
+];
+
+test("the gate is not handed git's own GIT_DIR", () => {
+	const r = newRepo();
+	// A hook in a LINKED WORKTREE is given GIT_DIR as an absolute path to that repository (verified:
+	// GIT_DIR=<repo>/.git/worktrees/<name>), and `git commit` adds GIT_INDEX_FILE. Both beat `git -C
+	// <elsewhere>`. The gate runs the test suite, which builds throwaway repos and commits in them,
+	// so handing these on is how a hook comes to rewrite the branch it was guarding.
+	const hook = path.join(r.dir, "scripts", "quality-gate-trailer.mjs");
+	const env = { ...process.env, GIT_DIR: path.join(r.dir, ".git"), GIT_INDEX_FILE: path.join(r.dir, ".git", "index"), GIT_PREFIX: "" };
+	const res = spawnSync("node", [hook, "pre-commit"], { cwd: r.dir, encoding: "utf-8", env });
+	assert.equal(res.status, 0, res.stderr);
+	const seen = fs.readFileSync(path.join(r.dir, "gate-env"), "utf-8").split("\n");
+	assert.deepEqual(
+		seen.filter((name) => GIT_REDIRECTS.includes(name)),
+		[],
+		"the gate saw none of them",
+	);
+});
+
+test("a throwaway repo stays throwaway even when GIT_DIR is set", () => {
+	const decoy = path.join(tmpDir("decoy-"), "elsewhere.git");
+	const saved = process.env.GIT_DIR;
+	process.env.GIT_DIR = decoy;
+	try {
+		const r = newRepo("sandboxed-");
+		assert.ok(fs.existsSync(path.join(r.dir, ".git")), "the repo is where the suite put it");
+		assert.equal(fs.existsSync(decoy), false, "and nothing was created at GIT_DIR");
+		r.write("a.txt", "sandboxed\n");
+		r.git("add", "a.txt");
+		assert.equal(r.commit(["-m", "inside the sandbox"]).code, 0);
+		assert.equal(bindings(r.trailer()).tree, r.tree(), "and the commit landed in the throwaway repo");
+	} finally {
+		if (saved === undefined) {
+			delete process.env.GIT_DIR;
+		} else {
+			process.env.GIT_DIR = saved;
+		}
+	}
 });
