@@ -10,7 +10,7 @@ export default function (pi: any) {
 	const commands: Record<string, any> = {};
 	const flags: Record<string, any> = {};
 	const sentMessages: string[] = [];
-	const eventHandlers: Record<string, Function[]> = {};
+	const eventHandlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 
 	let activeToolList: string[] = [];
 
@@ -107,8 +107,8 @@ exit 0
 	ext(mockPi);
 
 	const mockUI = {
-		setStatus(name: string, status?: string) {},
-		notify(msg: string, type?: string) {},
+		setStatus(_name: string, _status?: string) {},
+		notify(_msg: string, _type?: string) {},
 	};
 
 	const mockCtx = {
@@ -122,11 +122,11 @@ exit 0
 		try {
 			console.log("=== Testing Branch Watcher & PR Auto-Observation ===");
 
-			const observeTool = tools["observe_pr"];
+			const observeTool = tools.observe_pr;
 			if (!observeTool) throw new Error("observe_pr tool not registered");
 
 			// 1. Trigger branch check for initial branch 'branch-alpha' via turn_end with mockCtx
-			for (const h of eventHandlers["turn_end"] || []) {
+			for (const h of eventHandlers.turn_end || []) {
 				await h({ type: "turn_end" }, mockCtx);
 			}
 			await new Promise((r) => setTimeout(r, 200));
@@ -164,14 +164,14 @@ exit 0
 			execSync("git checkout -b branch-beta", { cwd: tmpDir });
 
 			// Trigger turn_end event with new branch
-			for (const h of eventHandlers["turn_end"] || []) {
+			for (const h of eventHandlers.turn_end || []) {
 				await h({ type: "turn_end" }, mockCtx);
 			}
 			await new Promise((r) => setTimeout(r, 200));
 
 			// Verify dashboard contains both branch-alpha and branch-beta
 			console.log("Checking dashboard status...");
-			const prCmd = commands["pr_observer"];
+			const prCmd = commands.pr_observer;
 			let notifiedText = "";
 			await prCmd.handler("list", {
 				...mockCtx,
@@ -229,7 +229,7 @@ exit 0
 				...mockCtx,
 				ui: {
 					...mockUI,
-					notify(msg: string, type?: string) {
+					notify(msg: string, _type?: string) {
 						warnMessage = msg;
 					},
 				},
@@ -242,7 +242,7 @@ exit 0
 
 			// Test 7: Initial prompt augmentation when automatic tracking is enabled
 			console.log("Test 7: Testing initial prompt augmentation in before_agent_start...");
-			const startHandlers = eventHandlers["before_agent_start"] || [];
+			const startHandlers = eventHandlers.before_agent_start || [];
 			const testEvent1: any = {
 				type: "before_agent_start",
 				prompt: "Start task",
@@ -333,7 +333,7 @@ exit 0
 			fs.writeFileSync(path.join(tmpDir, "303_merged"), "merged");
 
 			// Trigger turn_end event
-			for (const h of eventHandlers["turn_end"] || []) {
+			for (const h of eventHandlers.turn_end || []) {
 				await h({ type: "turn_end" }, mockCtx);
 			}
 			// (wait out the shared backoff slot: test 5's auth failure paces this poll)

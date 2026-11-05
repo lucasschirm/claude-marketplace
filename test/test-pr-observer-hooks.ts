@@ -25,6 +25,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as crypto from "node:crypto";
+import { must } from "./helpers/must.ts";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PLUGIN = path.join(REPO, "plugins", "pr-observer");
@@ -315,7 +316,13 @@ test("stop hook: CI running holds the stop, re-arms with a heartbeat, and allows
 	readStateFile(fx, "s-watch-"); // (exists from the first chunk)
 	const seeded = readStateFile(fx, "s-watch-");
 	fs.writeFileSync(
-		path.join(fx.stateDir, fs.readdirSync(fx.stateDir).find((f) => f.startsWith("state-s-watch-") && f.endsWith(".json"))!),
+		path.join(
+			fx.stateDir,
+			must(
+				fs.readdirSync(fx.stateDir).find((f) => f.startsWith("state-s-watch-") && f.endsWith(".json")),
+				"the s-watch state file",
+			),
+		),
 		JSON.stringify({
 			...seeded,
 			lastCheckAt: Date.now(),
@@ -695,7 +702,13 @@ test("session-init refire keeps the existing watch state", async () => {
 	closeFns.push(() => fs.rmSync(fx.dir, { recursive: true, force: true }));
 	// First start: baseline. Then the session's state gains a watch clock (a Stop re-arm wrote it).
 	await runHook("session-init.mjs", { session_id: "s-refire" }, fx.env);
-	const file = path.join(fx.stateDir, fs.readdirSync(fx.stateDir).find((f) => f.startsWith("state-s-refire-") && f.endsWith(".json"))!);
+	const file = path.join(
+		fx.stateDir,
+		must(
+			fs.readdirSync(fx.stateDir).find((f) => f.startsWith("state-s-refire-") && f.endsWith(".json")),
+			"the s-refire state file",
+		),
+	);
 	fs.writeFileSync(file, JSON.stringify({ createdAt: "kept", watchStartedAt: 12345, reArms: 2 }));
 	// A refire (resume/clear) must not reset the clock.
 	const res = await runHook("session-init.mjs", { session_id: "s-refire" }, fx.env);

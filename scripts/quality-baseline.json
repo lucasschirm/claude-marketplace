@@ -12,20 +12,18 @@
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
-    "biome.style/useTemplate": 7,
-    "biome.complexity/noExcessiveCognitiveComplexity": 52,
-    "biome.complexity/useOptionalChain": 8,
-    "biome.suspicious/noExplicitAny": 151,
-    "biome.suspicious/noGlobalIsNan": 8,
-    "biome.style/noNonNullAssertion": 5,
+    "biome.performance/useTopLevelRegex": 434,
+    "biome.performance/noNamespaceImport": 185,
+    "biome.performance/noAwaitInLoops": 89,
+    "biome.complexity/noExcessiveCognitiveComplexity": 65,
+    "biome.complexity/noExcessiveLinesPerFunction": 8,
     "biome.suspicious/noConsole": 10,
-    "biome.correctness/noUnusedFunctionParameters": 1,
-    "biome.correctness/noUnusedImports": 1
+    "biome.suspicious/noExplicitAny": 151
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2670,
-    "extensions/lib/acp-client.ts": 320,
+    "extensions/devin-delegate.ts": 2677,
+    "extensions/lib/acp-client.ts": 325,
     "extensions/lib/ci-verdict.ts": 142,
     "extensions/lib/devin-bash-guard.ts": 277,
     "extensions/lib/devin-diagnostics.ts": 69,
@@ -43,9 +41,9 @@
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
     "extensions/observe-pr.ts": 2192,
-    "extensions/orca-orchestration.ts": 1734,
+    "extensions/orca-orchestration.ts": 1738,
     "extensions/pr-tasks.ts": 1509,
-    "extensions/tools.ts": 627,
+    "extensions/tools.ts": 625,
     "agy-acp/src/acp.ts": 198,
     "agy-acp/src/agy-driver.ts": 40,
     "agy-acp/src/agy/args.ts": 64,
@@ -68,7 +66,7 @@
     "agy-acp/src/launch.ts": 142,
     "agy-acp/src/lib/child-process.ts": 40,
     "agy-acp/src/main.ts": 115,
-    "agy-acp/src/map-steps.ts": 77,
+    "agy-acp/src/map-steps.ts": 76,
     "agy-acp/src/pending-asks.ts": 105,
     "agy-acp/src/permission-gate.ts": 285,
     "agy-acp/src/permission.ts": 278,
@@ -338,8 +336,38 @@
         "agy-acp/src/config-options.ts: 266 lines > baseline 262 (files may only shrink)",
         "agy-acp/src/server.ts: 224 lines > baseline 220 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "Widen the biome gate to every tree npm run lint covers (test, scripts and a plugin's own code, not the vendored lib copies) and turn on the performance and maintainability rules the survey found worth keeping: 36 rules sit at zero and are now errors, noDelete/noVoid/useSimplifiedLogicExpression were measured and rejected with reasons in biome.jsonc, and the five structural rules enter the ratchet at today's counts. noExcessiveCognitiveComplexity 52 to 63 and noNonNullAssertion 5 to 42 are the newly measured test files, not new debt in extensions.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 52 -> 63",
+        "biome.complexity/noExcessiveLinesPerFunction: 0 -> 8",
+        "biome.performance/noAwaitInLoops: 0 -> 89",
+        "biome.performance/noNamespaceImport: 0 -> 185",
+        "biome.performance/useTopLevelRegex: 0 -> 434",
+        "biome.style/noNonNullAssertion: 5 -> 42",
+        "biome.style/useTemplate: 7 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.complexity/useOptionalChain: 8 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.suspicious/noGlobalIsNan: 8 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.correctness/noUnusedFunctionParameters: 1 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.correctness/noUnusedImports: 1 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.jsonc changed since these numbers were recorded (32be8dcbbc1d0ce8 -> 0502f1625958dd0c): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-11-04",
+      "reason": "noNonNullAssertion is now zero and enforced as an error: the five in production code became real guards (the ACP child's stdout, a check process's stdout, a reserved slot handed back when the queue is empty, two map lookups that no longer run twice) and the 37 in tests became test/helpers/must.ts. Cognitive complexity 63 to 65 is the price of those guards - an explicit branch where a ! asserted silently - and is paid in the two files that gained one.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 63 -> 65",
+        "biome.style/noNonNullAssertion: 42 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "extensions/devin-delegate.ts: 2677 lines > baseline 2670 (files may only shrink)",
+        "extensions/lib/acp-client.ts: 325 lines > baseline 320 (files may only shrink)",
+        "extensions/orca-orchestration.ts: 1738 lines > baseline 1732 (files may only shrink)",
+        "biome.jsonc changed since these numbers were recorded (0502f1625958dd0c -> fda3c63ebc0d8b59): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
     }
   ],
-  "generatedFrom": "15c22be",
-  "biomeConfigHash": "32be8dcbbc1d0ce8"
+  "generatedFrom": "79b8f02",
+  "biomeConfigHash": "fda3c63ebc0d8b59"
 }

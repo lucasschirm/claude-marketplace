@@ -437,7 +437,7 @@ export default async function (pi: ExtensionAPI) {
 			() => {
 				const flagVal = pi.getFlag("pr-observer-interval");
 				const parsed = parseInt(String(flagVal || "60"), 10);
-				return isNaN(parsed) || parsed <= 0 ? 60 : parsed;
+				return Number.isNaN(parsed) || parsed <= 0 ? 60 : parsed;
 			},
 			0,
 		);
@@ -633,7 +633,7 @@ export default async function (pi: ExtensionAPI) {
 			}
 		}
 		const state = latest?.data as PersistedObserverState | undefined;
-		if (!state || state.v !== 1 || !Array.isArray(state.observed)) return;
+		if (state?.v !== 1 || !Array.isArray(state.observed)) return;
 
 		for (const n of Array.isArray(state.stopped) ? state.stopped : []) {
 			if (typeof n === "number" && n > 0) stoppedPRs.add(n);
@@ -852,7 +852,7 @@ export default async function (pi: ExtensionAPI) {
 				() => {
 					pr.rewatchTimers.delete(runId);
 					const current = observedPRs.get(prNumber);
-					if (current && current.activeRuns.has(runId)) guardAsync("watchRun", watchRun(prNumber, runId, cwd));
+					if (current?.activeRuns.has(runId)) guardAsync("watchRun", watchRun(prNumber, runId, cwd));
 				},
 				Math.max(ghHealth.nextRetryInMs(), 1000),
 			),
@@ -1397,7 +1397,7 @@ export default async function (pi: ExtensionAPI) {
 		// A stale context must not throw here (runs from timers, the backoff retry hook and
 		// turn_end): abort silently.
 		const activeTools = tryPi("checkTrackedBranches", () => pi.getActiveTools(), undefined);
-		if (!activeTools || !activeTools.includes("observe_pr")) return;
+		if (!activeTools?.includes("observe_pr")) return;
 
 		// A check that outlives a session switch (resetObserverState bumps stateGeneration) must
 		// not complete its detection against the new session's state or persist into its file.
@@ -1405,7 +1405,7 @@ export default async function (pi: ExtensionAPI) {
 		// (a local git call — always runs, even when the gh check below is skipped or paced)
 		const rec = await recordCurrentBranch(cwd);
 		if (gen !== stateGeneration) return;
-		if (rec && rec.branch) {
+		if (rec?.branch) {
 			let branches = trackedBranchesByRepo.get(rec.repoRoot);
 			if (!branches) {
 				branches = new Set();
@@ -1847,7 +1847,7 @@ export default async function (pi: ExtensionAPI) {
 				.trim();
 			const prNumber = parseInt(cleanStr, 10);
 
-			if (isNaN(prNumber) || prNumber <= 0) {
+			if (Number.isNaN(prNumber) || prNumber <= 0) {
 				return ok(`Invalid PR number: ${rawPr}`, {
 					tool: "observe_pr",
 					requested: String(rawPr ?? ""),
@@ -2017,7 +2017,7 @@ export default async function (pi: ExtensionAPI) {
 
 			if (sub === "stop") {
 				const targetPr = parseInt(parts[1]?.replace(/^#/, "") || "", 10);
-				if (isNaN(targetPr) || targetPr <= 0) {
+				if (Number.isNaN(targetPr) || targetPr <= 0) {
 					ctx.ui.notify("Please specify a valid PR number to stop: /pr_observer stop <prNumber>", "warning");
 					return;
 				}
@@ -2125,7 +2125,7 @@ export default async function (pi: ExtensionAPI) {
 						keys: parseEnvKeys(output),
 					});
 				} catch (cause: any) {
-					const errorMsg = (cause?.stdout || "") + "\n" + (cause?.stderr || cause?.message || String(cause));
+					const errorMsg = `${cause?.stdout || ""}\n${cause?.stderr || cause?.message || String(cause)}`;
 					return err(`Error running requestdb:\n${errorMsg.trim()}`, "REQUESTDB_FAILED", {
 						tool: "requestdb",
 						fresh: Boolean(params?.new),
@@ -2178,7 +2178,7 @@ export default async function (pi: ExtensionAPI) {
 						folder: params?.folder ?? ctx.cwd,
 					});
 				} catch (cause: any) {
-					const errorMsg = (cause?.stdout || "") + "\n" + (cause?.stderr || cause?.message || String(cause));
+					const errorMsg = `${cause?.stdout || ""}\n${cause?.stderr || cause?.message || String(cause)}`;
 					return err(`Error running destroydb:\n${errorMsg.trim()}`, "DESTROYDB_FAILED", {
 						tool: "destroydb",
 						scope: params?.all ? "all" : "folder",

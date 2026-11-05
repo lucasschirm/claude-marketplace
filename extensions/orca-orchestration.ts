@@ -6,13 +6,11 @@ import * as readline from "node:readline";
 import {
 	execOrca,
 	orcaErrorText,
-	resolveOrcaCmd,
 	spawnOrcaCheck,
 	removeOrcaWorktree,
 	checkWorktreeSafety,
 	pruneChildWorktrees,
 	type OrcaWorkerRow,
-	type OrcaMessageDelivery,
 } from "./lib/orca-client.ts";
 import { capList, type ToolDetails } from "./lib/tool-result.ts";
 import { logError } from "./lib/extension-log.ts";
@@ -332,7 +330,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 	function getObserverInterval(): number {
 		const flagVal = pi.getFlag("orca-observer-interval");
 		const parsed = parseInt(String(flagVal || "30"), 10);
-		return isNaN(parsed) || parsed <= 0 ? 30 : parsed;
+		return Number.isNaN(parsed) || parsed <= 0 ? 30 : parsed;
 	}
 
 	function updateStatusUI(ui?: ExtensionUIContext) {
@@ -480,8 +478,14 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			logError("orca-orchestration", "Check process error", err);
 		});
 
+		// A check process is spawned with piped stdio; if that ever stops being true there is no stream to
+		// read, and saying so once beats a TypeError from inside readline on every spawn.
+		if (!proc.stdout) {
+			logError("orca-orchestration", "check process has no stdout - its output cannot be read");
+			return;
+		}
 		const rl = readline.createInterface({
-			input: proc.stdout!,
+			input: proc.stdout,
 			crlfDelay: Infinity,
 		});
 
@@ -500,7 +504,7 @@ export default function orcaOrchestrationExtension(pi: ExtensionAPI): void {
 			}
 		});
 
-		proc.on("close", (code) => {
+		proc.on("close", (_code) => {
 			if (disposed) return;
 			if (checkProcess === proc) checkProcess = null;
 

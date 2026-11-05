@@ -180,10 +180,9 @@ test("schedule() during a running round queues exactly one follow-up with the ne
 	const finished: number[] = [];
 	let releaseFirst: () => void = () => {};
 	const first = new Promise<void>((resolve) => (releaseFirst = resolve));
-	scope.schedule("refresh", async (signal) => {
+	scope.schedule("refresh", async () => {
 		finished.push(1);
 		await first;
-		if (!signal.aborted) return;
 	});
 	await sleep(10); // let the run enter its body, so it counts as in flight
 	const gate = deferred<number>();
@@ -343,7 +342,7 @@ test("pending/flushAllTasks observe every scope", async () => {
 test("abort() stops coalesced follow-ups and reports nothing as pending", async () => {
 	const scope = createTaskScope("t-abort");
 	let runs = 0;
-	scope.schedule("refresh", async (signal) => {
+	scope.schedule("refresh", async () => {
 		runs++;
 		await sleep(40);
 		if (signal.aborted) throw new Error("aborted");

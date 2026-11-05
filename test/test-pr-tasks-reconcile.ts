@@ -5,6 +5,7 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { must } from "./helpers/must.ts";
 
 // Regression tests for issue #26: tracker state must be reconciled with GitHub,
 // stale thread node IDs repaired, and the open-tasks nudge must not loop.
@@ -115,7 +116,11 @@ function managerTests(): void {
 		m.syncFromGitHubThreads(5, [thread("PRRT_r1", 900, { body: "lint: unused var", isResolved: true })]);
 		const res = m.syncFromGitHubThreads(5, [thread("PRRT_r2", 901, { body: "lint: unused var" })]);
 		assert(res.newTasks.length === 1 && res.newTasks[0].status === "UNRESOLVED", "re-post must be tracked as a new open task", res);
-		assert(open(m, 5).length === 1 && m.findTask("900")!.status === "RESOLVED", "resolved task untouched", m.getAllTasks(5));
+		assert(
+			open(m, 5).length === 1 && must(m.findTask("900"), "task 900").status === "RESOLVED",
+			"resolved task untouched",
+			m.getAllTasks(5),
+		);
 	}
 	console.log("✓ re-post of resolved comment tracked");
 
@@ -125,7 +130,7 @@ function managerTests(): void {
 		m.syncFromGitHubThreads(6, [thread("PRRT_e", 950)]);
 		const empty = { ...thread("PRRT_e", 950), comments: { nodes: [] } };
 		const res = m.syncFromGitHubThreads(6, [empty]);
-		assert(res.staleTasks.length === 0 && m.findTask("950")!.status === "UNRESOLVED", "listed thread must stay open", res);
+		assert(res.staleTasks.length === 0 && must(m.findTask("950"), "task 950").status === "UNRESOLVED", "listed thread must stay open", res);
 	}
 	console.log("✓ comment-less thread kept");
 
@@ -151,13 +156,13 @@ function managerTests(): void {
 		const early = [{ id: "PRRC_e1", databaseId: 1301, body: "earlier discussion", author: "reviewer" }];
 		m.syncFromGitHubThreads(8, [thread("PRRT_bl", 1300, { replies: early })]);
 		// As pr_task_blocked does: the agent has seen the replies, then its block reply is recorded
-		const task = m.findTask("1300")!;
+		const task = must(m.findTask("1300"), "task 1300");
 		m.markShown(task, task.replies);
 		m.addReply(task, { id: "PRRC_block", databaseId: 1302, body: "need info", author: "bot", createdAt: "2026-10-10T12:00:00Z" });
 		m.markBlocked(task, "need info");
 		// The blocking reply is not listed yet: earlier replies must not unblock.
 		let res = m.syncFromGitHubThreads(8, [thread("PRRT_bl", 1300, { replies: early })]);
-		assert(res.unblockedTasks.length === 0 && m.findTask("1300")!.status === "BLOCKED", "pre-block reply ignored", res);
+		assert(res.unblockedTasks.length === 0 && must(m.findTask("1300"), "task 1300").status === "BLOCKED", "pre-block reply ignored", res);
 		const withBlock = [...early, { id: "PRRC_block", databaseId: 1302, body: "need info", author: "bot" }];
 		res = m.syncFromGitHubThreads(8, [thread("PRRT_bl", 1300, { replies: withBlock })]);
 		assert(res.unblockedTasks.length === 0, "the blocking reply itself does not unblock", res);
@@ -175,14 +180,14 @@ function managerTests(): void {
 		// (a partial or failed fetch never reaches the manager: fetchReviewThreads throws instead)
 		let res = m.syncFromGitHubThreads(3, []);
 		assert(res.staleTasks.length === 2, "open + blocked tasks missing from the thread list become stale", res);
-		assert(m.findTask("702")!.status === "RESOLVED", "resolved task stays resolved");
+		assert(must(m.findTask("702"), "task 702").status === "RESOLVED", "resolved task stays resolved");
 		assert(open(m, 3).length === 0 && m.getUnresolvedTasks(3).length === 0, "stale tasks are not open");
 		assert(m.getCounts(3).stale === 2, "stale count", m.getCounts(3));
 		res = m.syncFromGitHubThreads(3, []);
 		assert(res.staleTasks.length === 0, "stale tasks are reported only on the transition", res);
 		m.syncFromGitHubThreads(3, [thread("PRRT_1", 701), thread("PRRT_3", 703)]);
-		assert(m.findTask("701")!.status === "UNRESOLVED", "a reappearing unresolved thread is open again");
-		assert(m.findTask("703")!.status === "BLOCKED", "a reappearing blocked thread keeps its block");
+		assert(must(m.findTask("701"), "task 701").status === "UNRESOLVED", "a reappearing unresolved thread is open again");
+		assert(must(m.findTask("703"), "task 703").status === "BLOCKED", "a reappearing blocked thread keeps its block");
 	}
 	console.log("✓ stale detection");
 
@@ -192,9 +197,9 @@ function managerTests(): void {
 		m.syncFromGitHubThreads(4, [thread("PRRT_q", 801)]);
 		m.markStale("801", "rejected", { deadThread: true });
 		m.syncFromGitHubThreads(4, [thread("PRRT_q", 801)]);
-		assert(m.findTask("801")!.status === "STALE", "re-listing the same rejected ID must not reopen the task");
+		assert(must(m.findTask("801"), "task 801").status === "STALE", "re-listing the same rejected ID must not reopen the task");
 		m.syncFromGitHubThreads(4, [thread("PRRT_q2", 801)]);
-		const task = m.findTask("801")!;
+		const task = must(m.findTask("801"), "task 801");
 		assert(task.status === "UNRESOLVED" && task.threadId === "PRRT_q2", "a repaired ID reopens the task", task);
 	}
 	console.log("✓ rejected thread IDs");
@@ -218,7 +223,7 @@ export default async function (pi: any) {
 	const tools: Record<string, any> = {};
 	const commands: Record<string, any> = {};
 	const sentMessages: string[] = [];
-	const eventHandlers: Record<string, Function[]> = {};
+	const eventHandlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 	const notifications: Array<{ msg: string; type?: string }> = [];
 	const statusUpdates: Record<string, string | undefined> = {};
 
@@ -234,7 +239,8 @@ export default async function (pi: any) {
 	const mockPi = {
 		...pi,
 		on(event: string, handler: any) {
-			(eventHandlers[event] ||= []).push(handler);
+			eventHandlers[event] ||= [];
+			eventHandlers[event].push(handler);
 			return pi.on(event, handler);
 		},
 		registerTool(t: any) {
@@ -361,11 +367,11 @@ process.exit(0);
 	const hasListedTask = async (id: number) => (await list({ show_all: true })).includes(`**Conversation Id**: ${id} `);
 	const list = async (params: any) => {
 		await flush();
-		return (await tools["pr_tasks_list"].execute("l", params, undefined, undefined, ctx)).content[0].text as string;
+		return (await tools.pr_tasks_list.execute("l", params, undefined, undefined, ctx)).content[0].text as string;
 	};
 	const settle = async () => {
 		let result: any;
-		for (const h of eventHandlers["agent_before_settle"] || []) {
+		for (const h of eventHandlers.agent_before_settle || []) {
 			const r = await h({ type: "agent_before_settle" }, ctx);
 			if (r) result = r;
 		}
@@ -422,7 +428,7 @@ process.exit(0);
 		invalidIds: ["PRRT_s2_old"],
 		afterFailure: { "200": [thread("PRRT_s2_new", 2001)] },
 	});
-	let res = await tools["pr_task_resolve"].execute("r", { conversation_id: "2001", message: "Done" }, undefined, undefined, ctx);
+	let res = await tools.pr_task_resolve.execute("r", { conversation_id: "2001", message: "Done" }, undefined, undefined, ctx);
 	assert(!res.isError && res.content[0].text.includes("resolved successfully"), "resolve succeeds after repair", res.content[0].text);
 	assert(
 		JSON.stringify(callsOf("reply")) === JSON.stringify(["reply:PRRT_s2_old", "reply:PRRT_s2_new"]),
@@ -441,9 +447,9 @@ process.exit(0);
 		prs: { "101": [], "300": [thread("PRRT_s3_live", 3001, { isResolved: true }), thread("PRRT_s3b_live", 3002, { isResolved: true })] },
 		invalidIds: ["PRRT_s3", "PRRT_s3b"],
 	});
-	res = await tools["pr_task_resolve"].execute("r", { conversation_id: "3001", message: "Done" }, undefined, undefined, ctx);
+	res = await tools.pr_task_resolve.execute("r", { conversation_id: "3001", message: "Done" }, undefined, undefined, ctx);
 	assert(!res.isError && res.content[0].text.includes("is already resolved"), "resolve reports upstream resolution", res.content[0].text);
-	res = await tools["pr_task_blocked"].execute("b", { conversation_id: "3002", reason: "?" }, undefined, undefined, ctx);
+	res = await tools.pr_task_blocked.execute("b", { conversation_id: "3002", reason: "?" }, undefined, undefined, ctx);
 	assert(!res.isError && res.content[0].text.includes("is already resolved"), "blocked reports upstream resolution", res.content[0].text);
 	assert(callsOf("reply").length === 0 && callsOf("resolve").length === 0, "no mutation sent", readState().calls);
 	console.log("✓ Scenario 3 passed");
@@ -455,7 +461,7 @@ process.exit(0);
 	console.log("\n=== Scenario 4: permanently unresolvable ID becomes STALE ===");
 	writeState({ prs: { "101": [], "400": [thread("PRRT_broken", 4001)] }, invalidIds: ["PRRT_broken"] });
 	await list({ pr_number: 400 });
-	res = await tools["pr_task_blocked"].execute("b", { conversation_id: "4001", reason: "Need input" }, undefined, undefined, ctx);
+	res = await tools.pr_task_blocked.execute("b", { conversation_id: "4001", reason: "Need input" }, undefined, undefined, ctx);
 	assert(!res.isError && res.content[0].text.includes("now marked as STALE"), "unresolvable ID marks the task stale", res.content[0].text);
 	const s4calls = readState().calls.filter((c: string) => !c.startsWith("fetchcwd:"));
 	assert(s4calls.indexOf("fetch:400", s4calls.indexOf("reply:PRRT_broken")) !== -1, "the PR was re-synced before giving up", s4calls);
@@ -463,7 +469,7 @@ process.exit(0);
 	assert(text.includes("**Status**: STALE"), "task listed as STALE", text);
 	sentMessages.length = 0;
 	assert(!(await settle())?.continue && sentMessages.length === 0, "stale task does not drive the nudge", sentMessages);
-	res = await tools["pr_task_resolve"].execute("r", { conversation_id: "4001", message: "Done" }, undefined, undefined, ctx);
+	res = await tools.pr_task_resolve.execute("r", { conversation_id: "4001", message: "Done" }, undefined, undefined, ctx);
 	assert(
 		!res.isError && res.content[0].text.includes("now marked as STALE"),
 		"a still-listed rejected thread is retried, not cleared",
@@ -471,7 +477,7 @@ process.exit(0);
 	);
 	assert(callsOf("reply:PRRT_broken").length === 2, "resolve retried the listed thread", readState().calls);
 	writeState({ prs: { "101": [], "400": [] } });
-	res = await tools["pr_task_resolve"].execute("r", { conversation_id: "4001", message: "Done" }, undefined, undefined, ctx);
+	res = await tools.pr_task_resolve.execute("r", { conversation_id: "4001", message: "Done" }, undefined, undefined, ctx);
 	assert(
 		!res.isError && res.content[0].text.includes("no review thread on GitHub anymore"),
 		"resolving a vanished stale task succeeds locally",
@@ -495,7 +501,7 @@ process.exit(0);
 	await list({ pr_number: 500 });
 	const staleNotices = sentMessages.filter((m) => m.includes("marked STALE"));
 	assert(staleNotices.length === 1 && staleNotices[0].includes("5001"), "stale state reported exactly once", sentMessages);
-	assert(statusUpdates["pr_tasks"]?.includes("stale"), "status bar shows stale count", statusUpdates);
+	assert(statusUpdates.pr_tasks?.includes("stale"), "status bar shows stale count", statusUpdates);
 	console.log("✓ Scenario 5 passed");
 
 	// Scenario 6: the settle nudge stops after MAX_IDENTICAL_NUDGES identical
@@ -528,7 +534,7 @@ process.exit(0);
 		for (let i = 0; i < 3; i++) await settle();
 		assert(!(await settle())?.continue, "capped again");
 		const input = async (source: string) => {
-			for (const h of eventHandlers["input"] || []) await h({ type: "input", text: "x", source }, ctx);
+			for (const h of eventHandlers.input || []) await h({ type: "input", text: "x", source }, ctx);
 		};
 		await input("extension");
 		assert(!(await settle())?.continue, "extension input (the nudge itself) must not re-arm the cap");
@@ -599,7 +605,7 @@ process.exit(0);
 		await list({});
 		assert(callsOf("fetch:800").length === 0, "the current repo's PR #800 must not be synced in its place", readState().calls);
 		assert(!(await hasListedTask(8501)), "no task created for the unrelated PR");
-		const res = await tools["pr_task_resolve"].execute(
+		const res = await tools.pr_task_resolve.execute(
 			"r",
 			{ conversation_id: "8001", message: "Done", accept_suggestion: true },
 			undefined,

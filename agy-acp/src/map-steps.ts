@@ -54,8 +54,7 @@ export function mapStepToUpdates(host: StepMapHost, s: AgyStepUpdateEvent["step_
 	}
 	const id = toolCallIdOf(host.conversationId, s.step_index);
 	if (s.state === "ACTIVE") mapActiveTool(host, s, id);
-	else if (s.state !== "DONE" && s.state !== "ERROR") return;
-	else if (host.activeTools.delete(id)) settleTerminalTool(host, s, id);
+	else if ((s.state === "DONE" || s.state === "ERROR") && host.activeTools.delete(id)) settleTerminalTool(host, s, id);
 }
 
 function mapActiveTool(host: StepMapHost, s: AgyStepUpdateEvent["step_update"], id: string): void {

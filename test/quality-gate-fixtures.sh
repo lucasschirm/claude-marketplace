@@ -524,6 +524,30 @@ qa pass "a metric measured well below a raised baseline is still an improvement"
 restore_baseline
 
 echo
+echo "a comment-shaped glob does not blind the rule-enabled check"
+# A glob is allowed to look like a comment: "plugins/<star>/scripts/**" carries an opening /<star> and a
+# closing <star>/, so a regex comment stripper pairs the closer with the opener inside an earlier
+# "extensions/**" and deletes every line between them. JSON.parse then throws, ruleEnabledInConfig falls back
+# to "enabled", and a rule that was switched off is reported as debt that is genuinely gone - the exact quiet
+# pass the section above exists to prevent. The real biome.jsonc contains such globs; this fixture keeps the
+# hazard pinned even if it one day does not.
+cp biome.jsonc "$WORK/biome.jsonc.orig-glob"
+python3 - <<'PYFIX'
+import io
+
+s = io.open("biome.jsonc", encoding="utf-8").read()
+assert '"extensions/**"' in s
+assert '"noConsole": "warn"' in s
+s = s.replace('"extensions/**"', '"extensions/**",\n\t\t\t"zz-glob/*/comment-shaped/**"', 1)
+s = s.replace('"noConsole": "warn"', '"noConsole": "off"', 1)
+io.open("biome.jsonc", "w", encoding="utf-8").write(s)
+PYFIX
+qa fail "a switched-off rule is still caught when a comment-shaped glob precedes it" --check
+expect_text "and still names the rule as off" "has the rule off"
+cp "$WORK/biome.jsonc.orig-glob" biome.jsonc
+restore_baseline
+
+echo
 echo "a rule silenced by an overrides entry"
 cp biome.jsonc "$WORK/biome.jsonc.orig2"
 python3 - <<'PYFIX'
@@ -538,7 +562,13 @@ block = (
 io.open("biome.jsonc", "w", encoding="utf-8").write(s.replace(needle, block, 1))
 PYFIX
 qa fail "the top level still says warn while an override silences 147 sites" --check
-expect_text "and the zero is not called an improvement" "$(metric_value biome.suspicious/noExplicitAny) -> 0"
+# This asserted the generic zero-drop line ("151 -> 0") and passed for the wrong reason: the override's own
+# glob, "extensions/**" followed by "/*.ts", contains a closing <star>/, which the old regex comment stripper
+# paired with the opening /<star> inside files.includes. The config parse threw, ruleEnabledInConfig fell back
+# to "enabled", and the gate could only say the count had fallen. Now that the stripper reads string literals
+# the override is actually seen, so the gate names the cause. Either way the zero is not an improvement, which
+# is what this fixture is for.
+expect_text "and the zero is not called an improvement" "has the rule off"
 qa fail "--write cannot record it without a reason" --write
 qa pass "a reason records it, so the silencing shows up in the file" --write --reason "fixture: silenced by an overrides entry"
 cp "$WORK/biome.jsonc.orig2" biome.jsonc

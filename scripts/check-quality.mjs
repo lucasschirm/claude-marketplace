@@ -47,6 +47,14 @@ function listTs(dir) {
 	return out.sort();
 }
 
+/**
+ * The trees `npm run lint` gates, and therefore the trees the biome metrics describe. Passed to
+ * biome as paths and used to decide whether a diagnostic belongs to the measurement; biome's own
+ * `files.includes` narrows `plugins/` to a plugin's own code, because a plugin's `lib` directory
+ * is a vendored byte-copy of extensions/lib/ and would count the same debt twice.
+ */
+const GATED_TREES = ["extensions", "agy-acp", "test", "scripts", "plugins"];
+
 const extensionFiles = () => listTs(path.join(ROOT, "extensions"));
 const agyAcpSrcFiles = () => listTs(path.join(ROOT, "agy-acp", "src"));
 /**
@@ -365,7 +373,7 @@ function readBiomeDiagnosticJson(res) {
 
 /** True when `abs` is a file inside a tree the biome metrics are supposed to describe. */
 function isUnderGatedTree(abs) {
-	for (const dir of ["extensions", "agy-acp"]) {
+	for (const dir of GATED_TREES) {
 		const rel = path.relative(path.join(ROOT, dir), abs);
 		if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) return true;
 	}
@@ -382,7 +390,7 @@ function biomeRuleCounts() {
 	const override = process.env.PI_QA_FIXTURES === "1" ? process.env.PI_QA_BIOME?.trim() || process.env.PI_QA_BIOME : undefined;
 	if (override) {
 		return readBiomeDiagnosticJson(
-			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"], {
+			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", ...GATED_TREES], {
 				cwd: ROOT,
 				encoding: "utf-8",
 				maxBuffer: 32 * 1024 * 1024,
@@ -394,8 +402,8 @@ function biomeRuleCounts() {
 	// --max-diagnostics=none: a capped report would understate debt, and undercounting is the failure direction
 	// this whole file is built to refuse.
 	const args = fs.existsSync(localBin)
-		? ["lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"]
-		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"];
+		? ["lint", "--reporter=json", "--max-diagnostics=none", ...GATED_TREES]
+		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", ...GATED_TREES];
 
 	const res = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf-8", maxBuffer: 32 * 1024 * 1024 });
 	return readBiomeDiagnosticJson(res);
@@ -906,6 +914,57 @@ function biomeConfigHash() {
 }
 
 /**
+ * Copies the JSON string literal that starts at `i` (a double quote), returning its text and the index just
+ * past it. Escapes are consumed in pairs, so a \\" cannot be mistaken for the closing quote.
+ */
+function readJsonStringLiteral(raw, i) {
+	let j = i + 1;
+	while (j < raw.length) {
+		if (raw[j] === "\\") {
+			j += 2;
+			continue;
+		}
+		if (raw[j] === '"') return { text: raw.slice(i, j + 1), next: j + 1 };
+		j++;
+	}
+	return { text: raw.slice(i), next: raw.length };
+}
+
+/**
+ * Strips JSONC comments without touching comment-like text inside string literals.
+ *
+ * A single pass that tracks whether it is inside a string, rather than a pair of regexes, because both halves
+ * of the problem bite here. A glob is allowed to look like a comment: "plugins/<star>/scripts/**" carries an
+ * opening /<star> and a closing <star>/, and a regex stripper pairs that closer with the opener inside an
+ * earlier "extensions/**", deleting the config between them - the parse then throws, ruleEnabledInConfig
+ * answers "enabled" for every rule, and a metric that stopped being measured is called an improvement. And a
+ * comment is allowed to look like a string: several in biome.jsonc quote the severity they discuss, so
+ * splitting on string literals first would strip a comment's prose and leave its quoted fragment behind.
+ */
+function stripJsoncComments(raw) {
+	let out = "";
+	let i = 0;
+	while (i < raw.length) {
+		const c = raw[i];
+		if (c === '"') {
+			const literal = readJsonStringLiteral(raw, i);
+			out += literal.text;
+			i = literal.next;
+		} else if (c === "/" && raw[i + 1] === "*") {
+			const close = raw.indexOf("*/", i + 2);
+			i = close === -1 ? raw.length : close + 2;
+		} else if (c === "/" && raw[i + 1] === "/") {
+			const nl = raw.indexOf("\n", i);
+			i = nl === -1 ? raw.length : nl;
+		} else {
+			out += c;
+			i++;
+		}
+	}
+	return out;
+}
+
+/**
  * Whether biome.jsonc still runs a rule ("suspicious/noExplicitAny"). Consulted for the stale-metric check,
  * where the counts are ambiguous. An unreadable config answers "enabled": the conservative direction is to
  * keep measuring, never to let a metric quietly disappear.
@@ -913,12 +972,7 @@ function biomeConfigHash() {
 function ruleEnabledInConfig(rule) {
 	let cfg;
 	try {
-		const raw = fs
-			.readFileSync(path.join(ROOT, "biome.jsonc"), "utf-8")
-			.replace(/^\uFEFF/, "")
-			.replace(/\/\*[\s\S]*?\*\//g, "")
-			.replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
-		cfg = JSON.parse(raw);
+		cfg = JSON.parse(stripJsoncComments(fs.readFileSync(path.join(ROOT, "biome.jsonc"), "utf-8").replace(/^\uFEFF/, "")));
 	} catch {
 		return true;
 	}
@@ -1262,7 +1316,7 @@ if (mode === "write" && reason !== undefined) {
 	const why = reasonProblem(reason);
 	if (why) fail([why]);
 }
-if (only !== undefined && only.startsWith("--")) fail([`--only must name an invariant (see --list), got '${only}'`]);
+if (only?.startsWith("--")) fail([`--only must name an invariant (see --list), got '${only}'`]);
 
 run({ mode, only, reason: reason?.trim(), full });
 
@@ -1283,5 +1337,4 @@ function reasonProblem(text) {
 	// No placeholder blacklist: every list of "banned vague words" rejects the honest short note and admits the
 	// vague sentence long enough to slip past. Length plus word count is the blunt instrument, and the actual
 	// reviewer of a widened baseline is a human reading `notes`.
-	return undefined;
 }
