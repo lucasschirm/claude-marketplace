@@ -25,6 +25,11 @@ export interface Held {
 	refs: number;
 }
 
+/** The answer to `HoldTable.acquire`: the holder, or why this process does not have it. */
+export type HoldOutcome =
+	| { held: Held; contested: false; unavailable?: boolean; reason: string }
+	| { held: null; contested: boolean; unavailable?: boolean; reason: string };
+
 export interface HoldTableOptions {
 	log: (line: string) => void;
 	/** How old a lock on another host has to be before it is treated as abandoned. */
@@ -39,6 +44,8 @@ export class HoldTable {
 	private readonly now: () => number;
 	private readonly hostname: () => string;
 	private readonly entries = new Map<string, Held>();
+	/** Directories a call in this process is taking right now, before the entry exists. */
+	private readonly pending = new Set<string>();
 
 	constructor(options: HoldTableOptions) {
 		this.log = options.log;
@@ -52,23 +59,34 @@ export class HoldTable {
 	}
 
 	/**
-	 * Take a conversation for this process, or share the one it already holds. Null when another
-	 * process holds it: the caller refuses, it does not wait (a client that wants a conversation
+	 * Take a conversation for this process, or share the one it already holds. `held: null` means another
+	 * process holds it, and the caller refuses rather than waits (a client that wants a conversation
 	 * another agy-acp is writing to needs to be told, not queued).
+	 *
+	 * `contested` is the third case: a call in this same process is taking it right now. That is the
+	 * session being open here twice, and it is the caller's mapping to make - as "another process" it
+	 * would name this process's own live pid and never age out.
 	 */
-	async acquire(dir: string): Promise<Held | null> {
+	async acquire(dir: string): Promise<HoldOutcome> {
 		const existing = this.entries.get(dir);
-		if (existing !== undefined) return existing;
-		const outcome = await acquireLock(dir, { staleMs: this.staleMs, now: this.now });
-		if (!outcome.acquired) {
-			this.log(`session store: ${outcome.reason}`);
-			return null;
+		if (existing !== undefined) return { held: existing, contested: false, reason: "already held by this agy-acp process" };
+		if (this.pending.has(dir)) return { held: null, contested: true, reason: "another call in this process is taking it" };
+		this.pending.add(dir);
+		try {
+			const outcome = await acquireLock(dir, { staleMs: this.staleMs, now: this.now });
+			if (!outcome.acquired) {
+				this.log(`session store: ${outcome.reason}`);
+				return { held: null, contested: false, unavailable: outcome.unavailable, reason: outcome.reason };
+			}
+			// A temp file left by a crash is nobody's state; the atomic writer would overwrite it anyway.
+			await sweepTempFiles(dir);
+			const held: Held = { journal: null, refs: 0 };
+			this.entries.set(dir, held);
+			return { held, contested: false, reason: "locked for this agy-acp process" };
+		} finally {
+			// The entry, not the claim, is what outlives this call; a failure leaves nothing behind.
+			this.pending.delete(dir);
 		}
-		// A temp file left by a crash is nobody's state; the atomic writer would overwrite it anyway.
-		await sweepTempFiles(dir);
-		const held: Held = { journal: null, refs: 0 };
-		this.entries.set(dir, held);
-		return held;
 	}
 
 	/**

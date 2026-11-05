@@ -168,12 +168,10 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	const restore = createSessionRestore({
 		store,
 		registryAdd: (sessionId, session) => registry.add(sessionId, session),
-		// `send`, not `notify`: a replay has to know when the connection stopped taking frames, or it
-		// would push a whole transcript into a transport that already went away and report a replay that
-		// never happened.
-		// `notify` answers with whether the frame went out: a replay has to know when the connection
-		// stopped taking frames, or it would push a whole transcript into a transport that had already gone
-		// away and then report a replay that never happened.
+		// `notify` answers with whether the frame went out, and that answer is the reason this is a `send`
+		// rather than a call: a replay has to know when the connection stopped taking frames, or it would
+		// push a whole transcript into a transport that had already gone and report a replay that never
+		// happened.
 		send: (sessionId, update) => connection.notify("session/update", { sessionId, update }),
 		log,
 		// The record's cwd, not the client's: they name the same workspace (the store checked), but only one

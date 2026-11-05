@@ -178,7 +178,9 @@ same validation and replays nothing: a client that wants the transcript asks for
 starts `agy`: the child (with `--conversation <id>`) appears at the next `session/prompt`, which is
 what keeps a browse-and-pick UI from paying a launch per session. **`session/list`** reports this
 store only, filtered by `cwd` when one is given, newest first, one page at a time; `nextCursor` is
-opaque (an id and a timestamp, base64url) and stays valid while new sessions arrive. One call reads at
+opaque (an id and a timestamp, base64url) and stays valid while new sessions arrive: the next page is
+"everything older than the pair you were last shown", so a conversation that takes a turn between two
+pages neither repeats on the next one nor disappears from it. One call reads at
 most 2000 records, because reading is one `meta.json` per directory; a store bigger than that answers
 with `_meta.truncated` and the numbers instead of pretending the list is complete.
 
@@ -188,16 +190,23 @@ The answers when a load cannot happen, so a client does not have to guess:
 | --- | --- |
 | no such session (or a record this version cannot read) | `-32002`, `data.reason: "session_not_found"` |
 | the session belongs to another workspace | `-32602`, `data.reason: "cwd_mismatch"`, `data.recordedCwd` |
-| it is already open in this process | `-32602`, `data.reason: "session_open"` |
+| it is already open in this process, including a second load of it in flight | `-32602`, `data.reason: "session_open"` |
 | another `agy-acp` process holds it | `-32603`, `data.reason: "session_in_use"`, holder in the message |
-| the store cannot be read or written | `-32603`, `data.reason: "store_unavailable"` |
+| the store cannot be read or written, or cannot take its own lock file | `-32603`, `data.reason: "store_unavailable"` |
+
+A lock the state directory refuses (read-only, full, or a directory where the lock belongs) is
+`store_unavailable` rather than `session_in_use`: the first is a disk to fix, the second is a
+process to wait for, and only one of them ever lets go.
 
 `-32002` is also what `session/prompt` uses for "a turn is already running": ACP fixes
 resource-not-found at that code and this server's turn-in-progress code predates it, so the two
 collide. They are told apart by `data.reason` and by the method they answer, and neither code is
 changed — a client switching on the number would break either way. A corrupt `meta.json` is an
 unknown session, never a repair: inventing a record would invent a history. A store that cannot be
-written fails `session/new` outright rather than handing out a session that cannot come back.
+written fails `session/new` outright rather than handing out a session that cannot come back, and a
+load whose store can no longer replace the record fails the same way rather than promising a history
+that stops there. `mcpServers` and `additionalDirectories` on a load or resume are answered with
+`_meta`, as they are on `session/new`: accepted, reported unsupported, never silently dropped.
 
 What is restored is what the client chose — mode, model, effort, with `default` meaning "pass no
 flag" — not what agy's `init` volunteered, which arrives again with the first resumed turn. A

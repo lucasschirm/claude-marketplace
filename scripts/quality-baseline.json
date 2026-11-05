@@ -76,21 +76,21 @@
     "agy-acp/src/selection-methods.ts": 100,
     "agy-acp/src/selection-record.ts": 51,
     "agy-acp/src/selection-restore.ts": 40,
-    "agy-acp/src/server.ts": 192,
-    "agy-acp/src/session-open.ts": 189,
+    "agy-acp/src/server.ts": 190,
+    "agy-acp/src/session-open.ts": 198,
     "agy-acp/src/session-recording.ts": 87,
     "agy-acp/src/session-registry.ts": 85,
-    "agy-acp/src/session-restore.ts": 283,
+    "agy-acp/src/session-restore.ts": 303,
     "agy-acp/src/session-selection.ts": 142,
     "agy-acp/src/session-store/files.ts": 259,
-    "agy-acp/src/session-store/hold.ts": 105,
-    "agy-acp/src/session-store/journal.ts": 196,
-    "agy-acp/src/session-store/listing.ts": 146,
-    "agy-acp/src/session-store/lock.ts": 187,
-    "agy-acp/src/session-store/paths.ts": 99,
+    "agy-acp/src/session-store/hold.ts": 123,
+    "agy-acp/src/session-store/journal.ts": 205,
+    "agy-acp/src/session-store/listing.ts": 153,
+    "agy-acp/src/session-store/lock.ts": 208,
+    "agy-acp/src/session-store/paths.ts": 108,
     "agy-acp/src/session-store/reading.ts": 80,
     "agy-acp/src/session-store/records.ts": 210,
-    "agy-acp/src/session-store/store.ts": 284,
+    "agy-acp/src/session-store/store.ts": 289,
     "agy-acp/src/session.ts": 443,
     "agy-acp/src/shutdown.ts": 114,
     "agy-acp/src/spawn-agy.ts": 60,
@@ -366,8 +366,22 @@
         "agy-acp/src/session-selection.ts: 142 lines > baseline 131 (files may only shrink)",
         "agy-acp/src/session.ts: 443 lines > baseline 349 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-05",
+      "reason": "the review round fixed lock failures, a leaked load hold and cursor drift",
+      "changes": [
+        "agy-acp/src/session-open.ts: 198 lines > baseline 189 (files may only shrink)",
+        "agy-acp/src/session-restore.ts: 303 lines > baseline 283 (files may only shrink)",
+        "agy-acp/src/session-store/hold.ts: 123 lines > baseline 105 (files may only shrink)",
+        "agy-acp/src/session-store/journal.ts: 205 lines > baseline 196 (files may only shrink)",
+        "agy-acp/src/session-store/listing.ts: 153 lines > baseline 146 (files may only shrink)",
+        "agy-acp/src/session-store/lock.ts: 208 lines > baseline 187 (files may only shrink)",
+        "agy-acp/src/session-store/paths.ts: 108 lines > baseline 99 (files may only shrink)",
+        "agy-acp/src/session-store/store.ts: 289 lines > baseline 284 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "79b8f02",
+  "generatedFrom": "9e9921d",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }

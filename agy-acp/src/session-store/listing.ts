@@ -72,12 +72,19 @@ function cursorOf(entry: ListedSession | undefined): string | null {
 	return Buffer.from(`${entry.updatedAtMs}${CURSOR_SEPARATOR}${entry.sessionId}`, "utf8").toString("base64url");
 }
 
+/** The listing's order: newest first, and by id when two records share a timestamp. */
+function orderEntries(a: { updatedAtMs: number; sessionId: string }, b: { updatedAtMs: number; sessionId: string }): number {
+	return b.updatedAtMs - a.updatedAtMs || a.sessionId.localeCompare(b.sessionId);
+}
+
 /**
- * Where a cursor points in the sorted list (the entry after the one it names), or -1 for nothing.
+ * Where the page after a cursor starts, or -1 for a cursor that does not decode (the client's error).
  *
- * The cursor names an entry rather than holding an offset, which is what makes a page stable: a session
- * promoted by a new turn between two pages cannot make page two skip or repeat a conversation, because
- * page two starts after the conversation the client last saw, wherever it now sits.
+ * Keyset, not an offset and not "the entry after the one named": the session a cursor names may have
+ * taken a turn between the calls and moved, and a start read off where it sits now skips or repeats its
+ * neighbours. Page two is "everything strictly older than what the client was last shown", wherever each
+ * now sorts; a cursor naming a conversation this store no longer holds still pages, which is the right
+ * answer to a session deleted mid-listing.
  */
 function indexOfCursor(sorted: ListedSession[], cursor: string): number {
 	const decoded = Buffer.from(cursor, "base64url").toString("utf8");
@@ -86,8 +93,8 @@ function indexOfCursor(sorted: ListedSession[], cursor: string): number {
 	const updatedAtMs = Number(decoded.slice(0, at));
 	const sessionId = decoded.slice(at + CURSOR_SEPARATOR.length);
 	if (!Number.isFinite(updatedAtMs) || !isSessionId(sessionId)) return -1;
-	const index = sorted.findIndex((s) => s.sessionId === sessionId);
-	return index < 0 ? -1 : index + 1;
+	const after = sorted.findIndex((s) => orderEntries(s, { updatedAtMs, sessionId }) > 0);
+	return after < 0 ? sorted.length : after;
 }
 
 const CURSOR_SEPARATOR = ":";
@@ -127,7 +134,7 @@ export async function listStoredSessions(source: ListingSource, options: ListOpt
 		found.push(listed(record.value));
 	}
 	if (unusable > 0) source.log(`session store: ${unusable} session record(s) were unusable and are not listed`);
-	found.sort((a, b) => b.updatedAtMs - a.updatedAtMs || a.sessionId.localeCompare(b.sessionId));
+	found.sort(orderEntries);
 	const start = options.cursor === undefined ? 0 : indexOfCursor(found, options.cursor);
 	if (start < 0) {
 		return { ok: false, kind: "cursor", reason: `unknown cursor ${JSON.stringify(options.cursor)} - it is not a session this store lists` };

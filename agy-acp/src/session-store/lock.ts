@@ -39,9 +39,12 @@ export interface LockOptions {
 	alive?: (pid: number) => boolean;
 }
 
+/** `unavailable` means "the store would not let us have the lock" (create, write or remove failed) rather
+ * than "someone else holds it": a client told `session_in_use` for a disk problem waits for a process
+ * that will never let go. */
 export type LockOutcome =
 	| { acquired: true; holder: LockHolder; reason: string }
-	| { acquired: false; holder: LockHolder | null; reason: string };
+	| { acquired: false; holder: LockHolder | null; reason: string; unavailable?: boolean };
 
 /** Is a process id alive? EPERM means alive and not ours to signal; ESRCH means gone. */
 export function pidAlive(pid: number): boolean {
@@ -132,8 +135,9 @@ async function writeLockBody(dir: string, now: number): Promise<LockOutcome> {
 		}
 		return { acquired: true, holder, reason: "locked for this agy-acp process" };
 	} catch (err) {
-		await fs.promises.rm(file, { force: true });
-		return { acquired: false, holder: null, reason: `the lock body could not be written: ${(err as Error).message}` };
+		// Best effort: this catch already holds the failure worth reporting, and throwing here would hide it.
+		await fs.promises.rm(file, { force: true }).catch(() => {});
+		return { acquired: false, holder: null, unavailable: true, reason: `the lock body could not be written: ${(err as Error).message}` };
 	}
 }
 
@@ -157,14 +161,31 @@ export async function acquireLock(dir: string, options: LockOptions): Promise<Lo
 			handle = await fs.promises.open(file, "wx", 0o600);
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-				return { acquired: false, holder: null, reason: `the lock file could not be created: ${(err as Error).message}` };
+				return {
+					acquired: false,
+					holder: null,
+					unavailable: true,
+					reason: `the lock file could not be created: ${(err as Error).message}`,
+				};
 			}
 			const seen = await readLockHolder(dir);
 			const verdict = seen.holder === null ? judgeUnreadableLock(attempt, seen.reason) : await judgeExistingLock(seen.holder, options, ctx);
 			if (verdict.action === "refuse") {
 				return { acquired: false, holder: seen.holder, reason: verdict.reason };
 			}
-			await fs.promises.rm(file, { force: true });
+			// `force` only ignores ENOENT. A lock that cannot be removed - a directory where the lock should
+			// be, EPERM on a read-only mount - is a refusal carrying the reason, not an exception that walks
+			// past the caller's failure model (and, from `session/new`, past the disposal of its child).
+			try {
+				await fs.promises.rm(file, { force: true });
+			} catch (err) {
+				return {
+					acquired: false,
+					holder: seen.holder,
+					unavailable: true,
+					reason: `a lock that looks stale could not be removed: ${(err as Error).message}`,
+				};
+			}
 			continue;
 		}
 		// Won the create. The handle is closed before the body is written: the body is a separate file

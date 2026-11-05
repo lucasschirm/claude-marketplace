@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { UpdateLog, readUpdateLines, sweepTempFiles, writePrivateFileAtomic } from "../src/session-store/files.ts";
+import { HoldTable } from "../src/session-store/hold.ts";
 import { SessionJournal } from "../src/session-store/journal.ts";
 import { acquireLock, lockPath, readLockHolder, releaseLock } from "../src/session-store/lock.ts";
 import { resolveStoreRoot, sameWorkspace } from "../src/session-store/paths.ts";
@@ -29,6 +30,7 @@ import {
 	type StoredSessionMeta,
 } from "../src/session-store/records.ts";
 import { SessionStore } from "../src/session-store/store.ts";
+import { createSessionRestore } from "../src/session-restore.ts";
 import type { AcpSessionUpdate } from "../src/acp.ts";
 
 const dirs: string[] = [];
@@ -351,6 +353,43 @@ test("reading a lock that is not there is an answer, not an error", async () => 
 	assert.match(seen.reason, /gone/);
 });
 
+test("a lock that cannot be removed is a refusal with a reason, not an exception", async () => {
+	const dir = tmpDir();
+	// A directory where the lock file belongs: reading it fails, so it looks like a lock worth taking over,
+	// and the remove then fails with EISDIR. `force: true` only ignores ENOENT, and the exception used to
+	// fly past the caller's whole failure model - on `session/new` that meant a child agy was left running
+	// with nothing registered to stop it, and on `session/load` a generic error where the reason was a
+	// directory in the wrong place.
+	fs.mkdirSync(path.join(dir, "lock"));
+	const outcome = await acquireLock(dir, { staleMs: 0, now: () => 0 });
+	assert.strictEqual(outcome.acquired, false);
+	assert.match(outcome.reason, /could not be removed/);
+	assert.strictEqual(outcome.unavailable, true, "a lock we cannot remove is the store's problem, not a holder");
+
+	const { store } = newStore();
+	fs.mkdirSync(store.sessionDir(ID), { recursive: true, mode: 0o700 });
+	fs.mkdirSync(path.join(store.sessionDir(ID), "lock"));
+	const created = await store.create({ sessionId: ID, cwd: "/work", mode: "default", model: "d", effort: "d" });
+	assert.ok(!created.ok, JSON.stringify(created));
+	assert.match(!created.ok ? created.reason : "", /could not be removed/);
+});
+
+test("two calls in one process cannot take the same conversation", async () => {
+	// The claim has to exist before the lock does: `O_EXCL` decides between processes, and between two
+	// `session/load` calls in one process it decides nothing useful - the loser would read this process's
+	// own live pid out of the lock and be told the session is held elsewhere, by a process that is asking.
+	const dir = tmpDir();
+	const holds = new HoldTable({ log: () => {}, staleMs: 0 });
+	const [first, second] = await Promise.all([holds.acquire(dir), holds.acquire(dir)]);
+	const won = [first, second].filter((r) => r.held !== null);
+	const lost = [first, second].filter((r) => r.held === null);
+	assert.strictEqual(won.length, 1, "exactly one call takes the conversation");
+	assert.strictEqual(lost.length, 1);
+	assert.strictEqual(lost[0]?.contested, true, "the other is told this process is taking it, not another one");
+	await holds.release(dir);
+	assert.ok(!fs.existsSync(lockPath(dir)), "the loser left no holder behind");
+});
+
 // ---------------------------------------------------------------- the store
 
 test("session/new writes the record, and only one process may hold a conversation", async () => {
@@ -554,6 +593,43 @@ test("heartbeats are not history", async () => {
 	await store.release(ID);
 });
 
+test("a journal proves the record can still be replaced before it claims it is ready", async () => {
+	const { store } = newStore();
+	const created = await store.create({ sessionId: ID, cwd: "/work", mode: "default", model: "d", effort: "d" });
+	if (!created.ok) throw new Error(created.reason);
+	assert.strictEqual(await created.opened.journal.ready(), null, "a writable store answers null");
+	// An empty queue is not evidence: restoring the selection a record already carries writes nothing, so
+	// readiness that only drained would promise a store it had not touched.
+	fs.chmodSync(store.sessionDir(ID), 0o500);
+	const degraded = await created.opened.journal.ready();
+	fs.chmodSync(store.sessionDir(ID), 0o700);
+	assert.match(degraded ?? "nothing was reported", /writable|permission denied|EACCES/);
+	await store.release(ID);
+});
+
+test("a load that fails before the session exists gives the conversation back", async () => {
+	const { store } = newStore();
+	const created = await store.create({ sessionId: ID, cwd: "/work", mode: "default", model: "d", effort: "d" });
+	if (!created.ok) throw new Error(created.reason);
+	await store.release(ID);
+	const restore = createSessionRestore({
+		store,
+		registryAdd: () => true,
+		send: () => true,
+		log: () => {},
+		build: () => {
+			throw new Error("no session here");
+		},
+	});
+	await assert.rejects(() => restore.load({ sessionId: ID, cwd: "/work" }), /no session here/);
+	assert.ok(!fs.existsSync(lockPath(store.sessionDir(ID))), "the lock the store took for the load is not left behind");
+	// Openable again, rather than refused here until this process exits and refused everywhere else as
+	// held by a pid that was alive the whole time.
+	const reopened = await store.open(ID, "/work", false);
+	assert.ok(reopened.ok, JSON.stringify(reopened));
+	await store.release(ID);
+});
+
 // ---------------------------------------------------------------- session/list
 
 test("session/list reports the store: filtered by workspace, newest first, paginated", async () => {
@@ -614,4 +690,39 @@ test("session/list survives a corrupt record and counts it", async () => {
 	assert.deepStrictEqual(list.ok ? list.sessions.map((s) => s.sessionId) : [], [ID], "the good session is still listed");
 	assert.strictEqual(list.ok ? list.unusable : 0, 1, "the corrupt one is counted, not hidden");
 	await store.release(ID);
+});
+
+test("a session that takes a turn between two pages repeats nothing and skips nothing", async () => {
+	const root = tmpDir();
+	let clock = 1700000000000;
+	const { store } = newStore(root, { now: () => clock });
+	const journals: Record<string, SessionJournal> = {};
+	for (const [id, at] of [
+		[ID, 3000],
+		[ID2, 2000],
+		["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1000],
+	] as const) {
+		clock = 1700000000000 + at;
+		const created = await store.create({ sessionId: id, cwd: "/work", mode: "default", model: "d", effort: "d" });
+		if (!created.ok) throw new Error(created.reason);
+		journals[id] = created.opened.journal;
+	}
+	const page1 = await store.list({ limit: 2 });
+	assert.ok(page1.ok);
+	assert.deepStrictEqual(page1.ok ? page1.sessions.map((s) => s.sessionId) : [], [ID, ID2]);
+	const cursor = page1.ok ? page1.nextCursor : null;
+	assert.ok(cursor, "a page that is not the end carries a cursor");
+
+	// The conversation the cursor names is now the newest in the store. A page boundary read off where that
+	// conversation happens to sit now would pull its old neighbour into page two; a boundary read off the
+	// key the client was shown cannot.
+	clock = 1700000900000;
+	await journals[ID2].endTurn();
+
+	const page2 = await store.list({ limit: 2, cursor: cursor ?? undefined });
+	assert.ok(page2.ok, JSON.stringify(page2));
+	const seen = [...(page1.ok ? page1.sessions : []), ...(page2.ok ? page2.sessions : [])].map((s) => s.sessionId);
+	assert.strictEqual(new Set(seen).size, 3, `no conversation twice and none missing: ${seen.join(", ")}`);
+	assert.ok(seen.includes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "the oldest is still reachable");
+	for (const id of [ID, ID2, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]) await store.release(id);
 });

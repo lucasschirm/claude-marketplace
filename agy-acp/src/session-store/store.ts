@@ -151,8 +151,9 @@ export class SessionStore {
 		} catch (err) {
 			return { ok: false, reason: `the session directory could not be created (${reasonOf(err)})` };
 		}
-		const held = await this.holds.acquire(dir);
-		if (held === null) return { ok: false, reason: `another agy-acp process holds session ${seed.sessionId}` };
+		const taken = await this.holds.acquire(dir);
+		if (taken.held === null) return { ok: false, reason: `${seed.sessionId}: ${taken.reason}` };
+		const held = taken.held;
 		const at = this.now();
 		const meta: StoredSessionMeta = {
 			version: STORE_RECORD_VERSION,
@@ -220,11 +221,21 @@ export class SessionStore {
 		}
 		const root = await this.ensureRoot();
 		if (!root.ok) return { ok: false, failure: { kind: "io", reason: root.reason } };
-		const held = await this.holds.acquire(dir);
-		if (held === null) {
+		const taken = await this.holds.acquire(dir);
+		if (taken.held === null) {
+			if (taken.contested) {
+				// A second `session/load` for one conversation in this process - a client that races itself,
+				// or two connections on the same row. It is the session open here twice, refused as such:
+				// "another process" would name our own live pid and never age out.
+				return { ok: false, failure: { kind: "open-in-process", reason: `session ${sessionId} is already open in this agy-acp process` } };
+			}
+			// Nobody holds it; the state directory refused us. "In use" would point at another process and a
+			// lock worth waiting for.
+			if (taken.unavailable) return { ok: false, failure: { kind: "io", reason: taken.reason } };
 			const seen = await readLockHolder(dir);
 			return { ok: false, failure: { kind: "locked", reason: `session ${sessionId} is held by another agy-acp process (${seen.reason})` } };
 		}
+		const held = taken.held;
 		const journal = new SessionJournal({ dir, meta, log: this.log, maxBytes: this.maxBytes, rotations: this.rotations, now: this.now });
 		held.journal = journal;
 		held.refs += 1;

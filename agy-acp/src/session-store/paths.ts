@@ -75,9 +75,18 @@ function normalizeCwd(cwd: string): string {
 }
 
 /** The real directory behind a path, or null when it cannot be resolved (gone, unreadable parent). */
+/** `realpath` where the path exists, null where it does not. Memoised on success only: a `session/list`
+ * compares up to `MAX_LIST_SCAN` records against one request cwd and both sides repeat, while a directory
+ * that appears later has to resolve when it exists rather than stay the null seen before it did. */
+const realPaths = new Map<string, string>();
+
 function realPath(cwd: string): string | null {
+	const seen = realPaths.get(cwd);
+	if (seen !== undefined) return seen;
 	try {
-		return fs.realpathSync(cwd);
+		const resolved = fs.realpathSync(cwd);
+		realPaths.set(cwd, resolved);
+		return resolved;
 	} catch {
 		return null;
 	}

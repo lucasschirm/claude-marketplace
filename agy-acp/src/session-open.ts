@@ -134,21 +134,30 @@ export function createSessionOpener(deps: SessionOpenerDeps): SessionOpener {
 	async function open(cwd: string): Promise<AgySession> {
 		const session = build(cwd);
 		const sessionId = await session.start(); // a failure disposes the child and throws the RpcError
-		const stored = await store.create({ sessionId, cwd, ...session.selection() });
-		if (!stored.ok) {
+		try {
+			const stored = await store.create({ sessionId, cwd, ...session.selection() });
+			if (!stored.ok) {
+				throw new RpcError(INTERNAL_ERROR, `session ${sessionId} cannot be resumed later: ${stored.reason}`, {
+					reason: "store_unavailable",
+					store: store.root,
+				});
+			}
+			session.attachRecorder(stored.opened.journal, () => store.release(sessionId));
+			if (!deps.registry.add(sessionId, session)) {
+				// The connection died while the session was starting. The registry disposes what arrives late
+				// (issue #53), and disposing is what hands the store lock back, so the child and the lock are
+				// both gone - and the answer, which is also what the transport will do with this result.
+				// Failing here instead would change a documented behaviour for a case the client cannot
+				// observe.
+				log(`session ${sessionId}: started after the connection closed - disposed with it, store record kept`);
+			}
+		} catch (err) {
+			// The store reports failures rather than throwing; this is for the case it does not. A child
+			// started but never registered is invisible to every teardown here (`disposeAll` walks the
+			// registry), so it would outlive the connection with the conversation locked by a process nobody
+			// can point at. Dispose is idempotent, so the path where the registry did it is unaffected.
 			await session.dispose();
-			throw new RpcError(INTERNAL_ERROR, `session ${sessionId} cannot be resumed later: ${stored.reason}`, {
-				reason: "store_unavailable",
-				store: store.root,
-			});
-		}
-		session.attachRecorder(stored.opened.journal, () => store.release(sessionId));
-		if (!deps.registry.add(sessionId, session)) {
-			// The connection died while the session was starting. The registry disposes what arrives late
-			// (issue #53), and disposing is what hands the store lock back, so the child and the lock are
-			// both gone - and the answer, which is also what the transport will do with this result. Failing
-			// here instead would change a documented behaviour for a case the client cannot observe.
-			log(`session ${sessionId}: started after the connection closed - disposed with it, store record kept`);
+			throw err;
 		}
 		return session;
 	}

@@ -1224,3 +1224,100 @@ test("a record the store cannot read is an unknown session, never a crash and ne
 		h.close();
 	}
 });
+
+test("two loads of one conversation in one process: the second hears session_open", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const first = startHarness(launch, store);
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+
+	// One connection, two loads in flight at once - a client that races itself, or two windows picking the
+	// same row of a list. `O_EXCL` cannot arbitrate that (it is one process holding the file either way),
+	// so the answer has to come from the process's own claim, and it has to be the honest one.
+	const again = startHarness(launch, storeAt(root));
+	try {
+		const frames = await Promise.all([load(again, sessionId, process.cwd()), load(again, sessionId, process.cwd())]);
+		const won = frames.filter((f) => !f.error);
+		const lost = frames.filter((f) => f.error);
+		assert.strictEqual(won.length, 1, `exactly one load gets the session: ${JSON.stringify(frames.map((f) => f.error?.code))}`);
+		assert.strictEqual(lost.length, 1);
+		assert.strictEqual(lost[0]?.error?.code, -32602, "the other is told the session is open here");
+		assert.strictEqual(errorData(lost[0]).reason, "session_open", "not that another process holds it, by a pid that is this one");
+	} finally {
+		again.close();
+	}
+});
+
+test("a load reports the servers a client reconnected rather than configuring them", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const first = startHarness(launch, store);
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+
+	const again = startHarness(launch, storeAt(root));
+	try {
+		const mcpServers = [{ name: "context", command: "npx", args: ["mcp"] }];
+		const frame = await again.request("session/load", { sessionId, cwd: process.cwd(), mcpServers });
+		assert.ok(!frame.error, JSON.stringify(frame.error));
+		// `session/new` has said this since sub-issue 1; a lifecycle request carries the same field, and a
+		// client that reconnects its servers on every load must not have to guess that they were ignored.
+		const meta = (frame.result as { _meta: Record<string, { supported: boolean; requested?: unknown[] }> })._meta;
+		assert.strictEqual(meta.mcpServers?.supported, false);
+		assert.deepStrictEqual(meta.mcpServers?.requested, mcpServers);
+	} finally {
+		again.close();
+	}
+});
+
+test("a load does not promise a session directory that has stopped accepting writes", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const first = startHarness(launch, store);
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+
+	// The record still reads, so validation passes; what is broken is the store's ability to keep the
+	// conversation's history from here. That is the difference between a session and a session that stops
+	// existing at some point after the answer, and it is the client's problem to hear it now.
+	const dir = store.sessionDir(sessionId);
+	fs.chmodSync(dir, 0o500);
+	let frame: Frame;
+	const second = startHarness(launch, storeAt(root));
+	try {
+		frame = await load(second, sessionId, process.cwd());
+	} finally {
+		second.close();
+		fs.chmodSync(dir, 0o700);
+	}
+	assertErrorFrame(frame, -32603, "load over a session directory that cannot be written");
+	assert.strictEqual(errorData(frame).reason, "store_unavailable", "not `session_in_use` for a directory that is merely read-only");
+
+	// And the refusal was about the disk, not about a lock nobody gave back: the same load succeeds now.
+	const third = startHarness(launch, storeAt(root));
+	try {
+		const retry = await load(third, sessionId, process.cwd());
+		assert.ok(!retry.error, JSON.stringify(retry.error));
+	} finally {
+		third.close();
+	}
+});

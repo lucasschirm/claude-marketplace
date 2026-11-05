@@ -122,16 +122,25 @@ export class SessionJournal implements SessionRecorder {
 		return this.bounded("flush the turn");
 	}
 
-	/** Flush what is outstanding and stop writing (a session dispose; the lock is released by the store). */
 	/**
-	 * Wait for everything queued so far and report the first write failure (null when there is none).
+	 * Report the first write failure (null when there is none), having just tried one. A `session/load`
+	 * answers before its session has written anything, and without this the answer is a promise the store
+	 * may not keep: on a read-only or full directory the client would hear "your history is back" while
+	 * every write of the session ahead of it failed.
 	 *
-	 * A `session/load` answers before its session has written anything, so without this the answer would
-	 * be a promise the store may not be able to keep: on a read-only or full state directory the client
-	 * would be told "your history is back" while every write of the session ahead of it failed.
+	 * It writes rather than only drains, because here the queue is usually empty - restoring the selection
+	 * the record already carries changes nothing - and an empty queue drained proves nothing. The probe is
+	 * the replacement of the record that is already there, which is what a turn boundary does: it proves
+	 * the path (temp write, fsync, rename, directory) rather than a permission bit the next write contradicts.
 	 */
 	async ready(): Promise<string | null> {
 		await this.queue;
+		if (this.degraded !== null || this.closed) return this.degraded;
+		try {
+			await writeMetaFile(this.dir, this.metaValue);
+		} catch (err) {
+			this.report("prove it is writable", err as Error);
+		}
 		return this.degraded;
 	}
 

@@ -133,13 +133,20 @@ async function restore(
 	const opened = await deps.store.open(sessionId, cwd, withReplay);
 	if (!opened.ok) throw rpcFailure(method, sessionId, opened.failure);
 	const meta = opened.opened.meta;
-	// The stored selection is the session's starting point; a part of it this process cannot honour is
-	// corrected by the session and reported in the answer, never carried in silence.
-	const session = deps.build({ cwd: meta.cwd, mode: meta.mode, model: meta.model, effort: meta.effort });
+	// Opening the store took this conversation's lock, so from here the failure path owes it back, and the
+	// recorder is what hands it over (its release runs on dispose). Hence *before* anything can fail: a load
+	// that failed with the hold still behind it left the conversation unopenable here until this process
+	// exited, and refused elsewhere as held by a pid that was alive all along. The recorder cannot record
+	// the replay that follows, because a replay is sent by the transport, not by the session.
+	const release = () => deps.store.release(sessionId);
+	let session: AgySession | null = null;
 	try {
+		// The stored selection is the session's starting point; a part of it this process cannot honour is
+		// corrected by the session and reported in the answer, never carried in silence.
+		session = deps.build({ cwd: meta.cwd, mode: meta.mode, model: meta.model, effort: meta.effort });
+		session.attachRecorder(opened.opened.journal, release);
 		await session.adopt(sessionId);
 		const registered = deps.registryAdd(sessionId, session);
-		session.attachRecorder(opened.opened.journal, () => deps.store.release(sessionId));
 		// The store must accept a write before the client is told the session is back: a record that cannot
 		// be updated is a conversation whose history silently stops at this moment, which is worse than a
 		// load that fails.
@@ -167,13 +174,26 @@ async function restore(
 		restored.notes = notes;
 		if (opened.opened.droppedLines > 0) restored.droppedUpdates = opened.opened.droppedLines;
 		if (opened.opened.truncated) restored.truncated = true;
-		return { sessionId, ...advertisedState(session), _meta: { restored } };
+		return { sessionId, ...advertisedState(session), _meta: { restored, ...unsupportedExtras(p) } };
 	} catch (err) {
 		// Whatever was built goes away, lock included: a failed load must not leave a session holding a
-		// conversation no client has.
-		await session.dispose();
+		// conversation no client has. A failure before it existed still leaves the lock to give back.
+		if (session === null) await release();
+		else await session.dispose();
 		throw err;
 	}
+}
+
+/** What the client sent that we cannot honour, in the shape `session/new` uses for it: the lifecycle
+ * requests carry `mcpServers` and `additionalDirectories` as well, and a client that reconnects them on
+ * every load has to hear they were not configured rather than assume they were. */
+function unsupportedExtras(p: Record<string, unknown>): Record<string, unknown> {
+	const notes: Record<string, unknown> = {};
+	for (const key of ["mcpServers", "additionalDirectories"] as const) {
+		const requested = p[key];
+		if (Array.isArray(requested) && requested.length > 0) notes[key] = { supported: false, requested };
+	}
+	return notes;
 }
 
 /**
