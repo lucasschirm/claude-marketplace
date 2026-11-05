@@ -12,7 +12,14 @@ import { listSessionDirs } from "./files.ts";
 import { sameWorkspace } from "./paths.ts";
 import { DEFAULT_SESSION_PAGE_SIZE, isSessionId, type StoredSessionMeta } from "./records.ts";
 
-/** How many session directories one `session/list` will look at. */
+/**
+ * How many session directories one `session/list` will look at.
+ *
+ * The bound is on the expensive part - one `meta.json` read per directory - and it is deliberately not
+ * "the newest 2000": deciding which are newest means reading the record of every one of them, which is
+ * the work the bound exists to limit. When a store is bigger than this the answer says so
+ * (`_meta.truncated`, with `scanned`/`scanLimit` for the numbers) instead of pretending to be complete.
+ */
 export const MAX_LIST_SCAN = 2000;
 /** The largest page a client may ask for. */
 export const MAX_PAGE_SIZE = 200;
@@ -109,7 +116,7 @@ export async function listStoredSessions(source: ListingSource, options: ListOpt
 	}
 	const scanned = Math.min(names.length, MAX_LIST_SCAN);
 	if (names.length > MAX_LIST_SCAN) {
-		source.log(`session store: ${names.length} session directories - listing the newest ${MAX_LIST_SCAN} of them`);
+		source.log(`session store: ${names.length} session directories - reading ${MAX_LIST_SCAN} of them, answer is truncated`);
 		names = names.slice(0, MAX_LIST_SCAN);
 	}
 	const found: ListedSession[] = [];

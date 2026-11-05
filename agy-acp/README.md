@@ -178,7 +178,9 @@ same validation and replays nothing: a client that wants the transcript asks for
 starts `agy`: the child (with `--conversation <id>`) appears at the next `session/prompt`, which is
 what keeps a browse-and-pick UI from paying a launch per session. **`session/list`** reports this
 store only, filtered by `cwd` when one is given, newest first, one page at a time; `nextCursor` is
-opaque (an id and a timestamp, base64url) and stays valid while new sessions arrive.
+opaque (an id and a timestamp, base64url) and stays valid while new sessions arrive. One call reads at
+most 2000 records, because reading is one `meta.json` per directory; a store bigger than that answers
+with `_meta.truncated` and the numbers instead of pretending the list is complete.
 
 The answers when a load cannot happen, so a client does not have to guess:
 
