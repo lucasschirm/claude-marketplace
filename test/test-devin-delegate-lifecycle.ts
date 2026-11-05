@@ -19,6 +19,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { must } from "./helpers/must.ts";
 
 export default function testRunner(pi: ExtensionAPI): void {
 	const registeredTools = new Map<string, any>();
@@ -133,10 +134,10 @@ exit 0
 			sessionManager: { getSessionId: () => realPiSessionId },
 		} as any;
 
-		const delegateTool = registeredTools.get("devin_delegate")!;
-		const statusTool = registeredTools.get("devin_status")!;
-		const cancelTool = registeredTools.get("devin_cancel")!;
-		const restartTool = registeredTools.get("devin_restart")!;
+		const delegateTool = must(registeredTools.get("devin_delegate"), "the devin_delegate tool");
+		const statusTool = must(registeredTools.get("devin_status"), "the devin_status tool");
+		const cancelTool = must(registeredTools.get("devin_cancel"), "the devin_cancel tool");
+		const restartTool = must(registeredTools.get("devin_restart"), "the devin_restart tool");
 		const created: string[] = [];
 
 		console.log("=== Devin Delegate LIFECYCLE tests (fake acp) ===");

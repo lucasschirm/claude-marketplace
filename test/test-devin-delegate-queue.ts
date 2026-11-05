@@ -27,6 +27,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
+import { must } from "./helpers/must.ts";
 
 export default function testRunner(pi: ExtensionAPI): void {
 	const registeredTools = new Map<string, any>();
@@ -107,7 +108,7 @@ exit 0
 			sessionManager: { getSessionId: () => piSessionId },
 		} as any;
 		const call = (name: string, params: any) =>
-			registeredTools.get(name)!.execute(`${name}-${Date.now()}`, params, undefined, undefined, mockCtx);
+			must(registeredTools.get(name), `the ${name} tool`).execute(`${name}-${Date.now()}`, params, undefined, undefined, mockCtx);
 		const text = (res: any): string => res.content[0].text;
 		const startedId = (res: any): string =>
 			text(res)
@@ -180,7 +181,10 @@ exit 0
 			const q2Id = startedId(q2);
 			created.push(q2Id);
 			await waitFor("the permission notice", () => agentMessages.some((m) => m.includes(`${q2Id} is waiting for permission`)), 15_000);
-			const notice = agentMessages.find((m) => m.includes(`${q2Id} is waiting for permission`))!;
+			const notice = must(
+				agentMessages.find((m) => m.includes(`${q2Id} is waiting for permission`)),
+				"the waiting-for-permission notice",
+			);
 			assert.match(notice, /rg -l table-access-policy/, "the notice must show the command Devin wants to run");
 			const q2Status = text(await call("devin_status", { session_id: q2Id }));
 			assert.match(q2Status, /awaiting permission/i, `devin_status must show the pending request (got: ${q2Status})`);

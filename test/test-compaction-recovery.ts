@@ -30,9 +30,9 @@ export default function (pi: any) {
 
 			// 2. Recovery flow against the real SessionManager (a mock pi captures the
 			// handler; the ctx mirrors the runtime shape).
-			const handlers: Record<string, Function> = {};
+			const handlers: Record<string, (...args: unknown[]) => unknown> = {};
 			const mockPi = {
-				on: (event: string, handler: Function) => {
+				on: (event: string, handler: (...args: unknown[]) => unknown) => {
 					handlers[event] = handler;
 				},
 				registerTool() {},

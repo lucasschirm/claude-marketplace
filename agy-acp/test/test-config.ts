@@ -596,12 +596,9 @@ test("the mode a child was launched with does not outlive the session's mode", a
 	try {
 		const sid = await newSession(h);
 		await h.request("session/prompt", promptParams(sid, prompts[0]));
-		assert.ok(
-			!recordedLaunches(file)
-				.filter((a) => a[0] !== "models")[0]
-				.includes("--mode"),
-			"the first child is launched with no mode flag",
-		);
+		const firstLaunch = recordedLaunches(file).find((a) => a[0] !== "models");
+		assert.ok(firstLaunch, "a child was launched");
+		assert.ok(!firstLaunch.includes("--mode"), "the first child is launched with no mode flag");
 
 		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
 		const planned = await h.request("session/prompt", promptParams(sid, prompts[0]));
@@ -642,7 +639,8 @@ test("effort reaches the next launch, with the operator's sandbox and the sessio
 		const sid = await newSession(h);
 		const turn1 = await h.request("session/prompt", promptParams(sid, prompts[0]));
 		assert.strictEqual((turn1.result as { stopReason?: string })?.stopReason, "end_turn", "the first turn ran");
-		const first = recordedLaunches(file).filter((argv) => argv[0] !== "models")[0];
+		const first = recordedLaunches(file).find((argv) => argv[0] !== "models");
+		assert.ok(first, "the first child was launched");
 		assert.ok(first.includes("--sandbox"), "--sandbox passes through when the operator configured it");
 		assert.ok(!first.includes("--effort"), "and no flag at all when nothing was chosen");
 

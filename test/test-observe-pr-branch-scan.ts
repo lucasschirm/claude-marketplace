@@ -28,13 +28,14 @@ const BRANCH = "branch-scan";
 const LOG_SCOPE = "observe-pr";
 
 export default function (pi: any) {
-	const eventHandlers: Record<string, Function[]> = {};
+	const eventHandlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 	const activeTools = ["observe_pr"];
 
 	const mockPi = {
 		...pi,
 		on(event: string, handler: any) {
-			(eventHandlers[event] ||= []).push(handler);
+			eventHandlers[event] ||= [];
+			eventHandlers[event].push(handler);
 			return pi.on(event, handler);
 		},
 		registerTool(t: any) {
@@ -130,7 +131,7 @@ exit 0
 	}
 
 	async function nudge(): Promise<void> {
-		for (const h of eventHandlers["turn_end"] || []) {
+		for (const h of eventHandlers.turn_end || []) {
 			await h({ type: "turn_end" }, mockCtx);
 		}
 	}

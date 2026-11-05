@@ -15,7 +15,17 @@
  * transitions after that are news.
  */
 import * as path from "node:path";
-import { NOTIFY_MIN_INTERVAL_MS, loadEngine, logLine, readPrSnapshot, readState, readStdinJson, stateKey, writeHookOutput, writeState } from "./hook-lib.mjs";
+import {
+	NOTIFY_MIN_INTERVAL_MS,
+	loadEngine,
+	logLine,
+	readPrSnapshot,
+	readState,
+	readStdinJson,
+	stateKey,
+	writeHookOutput,
+	writeState,
+} from "./hook-lib.mjs";
 
 const SCRIPT = "notify-changes";
 
@@ -28,7 +38,13 @@ try {
 
 	const engine = await loadEngine(pluginRoot);
 	if (!engine.vendored) {
-		logLine(SCRIPT, sessionId, "warn", "vendored engine failed to load; using the inline fallback classifier", engine.err?.message ?? String(engine.err));
+		logLine(
+			SCRIPT,
+			sessionId,
+			"warn",
+			"vendored engine failed to load; using the inline fallback classifier",
+			engine.err?.message ?? String(engine.err),
+		);
 	}
 
 	const state = readState(key, SCRIPT, sessionId);
@@ -112,9 +128,16 @@ try {
 
 	const news = [];
 	if (previous.mergeState !== snapshot.mergeState) {
-		if (snapshot.mergeState === "conflicting") news.push(`PR #${snap.prNumber} now conflicts with its base branch (mergeable: CONFLICTING); rebase or merge the base into it before it can land.`);
-		else if (snapshot.mergeState === "behind") news.push(`The base branch of PR #${snap.prNumber} has moved ahead (mergeStateStatus: BEHIND); rebase or merge the base into it before it can land.`);
-		else if (previous.mergeState === "conflicting" || previous.mergeState === "behind") news.push(`PR #${snap.prNumber} is mergeable again (the conflict or BEHIND state cleared).`);
+		if (snapshot.mergeState === "conflicting")
+			news.push(
+				`PR #${snap.prNumber} now conflicts with its base branch (mergeable: CONFLICTING); rebase or merge the base into it before it can land.`,
+			);
+		else if (snapshot.mergeState === "behind")
+			news.push(
+				`The base branch of PR #${snap.prNumber} has moved ahead (mergeStateStatus: BEHIND); rebase or merge the base into it before it can land.`,
+			);
+		else if (previous.mergeState === "conflicting" || previous.mergeState === "behind")
+			news.push(`PR #${snap.prNumber} is mergeable again (the conflict or BEHIND state cleared).`);
 	}
 	if (previous.ciVerdict !== snapshot.ciVerdict) {
 		if (snapshot.ciVerdict === "failed") news.push(`CI for PR #${snap.prNumber} failed; investigate the failing checks.`);

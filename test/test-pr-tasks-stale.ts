@@ -15,7 +15,7 @@ import * as os from "node:os";
 // (must NOT trigger the stale teardown - no false positive) and a non-stale
 // internal error (must be file-logged, never console-logged).
 export default function (pi: any) {
-	const handlers: Record<string, Function[]> = {};
+	const handlers: Record<string, ((...args: unknown[]) => unknown)[]> = {};
 	const tools: Record<string, any> = {};
 	const sent: string[] = [];
 	const sentAttempts = { count: 0 };
@@ -38,8 +38,9 @@ export default function (pi: any) {
 	};
 
 	const mockPi = {
-		on(event: string, handler: Function) {
-			(handlers[event] ??= []).push(handler);
+		on(event: string, handler: (...args: unknown[]) => unknown) {
+			handlers[event] ??= [];
+			handlers[event].push(handler);
 		},
 		registerTool(t: any) {
 			tools[t.name] = t;

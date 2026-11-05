@@ -40,7 +40,7 @@ export function pluginsFromChangedFiles(files) {
 /** Semver minor bump: 1.1.0 -> 1.2.0, 1.2.3 -> 1.3.0. Unparseable/missing versions answer undefined. */
 export function bumpVersion(version) {
 	const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(String(version ?? ""));
-	if (!match) return undefined;
+	if (!match) return;
 	return `${match[1]}.${Number(match[2]) + 1}.0`;
 }
 
@@ -51,28 +51,28 @@ export function bumpVersion(version) {
  * there was nothing to do (missing file, unparseable JSON or version, already bumped).
  */
 export function bumpManifestFile(file) {
-	if (!fs.existsSync(file)) return undefined;
+	if (!fs.existsSync(file)) return;
 	let raw;
 	try {
 		raw = fs.readFileSync(file, "utf8");
 	} catch (err) {
 		console.warn(`skip ${path.relative(ROOT, file)}: unreadable (${err.message})`);
-		return undefined;
+		return;
 	}
 	let json;
 	try {
 		json = JSON.parse(raw);
 	} catch (err) {
 		console.warn(`skip ${path.relative(ROOT, file)}: unparseable JSON (${err.message})`);
-		return undefined;
+		return;
 	}
 	const to = bumpVersion(json.version);
 	if (to === undefined) {
 		console.warn(`skip ${path.relative(ROOT, file)}: no parseable version field`);
-		return undefined;
+		return;
 	}
 	const from = json.version;
-	if (to === from) return undefined;
+	if (to === from) return;
 	json.version = to;
 	// The indent is the first line's leading whitespace that is not the first line (the opening
 	// brace is never indented); a file with no indented lines gets the conventional two spaces.

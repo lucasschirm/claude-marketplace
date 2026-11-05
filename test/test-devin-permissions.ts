@@ -11,6 +11,7 @@ import {
 	resolveAcpMode,
 } from "../extensions/lib/devin-permissions.ts";
 import { SessionSlots } from "../extensions/lib/devin-slots.ts";
+import { must } from "./helpers/must.ts";
 
 // The session/request_permission params real devin acp sent in the 2026-10-22 incident.
 const REAL_REQUEST = {
@@ -149,7 +150,7 @@ test("SessionSlots release is idempotent and follows a changed limit", () => {
 		() => 0,
 		() => limit,
 	);
-	const r = slots.tryReserve()!;
+	const r = must(slots.tryReserve(), "a reserved slot");
 	r();
 	r();
 	assert.strictEqual(slots.inFlight(), 0, "a double release must not free a slot it does not hold");

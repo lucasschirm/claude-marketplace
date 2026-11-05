@@ -9,7 +9,7 @@
     "test": "bash test/run.sh",
     "test:unit": "bash test/run.sh unit agy-acp",
     "typecheck": "tsc --noEmit",
-    "lint": "biome lint extensions agy-acp",
+    "lint": "biome lint extensions agy-acp test scripts plugins",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "node scripts/check-quality.mjs --check",

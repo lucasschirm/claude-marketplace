@@ -221,8 +221,7 @@ function startServer(options: {
 	child.stdout.setEncoding("utf8");
 	child.stdout.on("data", (chunk) => {
 		buffer += chunk;
-		let newline;
-		while ((newline = buffer.indexOf("\n")) >= 0) {
+		for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
 			const line = buffer.slice(0, newline).trim();
 			buffer = buffer.slice(newline + 1);
 			if (!line) continue;
@@ -290,7 +289,7 @@ test("no plugin file reaches outside the plugin directory", () => {
 			if (/(?:from|require\(|import\()\s*["'`][^"'`]*\.\.\//.test(code)) offenders.push(`${entry.name}:${number + 1}: ${line.trim()}`);
 		}
 	}
-	assert.deepEqual(offenders, [], "plugin files must stay inside the plugin:\n" + offenders.join("\n"));
+	assert.deepEqual(offenders, [], `plugin files must stay inside the plugin:\n${offenders.join("\n")}`);
 });
 
 test("the vendored engine matches extensions/lib", () => {
@@ -368,7 +367,7 @@ test("the vendored engine is the whole dependency closure of the review tools", 
 			else if (!seen.has(target)) queue.push(target);
 		}
 	}
-	assert.deepEqual(unresolved, [], "the plugin cannot resolve its own import graph:\n" + unresolved.join("\n"));
+	assert.deepEqual(unresolved, [], `the plugin cannot resolve its own import graph:\n${unresolved.join("\n")}`);
 });
 
 // ------------------------------------------------------------------ the launcher
