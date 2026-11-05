@@ -15,8 +15,8 @@
     "biome.style/useTemplate": 7,
     "biome.complexity/noExcessiveCognitiveComplexity": 52,
     "biome.complexity/useOptionalChain": 8,
-    "biome.suspicious/noExplicitAny": 151,
     "biome.suspicious/noGlobalIsNan": 8,
+    "biome.suspicious/noExplicitAny": 151,
     "biome.style/noNonNullAssertion": 5,
     "biome.suspicious/noConsole": 10,
     "biome.correctness/noUnusedFunctionParameters": 1,
@@ -80,17 +80,17 @@
     "agy-acp/src/session-open.ts": 189,
     "agy-acp/src/session-recording.ts": 87,
     "agy-acp/src/session-registry.ts": 85,
-    "agy-acp/src/session-restore.ts": 283,
+    "agy-acp/src/session-restore.ts": 286,
     "agy-acp/src/session-selection.ts": 142,
     "agy-acp/src/session-store/files.ts": 259,
     "agy-acp/src/session-store/hold.ts": 105,
     "agy-acp/src/session-store/journal.ts": 196,
-    "agy-acp/src/session-store/listing.ts": 146,
+    "agy-acp/src/session-store/listing.ts": 153,
     "agy-acp/src/session-store/lock.ts": 187,
     "agy-acp/src/session-store/paths.ts": 99,
     "agy-acp/src/session-store/reading.ts": 80,
     "agy-acp/src/session-store/records.ts": 210,
-    "agy-acp/src/session-store/store.ts": 284,
+    "agy-acp/src/session-store/store.ts": 278,
     "agy-acp/src/session.ts": 443,
     "agy-acp/src/shutdown.ts": 114,
     "agy-acp/src/spawn-agy.ts": 60,
@@ -366,8 +366,16 @@
         "agy-acp/src/session-selection.ts: 142 lines > baseline 131 (files may only shrink)",
         "agy-acp/src/session.ts: 443 lines > baseline 349 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-05",
+      "reason": "the list scan bound's doc comment and truncated note grew when the code stopped claiming to pick the newest",
+      "changes": [
+        "agy-acp/src/session-restore.ts: 286 lines > baseline 283 (files may only shrink)",
+        "agy-acp/src/session-store/listing.ts: 153 lines > baseline 146 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "79b8f02",
+  "generatedFrom": "bcd9c99",
   "biomeConfigHash": "32be8dcbbc1d0ce8"
 }
