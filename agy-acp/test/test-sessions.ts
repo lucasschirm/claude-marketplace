@@ -21,13 +21,31 @@
 //     never silently dropped;
 //   - a subagent tool's terminal state (which arrives as step_type "subagent") settles the tracked
 //     tool call as completed, not failed.
+//
+// Acceptance coverage for issue #56 (the parts that need a connection; the store itself is in
+// test-session-store.ts):
+//   - session/new writes the store record before the client can use the id, at 0700/0600, and a store
+//     that cannot be written fails session/new instead of handing out a session that cannot come back;
+//   - session/load replays exactly the session/update messages a previous run sent, in order, and the
+//     next prompt launches agy with --conversation <that id>;
+//   - session/resume validates the same way, replays nothing, and still continues the conversation;
+//   - the refusals: unknown id -32002 (session_not_found), another workspace -32602 (cwd_mismatch,
+//     naming the recorded cwd), already open here -32602 (session_open), held by another agy-acp
+//     process -32603 (session_in_use), an unreadable record -32002 with the file left as it was;
+//   - session/list: this store only, filtered by cwd, newest first, cursor pagination, an unreadable
+//     cursor or a relative cwd refused;
+//   - a restored session comes back with the mode/model/effort the client chose and launches with them.
 import * as assert from "node:assert";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { flattenPrompt } from "../src/prompt.ts";
+import { SessionStore } from "../src/session-store/store.ts";
+import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const FAKE_CRASH = fileURLToPath(new URL("./fake-agy-crash.ts", import.meta.url));
@@ -52,12 +70,17 @@ interface Harness {
 	close: () => void;
 }
 
-/** The in-process ACP server: PassThrough stdio, one JSON-RPC connection, the fake as agy. */
-function startHarness(launch: AgyLaunchOptions): Harness {
+/**
+ * The in-process ACP server: PassThrough stdio, one JSON-RPC connection, the fake as agy.
+ *
+ * `store` (issue #56) puts the session store somewhere the test can inspect - and, with a second harness
+ * over the same directory, is how "another agy-acp process restarted" is tested without a second process.
+ */
+function startHarness(launch: AgyLaunchOptions, store?: SessionStore): Harness {
 	const input = new PassThrough();
 	const output = new PassThrough();
 	const logs: string[] = [];
-	const server = startAgyAcpServer({ input, output, log: (l) => logs.push(l), agy: launch });
+	const server = startAgyAcpServer({ input, output, log: (l) => logs.push(l), agy: launch, ...(store ? { store } : {}) });
 	const pending = new Map<number, (frame: Frame) => void>();
 	const notes: Frame[] = [];
 	let buffer = "";
@@ -188,6 +211,12 @@ function sessionUpdates(h: Harness): Record<string, unknown>[] {
 		.notes()
 		.filter((n) => n.method === "session/update")
 		.map((n) => (n.params?.update ?? {}) as Record<string, unknown>);
+}
+
+/** The `data` of an error frame: the machine-readable reason a client switches on. */
+function errorData(frame: Frame): Record<string, unknown> {
+	assert.ok(frame.error, `expected an error frame, got ${JSON.stringify(frame.result ?? frame.error)}`);
+	return (frame.error.data ?? {}) as Record<string, unknown>;
 }
 
 function assertErrorFrame(frame: Frame, code: number, what: string): void {
@@ -830,3 +859,465 @@ function fakeAgyPids(): number[] {
 	}
 	return out;
 }
+
+// ------------------------------------------------ session/load, session/resume, session/list (#56)
+//
+// The store itself is unit-tested in test-session-store.ts. What these prove is the ACP surface: what a
+// client sees after a restart, what it sees when it is wrong, and - the part only a fake agy can prove -
+// that a session loaded from the store really is continued with `--conversation` rather than begun again.
+
+const stateDirs: string[] = [];
+function stateDir(): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-state-"));
+	stateDirs.push(dir);
+	return dir;
+}
+function storeAt(root: string, clock?: () => number): SessionStore {
+	return new SessionStore({ log: () => {}, root: { root, source: "test" }, ...(clock ? { now: clock } : {}) });
+}
+async function load(h: Harness, sessionId: string, cwd: string): Promise<Frame> {
+	return h.request("session/load", { sessionId, cwd });
+}
+/** The turn a fixture would run, as a prompt request. */
+async function turn(h: Harness, sessionId: string, fixture: string, text?: string): Promise<Frame> {
+	return h.request("session/prompt", { sessionId, prompt: [textBlock(text ?? promptsForFixture(fixture)[0])] });
+}
+/** Everything the server has sent as `session/update`, heartbeats dropped (they are not history). */
+function transcript(h: Harness): Record<string, unknown>[] {
+	return sessionUpdates(h).filter((u) => u.sessionUpdate !== "heartbeat");
+}
+
+test("session/new writes the record before the client can use the session, with the modes it promises", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const h = startHarness(launchOptionsForFixture("input-event-assistant"), store);
+	try {
+		const frame = await newSession(h, process.cwd());
+		assert.ok(!frame.error, JSON.stringify(frame.error));
+		const sessionId = (frame.result as { sessionId: string }).sessionId;
+		const dir = store.sessionDir(sessionId);
+		assert.ok(fs.existsSync(path.join(dir, "meta.json")), "the id the client was just handed is already resumable");
+		assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700);
+		assert.strictEqual(fs.statSync(path.join(dir, "meta.json")).mode & 0o777, 0o600);
+		assert.strictEqual(fs.statSync(path.join(dir, "lock")).mode & 0o777, 0o600);
+		const listed = await store.list({ cwd: process.cwd() });
+		assert.deepStrictEqual(listed.ok ? listed.sessions.map((s) => s.sessionId) : [], [sessionId]);
+	} finally {
+		h.close();
+	}
+});
+
+test("a store that cannot be written is a failed session/new, not a session that will not come back", async () => {
+	const parent = stateDir();
+	fs.chmodSync(parent, 0o500); // we do not own the store root yet, so this one we cannot chmod back
+	const store = storeAt(path.join(parent, "agy-acp"));
+	const h = startHarness(launchOptionsForFixture("input-event-assistant"), store);
+	try {
+		const frame = await newSession(h, process.cwd());
+		assertErrorFrame(frame, -32603, "session/new over an unwritable store");
+		assert.match(frame.error?.message ?? "", /cannot be resumed later|session store/i);
+		assert.match(frame.error?.message ?? "", /store root/, "an operator has to be told which directory failed");
+		assert.strictEqual(errorData(frame).reason, "store_unavailable");
+	} finally {
+		h.close();
+		fs.chmodSync(parent, 0o700);
+	}
+});
+
+test("load replays the transcript a previous run sent, and the next prompt continues the conversation", async () => {
+	const fixture = "simple-multiturn-textblocks";
+	const launch = launchOptionsForFixture(fixture);
+	const root = stateDir();
+	const first = startHarness(launch, storeAt(root));
+	let sessionId = "";
+	let sent: Record<string, unknown>[] = [];
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+		const turnFrame = await turn(first, sessionId, fixture);
+		assert.ok(!turnFrame.error, JSON.stringify(turnFrame.error));
+		sent = transcript(first);
+		assert.ok(sent.length > 0, "the turn sent something worth replaying");
+	} finally {
+		first.close();
+	}
+	// The lock goes when the session is disposed; "the process restarted" means it is gone.
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(storeAt(root).sessionDir(sessionId), "lock")));
+
+	// A fresh server over the same state directory: the restarted agy-acp.
+	const argvLog = path.join(root, "argv.log");
+	const resumeSeen = path.join(root, "resume-seen");
+	const again = startHarness(
+		{ ...launch, env: { ...launch.env, FAKE_AGY_ALLOW_RESUME: "1", FAKE_AGY_ARGV_LOG: argvLog, FAKE_AGY_RESUME_SEEN_FILE: resumeSeen } },
+		storeAt(root),
+	);
+	try {
+		const notesBefore = again.notes().length;
+		const loaded = await load(again, sessionId, process.cwd());
+		assert.ok(!loaded.error, JSON.stringify(loaded.error));
+		assert.strictEqual((loaded.result as { sessionId: string }).sessionId, sessionId, "load keeps the id it was given");
+		const notes = again.notes().slice(notesBefore);
+		assert.deepStrictEqual(
+			notes.map((n) => (n.params as { update?: Record<string, unknown> }).update ?? {}),
+			sent,
+			"the replay is exactly what the first run sent, in order",
+		);
+		for (const note of notes) {
+			assert.strictEqual(note.method, "session/update", "a load replays session/update and nothing else");
+			assert.strictEqual((note.params as { sessionId: string }).sessionId, sessionId, "every replayed update is about this session");
+		}
+		const restored = (loaded.result as { _meta: Record<string, Record<string, unknown>> })._meta.restored;
+		assert.strictEqual(restored.turns, 1, "the store says one turn happened");
+		assert.strictEqual(restored.cwd, process.cwd());
+		assert.ok(!restored.truncated, JSON.stringify(restored));
+		assert.deepStrictEqual(restored.notes, [], "nothing had to be corrected");
+		assert.strictEqual(restored.droppedUpdates, undefined, "and nothing was unreadable");
+
+		// And it is the same conversation, not a new one wearing the old id.
+		// The recorded line, because the fake replays its fixture: what is under test is the argv.
+		const next = await turn(again, sessionId, fixture);
+		assert.ok(!next.error, JSON.stringify(next.error));
+		assert.strictEqual(fs.readFileSync(resumeSeen, "utf8").trim(), sessionId, "agy was told to continue this conversation");
+		const lastArgv = (JSON.parse(fs.readFileSync(argvLog, "utf8").trim().split("\n").pop() ?? "{}") as { argv?: string[] }).argv ?? [];
+		const at = lastArgv.indexOf("--conversation");
+		assert.ok(at >= 0 && lastArgv[at + 1] === sessionId, `--conversation <the id> is in the respawn argv: ${lastArgv.join(" ")}`);
+	} finally {
+		again.close();
+	}
+});
+
+test("resume validates the same session and replays nothing", async () => {
+	const fixture = "simple-multiturn-textblocks";
+	const launch = launchOptionsForFixture(fixture);
+	const root = stateDir();
+	const first = startHarness(launch, storeAt(root));
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+		const t = await turn(first, sessionId, fixture);
+		assert.ok(!t.error, JSON.stringify(t.error));
+		assert.ok(transcript(first).length > 0, "there was history to withhold");
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(storeAt(root).sessionDir(sessionId), "lock")));
+
+	const resumeSeen = path.join(root, "resume-seen");
+	const again = startHarness(
+		{ ...launch, env: { ...launch.env, FAKE_AGY_ALLOW_RESUME: "1", FAKE_AGY_RESUME_SEEN_FILE: resumeSeen } },
+		storeAt(root),
+	);
+	try {
+		const notesBefore = again.notes().length;
+		const resumed = await again.request("session/resume", { sessionId, cwd: process.cwd() });
+		assert.ok(!resumed.error, JSON.stringify(resumed.error));
+		assert.strictEqual(again.notes().length, notesBefore, "resume sends no history: the client is not replaying a transcript");
+		const restored = (resumed.result as { _meta: Record<string, Record<string, unknown>> })._meta.restored;
+		assert.strictEqual(restored.droppedUpdates, undefined, "nothing was dropped, because nothing was read");
+		// A resumed session is still a live session: its next prompt continues the conversation.
+		const t = await turn(again, sessionId, fixture);
+		assert.ok(!t.error, JSON.stringify(t.error));
+		assert.strictEqual(fs.readFileSync(resumeSeen, "utf8").trim(), sessionId);
+	} finally {
+		again.close();
+	}
+});
+
+test("an unknown session is -32002 and a session from another workspace is -32602", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const h = startHarness(launchOptionsForFixture("input-event-assistant"), store);
+	try {
+		const frame = await newSession(h, process.cwd());
+		const sessionId = (frame.result as { sessionId: string }).sessionId;
+		const unknown = await load(h, "00000000-0000-4000-8000-000000000000", process.cwd());
+		assertErrorFrame(unknown, -32002, "load of a session agy-acp never stored");
+		assert.match(unknown.error?.message ?? "", /never stored|unknown sessionId/);
+		assert.strictEqual(errorData(unknown).reason, "session_not_found");
+
+		const other = stateDir();
+		const mismatch = await load(h, sessionId, other);
+		assertErrorFrame(mismatch, -32602, "load of a session belonging to another workspace");
+		assert.strictEqual(errorData(mismatch).reason, "cwd_mismatch");
+		assert.strictEqual(errorData(mismatch).recordedCwd, process.cwd());
+		// Same for resume: one validation, not a second, drifting one.
+		assertErrorFrame(await h.request("session/resume", { sessionId, cwd: other }), -32602, "resume across workspaces");
+		// A load while the session is open here is the "already open" answer, not a second load.
+		const twice = await load(h, sessionId, process.cwd());
+		assertErrorFrame(twice, -32602, "loading a session that is already open");
+		assert.strictEqual(errorData(twice).reason, "session_open");
+		// And a client that names no session gets the parameter error, not the store's answer.
+		assertErrorFrame(await h.request("session/load", { cwd: process.cwd() }), -32602, "load without a sessionId");
+	} finally {
+		h.close();
+	}
+});
+
+test("a session another agy-acp process holds is refused, not shared", async () => {
+	const root = stateDir();
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const holder = startHarness(launch, storeAt(root));
+	const sessionId = ((await newSession(holder, process.cwd())).result as { sessionId: string }).sessionId;
+	const other = startHarness(launch, storeAt(root));
+	try {
+		const frame = await load(other, sessionId, process.cwd());
+		assert.ok(frame.error, "a held session is not openable twice");
+		assert.strictEqual(errorData(frame).reason, "session_in_use");
+		assert.match(frame.error?.message ?? "", /another agy-acp process|pid/i, "the answer says who holds it");
+	} finally {
+		other.close();
+		holder.close();
+	}
+});
+
+test("session/list reports the store: this workspace only, newest first, paginated", async () => {
+	const root = stateDir();
+	let clock = 1700000000000;
+	const store = storeAt(root, () => clock);
+	const here = process.cwd();
+	const elsewhere = stateDir();
+	// Three fixtures, three conversation ids: a listing is only interesting when there is more than one.
+	const specs = [
+		{ fixture: "input-event-result", cwd: here, at: 1700000001000, prompt: false },
+		{ fixture: "input-event-system", cwd: elsewhere, at: 1700000002000, prompt: false },
+		{ fixture: "simple-multiturn-textblocks", cwd: here, at: 1700000009000, prompt: true },
+	];
+	const ids: string[] = [];
+	for (const spec of specs) {
+		clock = spec.at;
+		const h = startHarness(launchOptionsForFixture(spec.fixture), store);
+		try {
+			const frame = await newSession(h, spec.cwd);
+			assert.ok(!frame.error, JSON.stringify(frame.error));
+			const sessionId = (frame.result as { sessionId: string }).sessionId;
+			ids.push(sessionId);
+			if (spec.prompt) {
+				const t = await turn(h, sessionId, spec.fixture);
+				assert.ok(!t.error, JSON.stringify(t.error));
+			}
+		} finally {
+			h.close();
+		}
+	}
+	const h = startHarness(launchOptionsForFixture("input-event-assistant"), store);
+	try {
+		const listed = await h.request("session/list", { cwd: here });
+		assert.ok(!listed.error, JSON.stringify(listed.error));
+		const result = listed.result as { sessions: Array<Record<string, unknown>>; nextCursor: string | null };
+		assert.deepStrictEqual(
+			result.sessions.map((s) => s.sessionId),
+			[ids[2], ids[0]],
+			"only this workspace, newest first",
+		);
+		assert.strictEqual(result.sessions[0].cwd, here);
+		assert.strictEqual(result.sessions[0].title, promptsForFixture("simple-multiturn-textblocks")[0], "the first prompt titled it");
+		assert.strictEqual(result.sessions[0].updatedAt, new Date(1700000009000).toISOString());
+		const meta = result.sessions[0]._meta as Record<string, unknown>;
+		assert.strictEqual(meta.turns, 1, "the turn count came from the store");
+		assert.ok(typeof meta.model === "string" && meta.model.length > 0, JSON.stringify(meta));
+		assert.strictEqual(result.nextCursor, null, "everything that fits carries no cursor");
+
+		const page = (await h.request("session/list", { cwd: here, limit: 1 })).result as {
+			sessions: Array<Record<string, unknown>>;
+			nextCursor: string;
+		};
+		assert.strictEqual(page.sessions.length, 1);
+		assert.ok(page.nextCursor, "a page that is not the end carries a cursor");
+		const second = (await h.request("session/list", { cwd: here, limit: 1, cursor: page.nextCursor })).result as {
+			sessions: Array<Record<string, unknown>>;
+			nextCursor: string | null;
+		};
+		assert.deepStrictEqual(
+			second.sessions.map((x) => x.sessionId),
+			[ids[0]],
+			"the cursor resumes where the page stopped",
+		);
+		assert.strictEqual(second.nextCursor, null);
+
+		const everything = (await h.request("session/list", {})).result as { sessions: Array<Record<string, unknown>> };
+		assert.strictEqual(everything.sessions.length, 3, "no cwd means every workspace the store holds");
+
+		const bad = await h.request("session/list", { cwd: here, cursor: "###" });
+		assertErrorFrame(bad, -32602, "a cursor the store cannot read");
+		const badCwd = await h.request("session/list", { cwd: "relative/path" });
+		assertErrorFrame(badCwd, -32602, "a workspace that cannot be a workspace");
+	} finally {
+		h.close();
+	}
+});
+
+test("a restored session comes back with the selection it had, and launches with it", async () => {
+	const fixture = "simple-multiturn-textblocks";
+	const launch = launchOptionsForFixture(fixture);
+	const root = stateDir();
+	const first = startHarness(launch, storeAt(root));
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+		const mode = await first.request("session/set_mode", { sessionId, modeId: "accept-edits" });
+		assert.ok(!mode.error, JSON.stringify(mode.error));
+		// The fixture's model id carries its effort, so an effort change goes through `default` first -
+		// the rule the store has to survive, because it stores whatever the client ended up choosing.
+		const toDefault = await first.request("session/set_config_option", { sessionId, configId: "model", value: "default" });
+		assert.ok(!toDefault.error, JSON.stringify(toDefault.error));
+		const effort = await first.request("session/set_config_option", { sessionId, configId: "effort", value: "high" });
+		assert.ok(!effort.error, JSON.stringify(effort.error));
+	} finally {
+		first.close(); // the close flushes the selection the client just made
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(storeAt(root).sessionDir(sessionId), "lock")));
+
+	const argvLog = path.join(root, "argv.log");
+	const again = startHarness(
+		{
+			...launch,
+			env: {
+				...launch.env,
+				FAKE_AGY_ALLOW_RESUME: "1",
+				FAKE_AGY_ALLOW_SELECTION: "1",
+				// "default" means "pass no model flag", which is a change from the recorded model.
+				FAKE_AGY_MODEL_ALLOW: "default",
+				FAKE_AGY_ARGV_LOG: argvLog,
+			},
+		},
+		storeAt(root),
+	);
+	try {
+		const loaded = await load(again, sessionId, process.cwd());
+		assert.ok(!loaded.error, JSON.stringify(loaded.error));
+		const result = loaded.result as { modes: { currentModeId: string }; configOptions: Array<Record<string, unknown>> };
+		assert.strictEqual(result.modes.currentModeId, "accept-edits", "the mode the client chose is the mode it gets back");
+		const selectors = (result.configOptions ?? []) as Array<{ id: string; currentValue: string }>;
+		assert.strictEqual(selectors.find((o) => o.id === "effort")?.currentValue, "high", "so is the effort level");
+		assert.strictEqual(selectors.find((o) => o.id === "model")?.currentValue, "default", "and the model");
+		const t = await turn(again, sessionId, fixture);
+		assert.ok(!t.error, JSON.stringify(t.error));
+		const argv = (JSON.parse(fs.readFileSync(argvLog, "utf8").trim().split("\n").pop() ?? "{}") as { argv?: string[] }).argv ?? [];
+		assert.ok(argv.includes("--mode") && argv[argv.indexOf("--mode") + 1] === "accept-edits", `the mode reached agy: ${argv.join(" ")}`);
+		assert.ok(argv.includes("--effort") && argv[argv.indexOf("--effort") + 1] === "high", `the effort reached agy: ${argv.join(" ")}`);
+		assert.ok(!argv.includes("--model"), `default passes no model flag: ${argv.join(" ")}`);
+		assert.ok(argv.includes("--conversation"), `and it is still the same conversation: ${argv.join(" ")}`);
+	} finally {
+		again.close();
+	}
+});
+
+test("a record the store cannot read is an unknown session, never a crash and never a repair", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const h = startHarness(launchOptionsForFixture("input-event-assistant"), store);
+	try {
+		const sessionId = ((await newSession(h, process.cwd())).result as { sessionId: string }).sessionId;
+		h.close();
+		await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+		fs.writeFileSync(path.join(store.sessionDir(sessionId), "meta.json"), "{ half a record");
+		const broken = startHarness(launchOptionsForFixture("input-event-assistant"), storeAt(root));
+		try {
+			const frame = await load(broken, sessionId, process.cwd());
+			assertErrorFrame(frame, -32002, "load of a session whose record is unreadable");
+			assert.match(frame.error?.message ?? "", /not one agy-acp can use|unknown sessionId/);
+			// The corrupt file is left exactly as it was: inventing a record would invent a history.
+			assert.strictEqual(fs.readFileSync(path.join(store.sessionDir(sessionId), "meta.json"), "utf8"), "{ half a record");
+		} finally {
+			broken.close();
+		}
+	} finally {
+		h.close();
+	}
+});
+
+test("two loads of one conversation in one process: the second hears session_open", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const first = startHarness(launch, store);
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+
+	// One connection, two loads in flight at once - a client that races itself, or two windows picking the
+	// same row of a list. `O_EXCL` cannot arbitrate that (it is one process holding the file either way),
+	// so the answer has to come from the process's own claim, and it has to be the honest one.
+	const again = startHarness(launch, storeAt(root));
+	try {
+		const frames = await Promise.all([load(again, sessionId, process.cwd()), load(again, sessionId, process.cwd())]);
+		const won = frames.filter((f) => !f.error);
+		const lost = frames.filter((f) => f.error);
+		assert.strictEqual(won.length, 1, `exactly one load gets the session: ${JSON.stringify(frames.map((f) => f.error?.code))}`);
+		assert.strictEqual(lost.length, 1);
+		assert.strictEqual(lost[0]?.error?.code, -32602, "the other is told the session is open here");
+		assert.strictEqual(errorData(lost[0]).reason, "session_open", "not that another process holds it, by a pid that is this one");
+	} finally {
+		again.close();
+	}
+});
+
+test("a load reports the servers a client reconnected rather than configuring them", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const first = startHarness(launch, store);
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+
+	const again = startHarness(launch, storeAt(root));
+	try {
+		const mcpServers = [{ name: "context", command: "npx", args: ["mcp"] }];
+		const frame = await again.request("session/load", { sessionId, cwd: process.cwd(), mcpServers });
+		assert.ok(!frame.error, JSON.stringify(frame.error));
+		// `session/new` has said this since sub-issue 1; a lifecycle request carries the same field, and a
+		// client that reconnects its servers on every load must not have to guess that they were ignored.
+		const meta = (frame.result as { _meta: Record<string, { supported: boolean; requested?: unknown[] }> })._meta;
+		assert.strictEqual(meta.mcpServers?.supported, false);
+		assert.deepStrictEqual(meta.mcpServers?.requested, mcpServers);
+	} finally {
+		again.close();
+	}
+});
+
+test("a load does not promise a session directory that has stopped accepting writes", async () => {
+	const root = stateDir();
+	const store = storeAt(root);
+	const launch = launchOptionsForFixture("input-event-assistant");
+	const first = startHarness(launch, store);
+	let sessionId = "";
+	try {
+		sessionId = ((await newSession(first, process.cwd())).result as { sessionId: string }).sessionId;
+	} finally {
+		first.close();
+	}
+	await waitFor("the store lock to be released", 8000, () => !fs.existsSync(path.join(store.sessionDir(sessionId), "lock")));
+
+	// The record still reads, so validation passes; what is broken is the store's ability to keep the
+	// conversation's history from here. That is the difference between a session and a session that stops
+	// existing at some point after the answer, and it is the client's problem to hear it now.
+	const dir = store.sessionDir(sessionId);
+	fs.chmodSync(dir, 0o500);
+	let frame: Frame;
+	const second = startHarness(launch, storeAt(root));
+	try {
+		frame = await load(second, sessionId, process.cwd());
+	} finally {
+		second.close();
+		fs.chmodSync(dir, 0o700);
+	}
+	assertErrorFrame(frame, -32603, "load over a session directory that cannot be written");
+	assert.strictEqual(errorData(frame).reason, "store_unavailable", "not `session_in_use` for a directory that is merely read-only");
+
+	// And the refusal was about the disk, not about a lock nobody gave back: the same load succeeds now.
+	const third = startHarness(launch, storeAt(root));
+	try {
+		const retry = await load(third, sessionId, process.cwd());
+		assert.ok(!retry.error, JSON.stringify(retry.error));
+	} finally {
+		third.close();
+	}
+});

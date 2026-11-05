@@ -29,6 +29,9 @@ session for a `--conversation` respawn on the next prompt), a headless auto-deny
 `_meta.deniedActions`. `session/cancel` is live, and with it the process lifecycle the long
 unattended runs need (see below): the prompt answers `stopReason: "cancelled"`, the pending
 permission requests are denied with that reason, and `agy` is made to stop rather than asked.
+A session outlives the process that made it: `session/load`, `session/resume` and `session/list`
+read agy-acp's own store (below), so a client that restarts can pick a conversation up, replay its
+transcript, and continue it with `agy --conversation <id>` on the next prompt.
 Permissions are live (the PreToolUse bridge, below); the rest of
 the ACP surface lands in the
 follow-up issues of
@@ -130,6 +133,86 @@ Whatever is advertised can be chosen: the `models` block always lists what it na
 selector's `currentValue` is always one of its `options` - including `default`, which is how a client
 asks for no flag at all. A control whose current value is not in its own list cannot be redrawn from
 that list, which is the failure this rule exists to prevent.
+
+## Continuing a session: agy-acp's own store
+
+`initialize` answers `loadSession: true` and `sessionCapabilities: {list, resume}`. Everything that
+supports them is in `src/session-store/`, and the store is **agy-acp's own**: agy keeps its own
+conversation state, and this server never reads it — no `agy` storage, no SQLite, no OAuth token,
+no `~/.gemini`, no hook `transcriptPath`. A conversation `agy` knows about and `agy-acp` does not is
+an unknown session, and says so; the two tools' ideas of a session are deliberately separate.
+
+The layout is `$XDG_STATE_HOME/agy-acp/sessions/<conversation_id>/` (`AGY_ACP_STATE_DIR` overrides
+the `agy-acp` directory itself; with no `XDG_STATE_HOME` it falls back to `~/.local/state/agy-acp`,
+and with no home to a temp directory — and every answer records which of those it chose, so "where
+are my sessions?" has one answer):
+
+```
+meta.json        version, sessionId, cwd, mode/model/effort, title, turns, createdAt/updatedAt
+updates.ndjson   one session/update per line, NDJSON, append-only (updates.ndjson.1 after a rotation)
+lock             the holder: {pid, host, startedAtMs}, created with O_EXCL
+```
+
+Session directories are 0700 and every file 0600 (re-applied on each open, so a directory that
+loosened gets tightened). `meta.json` is replaced atomically — temp file, `fsync`, `rename`,
+`fsync` of the directory — so a kill mid-write costs nothing. `updates.ndjson` is only ever
+appended to: a line is JSON with a trailing newline, so a kill between two writes costs that one
+update, the reader skips the torn tail, and the count reaches the client as
+`_meta.restored.droppedUpdates`. The transcript is fsynced at **turn end**, before the prompt's
+answer is sent: `session/prompt` returning is the point at which that turn survives a restart. Past
+2 MiB a session's log rotates, keeping one previous generation — history is bounded, not unlimited.
+
+The lock is what keeps two `agy-acp` processes from writing the same transcript. It is taken with
+`O_EXCL` and holds the holder's pid and host. Another process asking for the same conversation gets
+an error naming the holder, whatever the two processes disagree about. A lock whose pid is gone on
+the same host is dead and is taken over; a lock on another host is believed until it is older than
+the stale deadline, because a pid means nothing across a machine boundary; a lock file that cannot
+be read protects nothing and is taken over. Releasing is best-effort and idempotent, and a
+`session/load` that finishes after its connection closed hands the lock back with the session.
+
+**`session/load`** validates (the record exists, its `cwd` is the requested workspace), adopts the
+session, then replays the stored `session/update` messages in order as notifications before the
+answer. Heartbeats are never stored or replayed — they describe a turn that is running, and
+replaying one would tell a client that an old turn is still in flight. **`session/resume`** runs the
+same validation and replays nothing: a client that wants the transcript asks for `load`. Neither one
+starts `agy`: the child (with `--conversation <id>`) appears at the next `session/prompt`, which is
+what keeps a browse-and-pick UI from paying a launch per session. **`session/list`** reports this
+store only, filtered by `cwd` when one is given, newest first, one page at a time; `nextCursor` is
+opaque (an id and a timestamp, base64url) and stays valid while new sessions arrive: the next page is
+"everything older than the pair you were last shown", so a conversation that takes a turn between two
+pages neither repeats on the next one nor disappears from it. One call reads at
+most 2000 records, because reading is one `meta.json` per directory; a store bigger than that answers
+with `_meta.truncated` and the numbers instead of pretending the list is complete.
+
+The answers when a load cannot happen, so a client does not have to guess:
+
+| case | error |
+| --- | --- |
+| no such session (or a record this version cannot read) | `-32002`, `data.reason: "session_not_found"` |
+| the session belongs to another workspace | `-32602`, `data.reason: "cwd_mismatch"`, `data.recordedCwd` |
+| it is already open in this process, including a second load of it in flight | `-32602`, `data.reason: "session_open"` |
+| another `agy-acp` process holds it | `-32603`, `data.reason: "session_in_use"`, holder in the message |
+| the store cannot be read or written, or cannot take its own lock file | `-32603`, `data.reason: "store_unavailable"` |
+
+A lock the state directory refuses (read-only, full, or a directory where the lock belongs) is
+`store_unavailable` rather than `session_in_use`: the first is a disk to fix, the second is a
+process to wait for, and only one of them ever lets go.
+
+`-32002` is also what `session/prompt` uses for "a turn is already running": ACP fixes
+resource-not-found at that code and this server's turn-in-progress code predates it, so the two
+collide. They are told apart by `data.reason` and by the method they answer, and neither code is
+changed — a client switching on the number would break either way. A corrupt `meta.json` is an
+unknown session, never a repair: inventing a record would invent a history. A store that cannot be
+written fails `session/new` outright rather than handing out a session that cannot come back, and a
+load whose store can no longer replace the record fails the same way rather than promising a history
+that stops there. `mcpServers` and `additionalDirectories` on a load or resume are answered with
+`_meta`, as they are on `session/new`: accepted, reported unsupported, never silently dropped.
+
+What is restored is what the client chose — mode, model, effort, with `default` meaning "pass no
+flag" — not what agy's `init` volunteered, which arrives again with the first resumed turn. A
+stored value the current launch cannot honour (a `bypass` mode with `AGY_ACP_ALLOW_BYPASS` off, an
+effort the stored model does not offer) is dropped on its own with a note in `_meta.restored.notes`
+rather than failing the load.
 
 ## Cancelling a turn, and the process going away
 
@@ -253,7 +336,9 @@ AGY_ACP_LOG=/tmp/agy-acp.log agy-acp   # diagnostics to a file instead of stderr
 The knobs, all with the defaults above and all read from the environment (`agy-acp --help` prints
 them): `AGY_ACP_COMMAND` (the `agy` binary to launch), `AGY_ACP_CANCEL_ESCALATE_MS` (the
 `SIGINT` -> process-group window), `AGY_ACP_HEARTBEAT_MS` (0 disables the beat) and
-`AGY_ACP_SHUTDOWN_TIMEOUT_MS` (the exit deadline). The selection knobs are `AGY_ACP_MODEL`,
+`AGY_ACP_SHUTDOWN_TIMEOUT_MS` (the exit deadline) and `AGY_ACP_STATE_DIR` (where the session store
+lives — see "Continuing a session" above; it must be an absolute path, and a relative one is ignored
+with a note about it in the log). The selection knobs are `AGY_ACP_MODEL`,
 `AGY_ACP_EFFORT`, `AGY_ACP_SANDBOX`, `AGY_ACP_MODELS_TIMEOUT_MS` (how long `agy models` may take
 before the list is written off) and `AGY_ACP_ALLOW_BYPASS`, which exists because bypassing the
 permission gate is the operator's decision: without it the `bypass` mode is not even advertised.

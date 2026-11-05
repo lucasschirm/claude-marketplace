@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AGY_ACP_VERSION } from "../src/main.ts";
+import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
@@ -53,7 +54,15 @@ test("initialize over stdio is answered, and stdin EOF exits 0", async () => {
 	const result = frames[0].result as Record<string, unknown>;
 	assert.strictEqual(result.protocolVersion, 1);
 	const caps = result.agentCapabilities as Record<string, unknown>;
-	assert.strictEqual(caps.loadSession, false, "loadSession stays false until the resume sub-issue lands");
+	// Issue #56: sessions are recorded in agy-acp's own store, so `session/load`, `session/resume` and
+	// `session/list` are answered. Advertising them is a claim about the store, not about agy - a client
+	// that loads an id it never got from us hears -32002, which is the honest answer to that question.
+	assert.strictEqual(caps.loadSession, true, "loadSession is advertised with session/load implemented");
+	assert.deepStrictEqual(
+		caps.sessionCapabilities,
+		{ list: {}, resume: {} },
+		"the session lifecycle capabilities match the methods that are implemented (and session/close is not)",
+	);
 	const prompts = caps.promptCapabilities as Record<string, unknown>;
 	assert.strictEqual(prompts.image, false);
 	assert.strictEqual(prompts.audio, false);
@@ -80,8 +89,11 @@ test("a protocol version we cannot honour at all is rejected cleanly", async () 
 	}
 });
 
-test("methods that are not implemented yet get -32601, not silence", async () => {
-	const res = await run([], line({ jsonrpc: "2.0", id: 1, method: "session/load", params: { sessionId: "s", cwd: "/tmp" } }));
+test("a method agy-acp does not implement gets -32601, not silence", async () => {
+	// `session/load` was this test's subject until issue #56 implemented it (it now answers from the
+	// session store, which is a different test); `session/delete` is the ACP method whose capability
+	// agy-acp does not advertise, so it must still be refused as unknown.
+	const res = await run([], line({ jsonrpc: "2.0", id: 1, method: "session/delete", params: { sessionId: "s" } }));
 	assert.strictEqual(res.code, 0);
 	const frame = JSON.parse(res.stdout.trim()) as { error: { code: number } };
 	assert.strictEqual(frame.error.code, -32601);

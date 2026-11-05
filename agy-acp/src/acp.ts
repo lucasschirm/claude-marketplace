@@ -10,7 +10,12 @@
 
 import type { AcpConfigOption, AcpConfigOptionUpdate } from "./config-options.ts";
 
-/** Server-defined error (the -32000..-32099 server range): a session/prompt while a turn runs. */
+/**
+ * Server-defined error (the -32000..-32099 server range): a session/prompt while a turn runs.
+ *
+ * Note the number: -32002 is also ACP's "resource not found", which `session/load` answers for an
+ * unknown id (see `RESOURCE_NOT_FOUND` in errors.ts and the note there for why both are kept).
+ */
 export const TURN_IN_PROGRESS = -32002;
 
 // ---------------------------------------------------------------- content blocks (prompt input)
@@ -82,6 +87,45 @@ export interface AcpSessionNewResult {
 	modes: AcpSessionModeState;
 	models: AcpSessionModelState;
 	configOptions?: AcpConfigOption[];
+	_meta?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------- session/load, session/resume, session/list
+//
+// The shapes of ACP v1's session lifecycle methods (`LoadSessionRequest`, `ResumeSessionRequest`,
+// `ListSessionsRequest`/`SessionInfo`). `session/load` and `session/resume` answer with what
+// `session/new` answers with (the selection the session came back with), because a client that had
+// controls before needs them again and the spec's response is exactly that subset; `session/list`
+// answers with the store's own records, paginated by an opaque cursor.
+
+/** `session/load` / `session/resume` params: the id and the workspace it must belong to. */
+export interface AcpSessionLoadParams {
+	sessionId: string;
+	cwd: string;
+	mcpServers?: AcpMcpServer[];
+	additionalDirectories?: string[];
+}
+
+/** ACP's `SessionInfo`: what one row of `session/list` reports. */
+export interface AcpSessionInfo {
+	sessionId: string;
+	cwd: string;
+	title?: string | null;
+	/** ISO 8601, as ACP spells it (the store keeps epoch milliseconds and formats here). */
+	updatedAt?: string | null;
+	_meta?: Record<string, unknown>;
+}
+
+export interface AcpSessionListParams {
+	cwd?: string | null;
+	cursor?: string | null;
+	/** agy-acp extension: ACP v1 has no page-size param, so the agent picks one (and a client may ask). */
+	limit?: number;
+}
+
+export interface AcpSessionListResult {
+	sessions: AcpSessionInfo[];
+	nextCursor?: string | null;
 	_meta?: Record<string, unknown>;
 }
 

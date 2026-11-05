@@ -25,6 +25,9 @@ import { cancelAgy, CANCELLED_TOOL_REASON } from "./cancel.ts";
 import { DEFAULT_CANCEL_ESCALATE_MS, DEFAULT_HEARTBEAT_MS } from "./config.ts";
 import { SessionSelection, type AcpConfigOption } from "./config-options.ts";
 import { SelectionCommands } from "./session-selection.ts";
+import { restoreSelection } from "./selection-restore.ts";
+import { SessionRecording } from "./session-recording.ts";
+import type { SelectionRecord, SessionRecorder } from "./selection-record.ts";
 import type { ModelCatalog } from "./agy/models.ts";
 import { ZERO_CUMULATIVE, type AgyProcess, type AgyCumulative, type AgyDriverEvent, type AgyExitInfo } from "./agy-driver.ts";
 // Type-only (erased at runtime): the launch options are the server's public API.
@@ -35,9 +38,20 @@ export interface SessionLaunchConfig extends AgyLaunchOptions {
 	/** Sends one session/update notification for this session. */
 	notify: (sessionId: string, update: AcpSessionUpdate) => void;
 	/** Sends one session/request_permission to the client (the session id is added here). */
-	requestPermission: (params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
+	/**
+	 * Ask the client. The session id is passed in rather than closed over by whoever builds the session:
+	 * a restored session (issue #56) has its id before it has a child, and a wrapper that captured a
+	 * variable set later would send a permission request the client cannot route to a session.
+	 */
+	requestPermission: (sessionId: string, params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
 	/** The per-process `agy models` list; without it nothing can check a model id (see models.ts). */
 	modelCatalog?: ModelCatalog;
+	/**
+	 * The selection a stored session comes back with (issue #56). Not trusted: a mode this server does
+	 * not offer, or a model/effort pair agy would refuse, is dropped with a note (`restoreNotes`) rather
+	 * than loaded as-is or refused as a whole.
+	 */
+	restored?: SelectionRecord;
 }
 
 export class AgySession {
@@ -50,6 +64,10 @@ export class AgySession {
 	private readonly choice: SelectionCommands;
 	/** The selection the live child was actually launched with (the respawn test, issue #55). */
 	private launchedKey = "";
+	/** What a restored selection could not be honoured, in the client's words (issue #56). */
+	private readonly notes: string[];
+	/** The session's link to the store's writer for it (issue #56). */
+	private readonly recording: SessionRecording;
 	private idValue = "";
 	private live = false;
 	private needsRespawnValue = false;
@@ -63,12 +81,13 @@ export class AgySession {
 	activeTools = new Set<string>();
 	constructor(config: SessionLaunchConfig) {
 		this.config = config;
+		this.recording = new SessionRecording((line) => this.config.log(`session ${this.id}: ${line}`));
 		this.hookToken = newPermissionToken();
 		this.hookDeadlineMs = config.hookDeadlineMs ?? DEFAULT_HOOK_DEADLINE_MS;
 		this.gate = new PermissionGate({
 			log: config.log,
 			notify: (update) => this.emit(update),
-			request: (_method, params, timeoutMs) => this.config.requestPermission(params, timeoutMs),
+			request: (_method, params, timeoutMs) => this.config.requestPermission(this.idValue, params, timeoutMs),
 			cwd: config.cwd,
 			clientDeadlineMs: config.clientDeadlineMs ?? DEFAULT_CLIENT_DEADLINE_MS,
 			hookDeadlineMs: this.hookDeadlineMs,
@@ -80,18 +99,23 @@ export class AgySession {
 			turnCount: () => this.turnCountValue,
 		});
 		this.heartbeat = new TurnHeartbeat((update) => this.emit(update), { pendingPermissions: () => this.gate.pendingAsks() });
-		const selection = new SessionSelection({
-			model: config.model,
-			effort: config.effort,
-			sandbox: config.sandbox === true,
-			allowBypass: config.allowBypass === true,
-		});
+		const state = { sandbox: config.sandbox === true, allowBypass: config.allowBypass === true };
+		// A stored selection is applied here rather than by the caller, because the rules that decide it
+		// (which modes this server offers, which pairs agy accepts) are the selection's own.
+		const started = config.restored
+			? restoreSelection(state, config.restored)
+			: { selection: new SessionSelection({ ...state, model: config.model, effort: config.effort }), notes: [] as string[] };
+		this.notes = started.notes;
+		for (const note of this.notes) config.log(`session (restored): ${note}`);
 		this.choice = new SelectionCommands({
-			selection,
+			selection: started.selection,
 			catalog: config.modelCatalog,
 			emit: (update) => this.emit(update),
 			onModeChange: (modeId) => this.gate.setMode(modeId),
 		});
+		// A restored mode is not a client's `set_mode`, so nothing notified the bridge: the policy has to
+		// be the one the session advertises, from the first tool call of the first resumed turn.
+		if (started.selection.mode !== "default") this.gate.setMode(started.selection.mode);
 		this.launchedKey = this.choice.relaunchKey();
 	}
 
@@ -109,6 +133,47 @@ export class AgySession {
 	}
 	modelsState(): ReturnType<SelectionCommands["modelsState"]> {
 		return this.choice.modelsState();
+	}
+
+	/** What this session is set to launch with, in the shape the store keeps (issue #56). */
+	selection(): SelectionRecord {
+		return this.choice.record();
+	}
+
+	/** What a restored selection could not be honoured (empty for a session that started fresh). */
+	restoreNotes(): string[] {
+		return [...this.notes];
+	}
+
+	/**
+	 * Hand this session the store's writer for it (issue #56). The session does not open the store - the
+	 * server does, because it is the server that answered `session/new` - but every update, prompt,
+	 * selection change and turn end belongs to the session, so the writer hangs off it here. The rules of
+	 * the seam (what a late attach means, what a failed write means) are `SessionRecording`'s.
+	 */
+	attachRecorder(recorder: SessionRecorder, release: () => Promise<void>): void {
+		this.recording.attach(recorder, release, this.choice.record());
+	}
+
+	/**
+	 * Adopt a conversation this process did not create (issue #56): the bridge comes up first, because a
+	 * session must never be able to launch ungated, and then nothing else happens. No `agy`, no probe -
+	 * `ensureDriver` pays the `--conversation` resume on the next prompt, which is what a client that
+	 * loads ten sessions and prompts one of them is paying for.
+	 */
+	async adopt(sessionId: string): Promise<void> {
+		if (this.disposed) throw new RpcError(INTERNAL_ERROR, "session is closed");
+		if (this.idValue !== "") throw new RpcError(INTERNAL_ERROR, `session ${this.idValue} is already started`);
+		try {
+			await this.gate.start();
+		} catch (err) {
+			throw new RpcError(INTERNAL_ERROR, `the permission bridge could not start: ${(err as Error).message}`);
+		}
+		this.idValue = sessionId;
+		// No child of ours holds this conversation, so the first prompt is a resume by definition - the
+		// same state a cancel or a child exit leaves behind, and the same code path (`ensureDriver`).
+		this.needsRespawnValue = true;
+		this.config.log(`session ${sessionId}: adopted from the session store - the next prompt resumes it`);
 	}
 	/** Spawns agy and probes for the conversation id; a failure disposes the child and throws. */
 	async start(): Promise<string> {
@@ -139,12 +204,17 @@ export class AgySession {
 		if (this.disposed) throw new RpcError(INTERNAL_ERROR, "session is closed");
 		const text = flattenPrompt(blocks);
 		if (this.turn) throw new RpcError(TURN_IN_PROGRESS, "turn in progress");
+		// The first prompt is what a session is named after in `session/list` (issue #56).
+		this.recording.notePrompt(text);
 		// The beat starts before the child is chosen: a respawn is silence a watchdog must read as waiting.
 		this.turnCountValue++; // the gate scopes a cancel to this turn number
 		this.heartbeat.start(this.config.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
-		this.turn = runTurn(this, text).finally(() => {
+		this.turn = runTurn(this, text).finally(async () => {
 			this.turn = null;
 			this.heartbeat.stop();
+			// The turn's history is on disk before its answer means anything (issue #56): a client told
+			// `end_turn` who then restarts agy-acp must load this conversation with this turn in it.
+			await this.recording.endTurn();
 		});
 		return this.turn;
 	}
@@ -198,6 +268,10 @@ export class AgySession {
 		}
 		if (driver) await driver.dispose();
 		await this.gate.dispose(); // denies any pending permission request and removes the bridge dir
+		// Last, so the writer sees whatever the teardown itself emitted: it flushes on the way out and
+		// hands the lock back, so another process (or this one, later) can take the conversation - and a
+		// client that set the mode and quit immediately comes back to the mode it set.
+		await this.recording.detach();
 	}
 
 	/** The live child, respawning when needed: relaunches agy with `--conversation <id>` and the
@@ -319,13 +393,21 @@ export class AgySession {
 		}
 	}
 
-	/** The session/update emitter (public: turn.ts settles turns through the session). */
+	/**
+	 * The session/update emitter (public: turn.ts settles turns through the session).
+	 *
+	 * What went out is what gets stored (issue #56): the transcript a `session/load` replays is exactly
+	 * the sequence the client saw, which is only true if the same value is sent and kept. Heartbeats are
+	 * the one exception - they report that a turn is running *now*, and a replayed one would claim a turn
+	 * that ended hours ago was still running, holding a client's spinner on a conversation at rest.
+	 */
 	emit(update: AcpSessionUpdate): void {
 		try {
 			this.config.notify(this.id, update);
 		} catch (err) {
 			this.config.log(`session ${this.id}: session/update failed: ${(err as Error).message}`);
 		}
+		this.recording.note(update);
 	}
 
 	/**
@@ -334,15 +416,27 @@ export class AgySession {
 	 */
 	setMode(modeId: string): void {
 		this.choice.setMode(modeId);
+		this.noteSelection();
 	}
 
 	/** session/set_model (and the `model` selector): takes effect on the next turn, after a respawn. */
-	setModel(modelId: string): Promise<void> {
-		return this.choice.setModel(modelId);
+	async setModel(modelId: string): Promise<void> {
+		await this.choice.setModel(modelId);
+		this.noteSelection();
 	}
 
 	/** session/set_config_option(effort): one of agy's levels, or `default` for "pass no flag". */
 	setEffort(effort: string): void {
 		this.choice.setEffort(effort);
+		this.noteSelection();
+	}
+
+	/**
+	 * Keep the store's record on the selection the session actually runs (issue #56). Called after every
+	 * client change: a session that was loaded with a model it has since moved off must not come back
+	 * with the model the client loaded, and `session/list` shows the same three values a load applies.
+	 */
+	private noteSelection(): void {
+		this.recording.noteSelection(this.choice.record());
 	}
 }

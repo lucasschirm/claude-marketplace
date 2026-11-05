@@ -23,7 +23,12 @@ export class SessionRegistry {
 		this.log = log;
 	}
 
-	add(sessionId: string, session: AgySession): void {
+	/**
+	 * Register it, or dispose it. False means "this session is not on the table and never will be" - the
+	 * connection closed first, or the slot was taken - and a caller that owes the session something else
+	 * (a session-store lock, an answer to a client) must not go on paying for it.
+	 */
+	add(sessionId: string, session: AgySession): boolean {
 		// A slot that is already taken must not simply be overwritten: the session it held owns a child
 		// process, and an unreferenced owner is never disposed - the child keeps the conversation (and a
 		// test process) alive forever. A real agy gives every conversation a fresh id, so this is the
@@ -37,9 +42,10 @@ export class SessionRegistry {
 		if (this.closed) {
 			this.log(`session ${sessionId} started after the connection closed - disposing it`);
 			this.track(sessionId, session);
-			return;
+			return false;
 		}
 		this.sessions.set(sessionId, session);
+		return true;
 	}
 
 	private track(sessionId: string, session: AgySession): void {
