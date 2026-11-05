@@ -422,7 +422,7 @@ test("a cutover this checkout does not have is ignored, out loud", () => {
 	r.git("add", "a.txt");
 	r.commit(["-m", "gated"]);
 	// A squash merge means the cutover commit never landed: the check must not fail silently open.
-	const result = hygiene(r, base, "HEAD", ["--cutover", "0".repeat(39) + "1"]);
+	const result = hygiene(r, base, "HEAD", ["--cutover", `${"0".repeat(39)}1`]);
 	assert.equal(result.code, 0, result.out);
 	assert.match(result.out, /cutover/, "it says the cutover was not applied");
 });
