@@ -584,6 +584,144 @@ function countAgyStdoutViolations() {
 }
 
 /**
+ * Turn bookkeeping written outside its owner. A turn settles exactly once - that is what keeps a client
+ * from being answered twice, or told a turn failed after it was told the turn was cancelled - and the
+ * guard was five hand-written copies of "if (pending && !pending.settled) { pending.settled = true;
+ * host.pending = null; ... }". One of them (session.ts's onExit) had already drifted into doing the
+ * bookkeeping itself, which is how a sixth copy arrives.
+ *
+ * So: `.settled =` and the two shapes that retire a turn (`.pending = null`, `.pending = {`) belong to
+ * turn.ts, where settleOnce is. Reading `.settled` is nobody's business but still allowed, and
+ * framing.ts's `this.pending = Buffer.concat(...)` is a byte buffer that happens to share the name -
+ * which is why this matches the assignment shapes rather than the word.
+ */
+const SETTLE_OWNER = "agy-acp/src/turn.ts";
+const SETTLE_WRITE_RE = /\.settled\s*=(?!=)|\.pending\s*=\s*(?:null|\{)/g;
+
+function countSettleWritesOutsideOwner() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		if (rel(file) === SETTLE_OWNER) continue;
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(SETTLE_WRITE_RE)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
+ * An inbound accumulator with no ceiling. A `buf += d.toString()` inside a stream handler grows for as
+ * long as the peer keeps writing, and three of agy-acp's readers had no bound at all: the bridge's
+ * request line (an unauthenticated peer could hold the socket and grow this process's memory until
+ * maxHoldMs ran out), the hook's payload and reply, and the one-shot probes' stdout and stderr. A
+ * timeout is not a bound - it limits the time, not the bytes.
+ *
+ * The rule is per file, like stdoutExitDrain: an accumulation (`x += chunk`, `x += chunk.toString()`,
+ * or a `Buffer.concat` into the same variable) must live in a file that also NAMES a byte ceiling - a
+ * `*_BYTES` constant, `maxFrameBytes`, `stderrLimit`, a `Buffer.byteLength` measurement, or a
+ * `trimToByteBudget` call. Naming it is what a reader can check at a glance; the tests check that the
+ * ceiling is enforced (test-bridge.ts's oversized request, test-process.ts's megabyte trim).
+ */
+const BYTE_CEILING_RE = /_BYTES\b|\bmaxFrameBytes\b|\bstderrLimit\b|\bBuffer\.byteLength\(|\btrimToByteBudget\(/;
+const ACCUMULATION_RE =
+	/(?:this\.)?[A-Za-z_$][\w$]*\s*\+=\s*(?:this\.)?[A-Za-z_$][\w$]*(?:\.toString\([^()]*\))?\s*;|((?:this\.)?[A-Za-z_$][\w$]*)\s*=\s*\1\s*\+|\bBuffer\.concat\(/g;
+
+function countUncappedInboundBuffers() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const src = fs.readFileSync(file, "utf-8");
+		if (BYTE_CEILING_RE.test(src)) continue;
+		for (const m of src.matchAll(ACCUMULATION_RE)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
+ * Where the environment may be read. `process.env` is a global the whole process shares, and a module
+ * that reaches for it is a module that cannot be handed a different one: agy/version.ts took an `env`
+ * parameter, spawned the child with it, and then read the strict-version flag off `process.env`, so a
+ * session launched with its own environment was judged against this process's (F5).
+ *
+ * The doors: config.ts (the typed reader every knob goes through), launch.ts and main.ts (the argv/env
+ * entry points), and bridge-hook.ts and bridge-server.ts (a hook child has no caller to be handed an
+ * env by - its environment IS its input). Everywhere else takes `NodeJS.ProcessEnv` as a parameter.
+ * Mentions in comments do not count; the two remaining reads (a session env defaulting to this
+ * process's, in spawn-agy.ts and agy/process.ts) are ratcheted so a third cannot appear quietly.
+ */
+const ENV_DOORS = new Set([
+	"agy-acp/src/config.ts",
+	"agy-acp/src/launch.ts",
+	"agy-acp/src/main.ts",
+	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/bridge-server.ts",
+]);
+
+function countEnvAccessOutsideDoors() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		if (ENV_DOORS.has(rel(file))) continue;
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(/\bprocess\s*\.\s*env\b/g)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/** How many top-level arguments a call text ("(a, b)") carries; commas inside nested brackets, literals or
+ * comments do not count. Used to tell `write(x)` from `write(x, cb)`. */
+function topLevelArgCount(call) {
+	const inner = call.slice(1, -1).trim();
+	if (inner === "") return 0;
+	let count = 1;
+	let depth = 0;
+	let prev = "";
+	for (let i = 0; i < call.length; i++) {
+		const jump = skipCompound(call, i, prev);
+		if (jump >= i) {
+			i = jump;
+			prev = call[i] ?? prev;
+			continue;
+		}
+		const c = call[i];
+		if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") depth--;
+		else if (c === "," && depth === 1) count++;
+		if (!/\s/.test(c)) prev = c;
+	}
+	return count;
+}
+
+/**
+ * A stdout write whose bytes the process's own exit may discard. `process.exit` abandons everything
+ * still queued on stdout, and the queue is not hypothetical: stdout is async for pipes on macOS, and
+ * nothing larger than the pipe buffer (64 KiB) leaves in one write on any platform. bridge-hook.ts is
+ * where this bit - its stdout IS the permission decision, and in agy a missing or unparseable decision
+ * means allow - so the fix is structural: write with a completion callback and exit from it.
+ *
+ * The rule is per file, not per function: a function-level scan would be a parser, and a file that both
+ * writes stdout and calls `process.exit` is the hazard whichever function does which. The exemption is
+ * the callback itself (flush-stdout.ts earns its pass that way, not by name), and `process.exitCode = n`
+ * is deliberately not a hit - that is the shape that lets Node drain on its own.
+ */
+function countStdoutExitDrains() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const src = fs.readFileSync(file, "utf-8");
+		const exits = [...src.matchAll(/\bprocess\s*\.\s*exit\s*\(/g)].filter((m) => isRealCode(src, m.index));
+		if (exits.length === 0) continue;
+		for (const m of src.matchAll(/\bprocess\s*\.\s*stdout\s*\.\s*write\s*\(/g)) {
+			if (!isRealCode(src, m.index)) continue;
+			if (topLevelArgCount(callTextAt(src, m.index)) < 2) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
  * A mutating external call whose result is never read. `execOrca([... "worker-stop" ...])` with no
  * assignment is how `/orchestration stop` came to announce success on a failed call, so the shape
  * itself is the bug. The verb is read from the call's own argument vector, so both `"worker-stop"` and
@@ -858,6 +996,26 @@ const INVARIANTS = [
 		name: "agyStdoutFramesOnly",
 		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
+	},
+	{
+		name: "settleOwnership",
+		description: "a turn's `.settled` / `.pending` bookkeeping is written only in agy-acp/src/turn.ts (settleOnce)",
+		measure: countSettleWritesOutsideOwner,
+	},
+	{
+		name: "inboundBufferCap",
+		description: "in agy-acp/src, a file that accumulates stream data must name a byte ceiling (*_BYTES, stderrLimit, byteLength)",
+		measure: countUncappedInboundBuffers,
+	},
+	{
+		name: "envAccessLocation",
+		description: "process.env is read only in agy-acp/src config.ts, launch.ts, main.ts, bridge-hook.ts, bridge-server.ts",
+		measure: countEnvAccessOutsideDoors,
+	},
+	{
+		name: "stdoutExitDrain",
+		description: "in agy-acp/src, a file that calls process.exit may not write stdout without a completion callback",
+		measure: countStdoutExitDrains,
 	},
 	{
 		name: "emptyCatch",

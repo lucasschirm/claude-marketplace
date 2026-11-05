@@ -30,6 +30,27 @@ export interface TurnSettleHost {
 	emit(update: AcpSessionUpdate): void;
 }
 
+/**
+ * The one writer of `pending.settled`, and the one path that clears `host.pending`. Every way a turn can
+ * end - a result, a cancel, a send that failed, a child that exited, a dispose - goes through here, so
+ * "a turn settles exactly once" is one function's invariant instead of five copies of the same two-line
+ * guard (and session.ts's onExit had grown its own copy of the bookkeeping, which is how a sixth path
+ * would have arrived). scripts/check-quality.mjs (settleOwnership) keeps it that way.
+ *
+ * Returns false when there was nothing to settle, which is why every teardown path may call it blind.
+ * `settle` runs with `host.pending` already cleared: whatever it emits belongs to a turn that is over.
+ */
+export function settleOnce(host: TurnSettleHost, settle: (pending: PendingTurn) => void): boolean {
+	const pending = host.pending;
+	if (!pending || pending.settled) {
+		return false;
+	}
+	pending.settled = true;
+	host.pending = null;
+	settle(pending);
+	return true;
+}
+
 /** A turn host that can also provide the live child (respawning when needed). */
 export interface RunTurnHost extends TurnSettleHost {
 	ensureDriver(): Promise<AgyProcess>;
@@ -39,7 +60,9 @@ export interface RunTurnHost extends TurnSettleHost {
 export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromptResult> {
 	// Pending before the child is chosen: a session/cancel that lands during a multi-second respawn
 	// has a prompt to answer, and an absent `host.pending` below is how this turn learns of it.
-	const promise = new Promise<AcpPromptResult>((resolve, reject) => (host.pending = { resolve, reject, settled: false }));
+	const promise = new Promise<AcpPromptResult>((resolve, reject) => {
+		host.pending = { resolve, reject, settled: false };
+	});
 	// A rejection that arrives while this function is suspended below (a child that dies mid-respawn
 	// settles the turn from its exit handler) would otherwise sit unhandled until `return promise`, and
 	// Node reports that as an unhandled rejection - correctly, since nothing had been listening yet.
@@ -48,12 +71,7 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
 	try {
 		driver = await host.ensureDriver();
 	} catch (err) {
-		const starting = host.pending;
-		if (starting && !starting.settled) {
-			starting.settled = true;
-			host.pending = null;
-			starting.reject(err instanceof Error ? err : new Error(String(err)));
-		}
+		settleOnce(host, (starting) => starting.reject(err instanceof Error ? err : new Error(String(err))));
 		return promise;
 	}
 	if (!host.pending) {
@@ -66,12 +84,9 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
 	try {
 		driver.send(text);
 	} catch (err) {
-		const pending = host.pending;
-		if (pending && !pending.settled) {
-			pending.settled = true;
-			host.pending = null;
-			pending.reject(new RpcError(INTERNAL_ERROR, `cannot send to agy: ${(err as Error).message}`));
-		}
+		settleOnce(host, (pending) =>
+			pending.reject(new RpcError(INTERNAL_ERROR, `cannot send to agy: ${(err as Error).message}`, { cause: err })),
+		);
 	}
 	return promise;
 }
@@ -82,33 +97,36 @@ export async function runTurn(host: RunTurnHost, text: string): Promise<AcpPromp
  * turn already ended), which is why every teardown path can call it without checking first.
  */
 export function settleCancelled(host: TurnSettleHost, reason: string): boolean {
-	const pending = host.pending;
-	if (!pending || pending.settled) return false;
-	pending.settled = true;
-	host.pending = null;
-	failActiveTools(host, reason);
-	// The result is exactly what session/cancel promises: a stopReason and nothing else. A cancelled
-	// turn's usage is not reported (agy's own counters for an interrupted turn are partial).
-	pending.resolve({ stopReason: "cancelled" });
-	return true;
+	return settleOnce(host, (pending) => {
+		failActiveTools(host, reason);
+		// The result is exactly what session/cancel promises: a stopReason and nothing else. A cancelled
+		// turn's usage is not reported (agy's own counters for an interrupted turn are partial).
+		pending.resolve({ stopReason: "cancelled" });
+	});
 }
 
 /** Fail every tool still ACTIVE: a client must never show a tool running forever. */
 export function failActiveTools(host: TurnSettleHost, message: string): void {
-	for (const id of host.activeTools) host.emit(toolCallFailed(id, message));
+	for (const id of host.activeTools) {
+		host.emit(toolCallFailed(id, message));
+	}
 	host.activeTools.clear();
 }
 
 /** The `result`-driven end of a turn (see the file header for the mapping). */
 export function settleTurn(host: TurnSettleHost, e: Extract<AgyDriverEvent, { event: "result" }>, driver: AgyProcess): void {
-	const pending = host.pending;
-	if (!pending) return;
-	pending.settled = true;
-	host.pending = null;
-	failActiveTools(host, "the turn ended before the tool reported a terminal state");
-	const denied = e.result.denied_actions;
-	// The driver already turned agy's cumulative counters into per-turn deltas (no double counting across turns).
-	if (e.result.status === "SUCCESS") {
+	settleOnce(host, (pending) => {
+		failActiveTools(host, "the turn ended before the tool reported a terminal state");
+		const denied = e.result.denied_actions;
+		// The driver already turned agy's cumulative counters into per-turn deltas (no double counting across turns).
+		if (e.result.status !== "SUCCESS") {
+			pending.reject(
+				new RpcError(INTERNAL_ERROR, `agy turn failed: ${e.result.error ?? "unknown error"}`, {
+					data: { agyError: e.result.error ?? "unknown error", stderrTail: driver.stderrTail },
+				}),
+			);
+			return;
+		}
 		host.emit(usageUpdate(e.result.usage, e.result.num_turns, e.result.duration_seconds));
 		const meta: NonNullable<AcpPromptResult["_meta"]> = {
 			usage: e.result.usage,
@@ -121,12 +139,5 @@ export function settleTurn(host: TurnSettleHost, e: Extract<AgyDriverEvent, { ev
 			meta.deniedActions = denied;
 		}
 		pending.resolve({ stopReason: "end_turn", _meta: meta });
-	} else {
-		pending.reject(
-			new RpcError(INTERNAL_ERROR, `agy turn failed: ${e.result.error ?? "unknown error"}`, {
-				agyError: e.result.error ?? "unknown error",
-				stderrTail: driver.stderrTail,
-			}),
-		);
-	}
+	});
 }

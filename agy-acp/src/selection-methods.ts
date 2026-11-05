@@ -25,11 +25,17 @@ export function sessionParams(
 	params: unknown,
 	registry: SessionRegistry,
 ): { session: AgySession; fields: Record<string, unknown> } {
-	if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, `${method} params must be an object`);
+	if (typeof params !== "object" || params === null) {
+		throw new RpcError(INVALID_PARAMS, `${method} params must be an object`);
+	}
 	const p = params as Record<string, unknown>;
-	if (typeof p.sessionId !== "string") throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
+	if (typeof p.sessionId !== "string") {
+		throw new RpcError(INVALID_PARAMS, "sessionId must be a string");
+	}
 	const session = registry.get(p.sessionId);
-	if (!session) throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
+	if (!session) {
+		throw new RpcError(INVALID_PARAMS, `unknown sessionId: ${p.sessionId}`);
+	}
 	return { session, fields: p };
 }
 
@@ -42,8 +48,12 @@ export function sessionParams(
  * (`null`) checks nothing, exactly as it does for a client's pick: agy is the authority on its own ids.
  */
 export function assertStartSelection(model: string | undefined, listed: AgyModel[] | null): void {
-	if (listed === null || model === undefined || model === AGY_DEFAULT_CHOICE) return;
-	if (listed.some((m) => m.modelId === model)) return;
+	if (listed === null || model === undefined || model === AGY_DEFAULT_CHOICE) {
+		return;
+	}
+	if (listed.some((m) => m.modelId === model)) {
+		return;
+	}
 	const available = listed.map((m) => m.modelId).join(", ");
 	throw new RpcError(
 		INTERNAL_ERROR,
@@ -55,7 +65,9 @@ export function registerSelectionMethods(connection: JsonRpcConnection, registry
 	/** session/set_mode: the permission mode, changed now (the agy flag follows on the next respawn). */
 	connection.registerMethod("session/set_mode", (params) => {
 		const { session, fields } = sessionParams("session/set_mode", params, registry);
-		if (typeof fields.modeId !== "string") throw new RpcError(INVALID_PARAMS, "modeId must be a string");
+		if (typeof fields.modeId !== "string") {
+			throw new RpcError(INVALID_PARAMS, "modeId must be a string");
+		}
 		session.setMode(fields.modeId);
 		return {};
 	});
@@ -67,7 +79,9 @@ export function registerSelectionMethods(connection: JsonRpcConnection, registry
 	 */
 	connection.registerMethod("session/set_model", async (params) => {
 		const { session, fields } = sessionParams("session/set_model", params, registry);
-		if (typeof fields.modelId !== "string") throw new RpcError(INVALID_PARAMS, "modelId must be a string");
+		if (typeof fields.modelId !== "string") {
+			throw new RpcError(INVALID_PARAMS, "modelId must be a string");
+		}
 		await session.setModel(fields.modelId);
 		return { configOptions: session.configOptions() };
 	});
@@ -78,13 +92,19 @@ export function registerSelectionMethods(connection: JsonRpcConnection, registry
 	 */
 	connection.registerMethod("session/set_config_option", async (params) => {
 		const { session, fields } = sessionParams("session/set_config_option", params, registry);
-		if (typeof fields.configId !== "string") throw new RpcError(INVALID_PARAMS, "configId must be a string");
+		if (typeof fields.configId !== "string") {
+			throw new RpcError(INVALID_PARAMS, "configId must be a string");
+		}
 		const value = fields.value;
 		if (fields.configId === "model") {
-			if (typeof value !== "string") throw new RpcError(INVALID_PARAMS, "the model option takes a string value");
+			if (typeof value !== "string") {
+				throw new RpcError(INVALID_PARAMS, "the model option takes a string value");
+			}
 			await session.setModel(value);
 		} else if (fields.configId === "effort") {
-			if (typeof value !== "string") throw new RpcError(INVALID_PARAMS, "the effort option takes a string value");
+			if (typeof value !== "string") {
+				throw new RpcError(INVALID_PARAMS, "the effort option takes a string value");
+			}
 			session.setEffort(value);
 		} else {
 			// A mode is a selector too, but it has a first-class ACP surface of its own (session/set_mode),

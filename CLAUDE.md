@@ -17,8 +17,11 @@ plugins/<plugin-name>/
   commands/<command-name>.md        # slash commands (optional, add as needed)
   hooks/hooks.json                  # hook definitions (optional, add as needed)
 test/<name>.ts | test/<name>.sh     # tests; `bash test/run.sh` runs the CI suites
+.githooks/pre-commit|commit-msg|pre-push   # the commit-time gate (`npm run hooks:install`)
+scripts/quality-gate-trailer.mjs    # what those three hooks run
+scripts/check-commit-hygiene.mjs    # CI's half: every commit went through that gate
 scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
-.github/workflows/ci.yml            # CI: manifests, unit tests, Pi extension suites
+.github/workflows/ci.yml            # CI: commit hygiene, manifests, unit tests, Pi extension suites
 .github/workflows/plugin-version-bump.yml  # bumps a plugin's minor version when a merge to main/dev touches its files
 ```
 
@@ -36,8 +39,9 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
 
 ## Validating changes
 
-- `npm run qa` is the fast loop and the definition of done for any change to `extensions/`: `typecheck && lint && format:check && check && validate && test:unit`. It needs `npm install`.
-- `npm run typecheck` (`tsc --noEmit`) covers `extensions/**`. `npm run lint` runs biome (`biome.jsonc`) over `extensions/`; `npm run format` applies it everywhere and `npm run format:check` only verifies.
+- `npm run qa` is the fast loop and the definition of done for any change to `extensions/`, `agy-acp/` or the scripts: `qa:static && test:unit`. It needs `npm install`.
+- `npm run qa:static` is that loop without the tests — `typecheck && lint && format:check && check && validate`, about five seconds. It has one definition and three callers: you, `.githooks/pre-commit`, and the `quality` job in CI. Add a check by adding it here, never by spelling the steps out in the workflow again.
+- `npm run typecheck` (`tsc --noEmit`) covers `extensions/**`, `agy-acp/` and `agy-acp/test/` (three projects, three tsconfigs). `npm run lint` runs biome (`biome.jsonc`) over `extensions/` and `agy-acp/`; `npm run format` applies it everywhere and `npm run format:check` only verifies.
 - `biome.jsonc` is **part of the baseline** (`biomeConfigHash`). Change it and the biome debt figures no longer
   mean the same thing — silencing a rule for one file moves a count exactly the way fixing that file's debt does
   — so `npm run check` fails until you record the new configuration deliberately:
@@ -45,7 +49,7 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
   zero: a fall is free, a fall to zero is a decision, and it lands in the baseline's visible `notes`.
 - `--reason` must be a sentence (four words, twenty-four characters). "." and "why this is acceptable" both
   authorised ungating once, which is why the bar is not merely "non-empty".
-- `npm run check` (`scripts/check-quality.mjs --check`) enforces the invariants a linter cannot express: exec location and timeouts, mutating calls whose result is never read, `globalThis` ownership, where `JSON.parse` may appear, per-file line budgets, `pi.extensions` matching the files on disk, unused libs, frontmatter, and that every test file is wired into a suite. Legacy debt is **ratcheted** by `scripts/quality-baseline.json`: counts may only shrink, `npm run qa:baseline` lowers them, and an increase requires `--write --reason "..."`, which appends a visible line to the baseline's `notes`.
+- `npm run check` (`scripts/check-quality.mjs --check`) enforces the invariants a linter cannot express: exec location and timeouts, mutating calls whose result is never read, `globalThis` ownership, where `JSON.parse` may appear, per-file line budgets, `pi.extensions` matching the files on disk, unused libs, frontmatter, that every test file is wired into a suite, and four that `agy-acp/src/` paid for: `stdoutExitDrain` (a file that reaches `process.exit` may not write stdout without a completion callback), `envAccessLocation` (`process.env` only in the five files that are doors), `inboundBufferCap` (a file that accumulates a stream must name a byte ceiling) and `settleOwnership` (only `turn.ts` writes `pending.settled`). Legacy debt is **ratcheted** by `scripts/quality-baseline.json`: counts may only shrink, `npm run qa:baseline` lowers them, and an increase requires `--write --reason "..."`, which appends a visible line to the baseline's `notes`.
 - `npm run validate` (`node scripts/validate-marketplace.mjs`) checks the marketplace/plugin manifests parse, every `source` resolves, names match between `marketplace.json` and `plugin.json`, and no `plugins/*` directory is missing from the manifest.
 - `bash test/run.sh quality-fixtures` proves the gate itself bites: every invariant in `check-quality.mjs` is
   fed a minimal violation and must fail naming the `file:line`, every exemption must not fire, and the ratchet
@@ -53,7 +57,10 @@ scripts/validate-marketplace.mjs    # manifest validation (`npm run validate`)
   directory and reaches biome through the `PI_QA_BIOME` seam, so it never mutates the checkout; CI runs it in
   the `quality` job. If you change an invariant, add its fixture in the same commit - an invariant no fixture
   fails is an invariant that measures nothing, and four of them did when first written.
+- **The commit-time gate.** `.githooks/pre-commit` runs `npm run qa:static` **on a checkout of the staged tree**, not on your working copy — the trailer names the staged tree, so that is the tree the checks have to be about; a failure staged but deleted on disk used to come out stamped, and a scratch file that broke a lint rule used to block every commit. It costs one `git checkout-index` into a temp directory (node_modules symlinked), and a failure says which directory the paths in it belong to.
+  `.githooks/pre-push` runs `npm run test:unit`, and `.githooks/commit-msg` stamps `Quality-Gate: v1 patch=<patch-id> tree=<tree>` onto the message — but only when a sentinel written by pre-commit says the gate actually ran, because `--no-verify` skips pre-commit and not the message hooks. `npm run hooks:install` wires them up (`core.hooksPath`, relative, so every worktree gets its own) and `prepare` runs it on every `npm install`, so a fresh clone is gated by the first install.
+- **Skipping it.** `QA_SKIP_HOOKS=1 git commit ...` commits without the gate and says so on stderr. The commit then carries no trailer, and the `commit-hygiene` job fails it by name — skipping is supported, hiding the skip is not. `scripts/check-commit-hygiene.mjs --base <ref> --head <ref> [--cutover <sha>]` is the same check, runnable locally; it accepts either binding (the tree is exact for an amend, whose patch-id no hook can compute; the patch-id survives a rebase or cherry-pick, where the tree does not) and exempts merges, the version-bump bot, GitHub's own web flow, and anything older than the cutover in `ci.yml`.
 - `npm test` (`bash test/run.sh`) runs every CI suite; `bash test/run.sh --list` lists suite names and `npm run test:unit` runs only the standalone `node --test` files. Node >= 23.6 is required (it runs TypeScript directly).
-- CI (`.github/workflows/ci.yml`) runs on every pull request, on pushes to `main`, and manually: a manifests + unit-test job, plus a matrix job per Pi extension suite (`observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`). It installs Pi from npm and needs no model credentials — the suites mock `gh`/Pi APIs and run `--offline`.
+- CI (`.github/workflows/ci.yml`) runs on every pull request, on pushes to `main`, and manually: a `commit-hygiene` job (seconds, no install — it reports a bypassed commit before anything else), the `quality` job, a manifests + unit-test job, plus a matrix job per Pi extension suite (`observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`). It installs Pi from npm and needs no model credentials — the suites mock `gh`/Pi APIs and run `--offline`.
 - `.github/workflows/plugin-version-bump.yml` runs on every push to `main`/`dev`: it diffs the push, and any plugin whose files changed gets its minor version bumped in both manifest layouts (`.devin-plugin` and `.claude-plugin`), committed and pushed by the bot. The bump commit touches only the manifests, which `scripts/bump-plugin-versions.mjs` filters out, so the automation cannot bump itself. A merge that changes no plugin files bumps nothing.
 - To smoke-test a plugin locally in Claude Code, add this repo as a marketplace (`/plugin marketplace add <path-to-this-repo>`) and install the plugin to confirm skills/agents load correctly.

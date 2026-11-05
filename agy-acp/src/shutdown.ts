@@ -69,7 +69,9 @@ export function createShutdown(options: ShutdownOptions): Shutdown {
 						}),
 					])
 				: await done;
-		if (timer) clearTimeout(timer);
+		if (timer) {
+			clearTimeout(timer);
+		}
 		if (outcome === "timeout") {
 			forced = true;
 			log(
@@ -83,7 +85,9 @@ export function createShutdown(options: ShutdownOptions): Shutdown {
 	};
 
 	const begin = (reason: string): Promise<void> => {
-		if (!running) running = run(reason);
+		if (!running) {
+			running = run(reason);
+		}
 		return running;
 	};
 
@@ -105,7 +109,9 @@ export function createShutdown(options: ShutdownOptions): Shutdown {
 				process.on(signal, handler);
 			}
 			return () => {
-				for (const [signal, handler] of handlers) process.off(signal, handler);
+				for (const [signal, handler] of handlers) {
+					process.off(signal, handler);
+				}
 				handlers.clear();
 			};
 		},

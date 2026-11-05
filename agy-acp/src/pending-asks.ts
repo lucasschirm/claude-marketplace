@@ -60,14 +60,18 @@ export class PendingAsks {
 	/** Drops the entry only if it is still this ask's - a newer ask for the same key keeps its own. */
 	release(ask: PendingAsk): void {
 		const key = askKey(ask.conversationId, ask.stepIdx);
-		if (this.pending.get(key) === ask) this.pending.delete(key);
+		if (this.pending.get(key) === ask) {
+			this.pending.delete(key);
+		}
 	}
 
 	/** One ask by its conversation and step index (the hook connection went away). */
 	abort(conversationId: string, stepIdx: number, kind: AskAbort, why: string): boolean {
 		const key = askKey(conversationId, stepIdx);
 		const ask = this.pending.get(key);
-		if (!ask) return false;
+		if (!ask) {
+			return false;
+		}
 		this.pending.delete(key);
 		this.host.log(`${why} (${key})`);
 		this.settle(ask, kind);
@@ -77,7 +81,9 @@ export class PendingAsks {
 
 	/** Deny every pending ask (a cancel, a child exit, a dispose) with the reason that matches `kind`. */
 	denyAll(why: string, kind: AskAbort): void {
-		if (this.pending.size === 0) return;
+		if (this.pending.size === 0) {
+			return;
+		}
 		const asks = [...this.pending.values()];
 		this.host.log(`permission: denying ${asks.length} pending request(s) (${why})`);
 		this.pending.clear();
@@ -93,7 +99,9 @@ export class PendingAsks {
 	 * says only that the permission decision will never arrive, with the reason the hook was given.
 	 */
 	private settle(ask: PendingAsk, kind: AskAbort): void {
-		if (kind === "reject") return; // the hook is gone: there is no audience for a reason
+		if (kind === "reject") {
+			return; // the hook is gone: there is no audience for a reason
+		}
 		const reason = kind === "cancelled" ? cancelledReason() : sessionEndedReason();
 		this.host.notify({
 			sessionUpdate: "tool_call_update",

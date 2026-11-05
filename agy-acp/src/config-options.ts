@@ -79,18 +79,23 @@ export function agyModeFlag(modeId: string): string | undefined {
 	return AGY_MODE_FLAGS[modeId];
 }
 
+/** `low` -> `Low`, for a selector label; an empty value stays empty rather than throwing. */
+function capitalise(value: string): string {
+	return value === "" ? value : `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
 /** The flag-level view of a session: what its next agy process must be launched with. */
 export interface LaunchFlags {
-	model?: string;
-	effort?: string;
-	mode?: string;
-	sandbox?: boolean;
+	model?: string | undefined;
+	effort?: string | undefined;
+	mode?: string | undefined;
+	sandbox?: boolean | undefined;
 }
 
 /** Where the selections start: the operator's launch options, plus the server-wide gates. */
 export interface SelectionState {
-	model?: string;
-	effort?: string;
+	model?: string | undefined;
+	effort?: string | undefined;
 	sandbox: boolean;
 	allowBypass: boolean;
 }
@@ -130,7 +135,9 @@ export class SessionSelection {
 			);
 		}
 		const clash = effortConflict(this.modelId, this.effortId);
-		if (clash !== null) throw new Error(`${clash} (AGY_ACP_MODEL/AGY_ACP_EFFORT or --model/--effort)`);
+		if (clash !== null) {
+			throw new Error(`${clash} (AGY_ACP_MODEL/AGY_ACP_EFFORT or --model/--effort)`);
+		}
 	}
 
 	get mode(): string {
@@ -160,7 +167,9 @@ export class SessionSelection {
 	knownModels(models: AgyModel[] | null): string[] {
 		const ids = models ? models.map((m) => m.modelId) : [];
 		for (const own of [this.reported, this.modelId]) {
-			if (own !== "" && own !== AGY_DEFAULT_CHOICE && !ids.includes(own)) ids.push(own);
+			if (own !== "" && own !== AGY_DEFAULT_CHOICE && !ids.includes(own)) {
+				ids.push(own);
+			}
 		}
 		return ids;
 	}
@@ -181,7 +190,9 @@ export class SessionSelection {
 	 * fixture), and the session reports that as a startup error rather than inventing a verdict.
 	 */
 	setModel(modelId: string, known: AgyModel[] | null): void {
-		if (modelId === "") throw new Error("modelId must not be empty");
+		if (modelId === "") {
+			throw new Error("modelId must not be empty");
+		}
 		if (known !== null) {
 			const ids = this.knownModels(known);
 			if (modelId !== AGY_DEFAULT_CHOICE && !ids.includes(modelId)) {
@@ -200,7 +211,9 @@ export class SessionSelection {
 			throw new Error(`unknown effort: ${effort} (available: ${AGY_DEFAULT_CHOICE}, ${AGY_EFFORTS.join(", ")})`);
 		}
 		const clash = effortConflict(this.modelId, effort);
-		if (clash !== null) throw new Error(`${clash} - set the model to ${AGY_DEFAULT_CHOICE} first`);
+		if (clash !== null) {
+			throw new Error(`${clash} - set the model to ${AGY_DEFAULT_CHOICE} first`);
+		}
 		this.effortId = effort;
 	}
 
@@ -257,7 +270,7 @@ export class SessionSelection {
 				currentValue: this.effort,
 				options: [AGY_DEFAULT_CHOICE, ...AGY_EFFORTS].map((value) => ({
 					value,
-					name: value === AGY_DEFAULT_CHOICE ? "agy default" : `${value[0].toUpperCase()}${value.slice(1)}`,
+					name: value === AGY_DEFAULT_CHOICE ? "agy default" : capitalise(value),
 				})),
 			},
 		];

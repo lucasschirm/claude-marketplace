@@ -35,7 +35,9 @@ export class TurnHeartbeat {
 		this.stop();
 		this.seq = 0;
 		this.startedAt = Date.now();
-		if (intervalMs <= 0) return;
+		if (intervalMs <= 0) {
+			return;
+		}
 		const timer = setInterval(() => this.beat(), intervalMs);
 		timer.unref();
 		this.timer = timer;
@@ -43,7 +45,9 @@ export class TurnHeartbeat {
 
 	/** Stops the beat. Called when the turn settles, and again on dispose. */
 	stop(): void {
-		if (!this.timer) return;
+		if (!this.timer) {
+			return;
+		}
 		clearInterval(this.timer);
 		this.timer = null;
 	}

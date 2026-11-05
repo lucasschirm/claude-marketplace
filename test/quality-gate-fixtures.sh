@@ -328,6 +328,93 @@ printf 'process.stdout.write("agy-acp --version");\n' >>agy-acp/src/main.ts
 qa pass "but main.ts may write --version/--help on stdout" --only agyStdoutFramesOnly --full
 cp "$WORK/main.ts.orig" agy-acp/src/main.ts
 adrop
+# settleOwnership: a turn settles exactly once, and only turn.ts's settleOnce may say so (F8).
+aprobe src/zz-settle.ts 'export function endTurn(host: { pending: { settled: boolean } | null }): void {
+	if (host.pending) {
+		host.pending.settled = true;
+		host.pending = null;
+	}
+}'
+qa fail "turn bookkeeping outside turn.ts fails settleOwnership" --only settleOwnership --full
+expect_line "the settled write is reported" "agy-acp/src/zz-settle.ts:3"
+expect_line "the pending clear is reported" "agy-acp/src/zz-settle.ts:4"
+aprobe src/zz-settle.ts 'export function isDone(host: { pending: { settled: boolean } | null }): boolean {
+	// host.pending = null is what this must NOT do; reading the flag is fine.
+	return host.pending !== null && host.pending.settled;
+}
+export class Frames {
+	private pending: Buffer = Buffer.alloc(0);
+	push(chunk: Buffer): void {
+		this.pending = Buffer.concat([this.pending, chunk]);
+	}
+}'
+qa pass "reading .settled, and framing.ts's byte buffer called pending, are not turn bookkeeping" --only settleOwnership --full
+adrop
+# inboundBufferCap: a reader that accumulates must name its ceiling. The bridge's request line had
+# none, so an unauthenticated peer could grow this process's memory until maxHoldMs ran out (F12).
+aprobe src/zz-buf.ts 'export function collect(stream: NodeJS.EventEmitter): void {
+	let buf = "";
+	stream.on("data", (d: Buffer) => {
+		buf += d.toString("utf8");
+	});
+}'
+qa fail "an inbound accumulator in a file that names no byte ceiling fails inboundBufferCap" --only inboundBufferCap --full
+expect_line "the accumulation is reported" "agy-acp/src/zz-buf.ts:4"
+aprobe src/zz-buf.ts 'const MAX_INPUT_BYTES = 1024;
+export function collect(stream: NodeJS.EventEmitter): void {
+	let buf = "";
+	stream.on("data", (d: Buffer) => {
+		if (buf.length + d.length > MAX_INPUT_BYTES) { return; }
+		buf += d.toString("utf8");
+	});
+}'
+qa pass "the same reader passes once the file names its ceiling" --only inboundBufferCap --full
+adrop
+aprobe src/zz-buf2.ts 'export class Collector {
+	private pending: Buffer = Buffer.alloc(0);
+	push(chunk: Buffer): void {
+		this.pending = Buffer.concat([this.pending, chunk]);
+	}
+}'
+qa fail "a byte accumulation with no ceiling fails too (framing.ts's shape, uncapped)" --only inboundBufferCap --full
+expect_line "the concat is reported" "agy-acp/src/zz-buf2.ts:4"
+adrop
+qa pass "and framing.ts, which accumulates the same way under maxFrameBytes, does not" --only inboundBufferCap --full
+# envAccessLocation: the environment comes in as a parameter, except at the doors. agy/version.ts read
+# the strict-version flag off process.env while spawning the child with the env it was handed (F5).
+aprobe src/zz-env.ts 'export function strict(): boolean {
+	return process.env.AGY_ACP_STRICT_VERSION === "1";
+}'
+qa fail "a process.env read outside the config doors fails envAccessLocation" --only envAccessLocation --full
+expect_line "the read is reported" "agy-acp/src/zz-env.ts:2"
+aprobe src/zz-env.ts 'export function strict(env: NodeJS.ProcessEnv): boolean {
+	// process.env is what this must NOT do - a mention is not a read
+	return env.AGY_ACP_STRICT_VERSION === "1";
+}'
+qa pass "the same file passes once the env is a parameter (and a comment naming process.env is not a read)" --only envAccessLocation --full
+adrop
+cp agy-acp/src/config.ts "$WORK/config.ts.orig"
+printf 'export const doorRead = process.env.AGY_ACP_LOG;\n' >>agy-acp/src/config.ts
+qa pass "but config.ts is a door" --only envAccessLocation --full
+cp "$WORK/config.ts.orig" agy-acp/src/config.ts
+# stdoutExitDrain: the decision must reach the pipe before the process ends. bridge-hook.ts truncated a
+# 256 KiB deny reason exactly this way, and agy reads a half-written decision as no decision at all.
+aprobe src/zz-drain.ts 'export function decide(line: string): void {
+	process.stdout.write(line);
+	process.exit(0);
+}'
+qa fail "a stdout write followed by process.exit without a drain fails stdoutExitDrain" --only stdoutExitDrain --full
+expect_line "the undrained write is reported" "agy-acp/src/zz-drain.ts:2"
+aprobe src/zz-drain.ts 'export function decide(line: string): void {
+	process.stdout.write(line, () => process.exit(0));
+}'
+qa pass "a write that passes a completion callback is the exemption (flush-stdout.ts earns its pass this way)" --only stdoutExitDrain --full
+aprobe src/zz-drain.ts 'export function decide(line: string): void {
+	process.stdout.write(line);
+	process.exitCode = 1;
+}'
+qa pass "process.exitCode, the shape that lets Node drain by itself, is not a hit" --only stdoutExitDrain --full
+adrop
 # The orphan's name is assembled for the same reason as the test/ one below: checkWiredTests searches
 # every test/*.sh for each filename, and this script is one of them.
 AGY_ORPHAN=test-zz-agy-orphan

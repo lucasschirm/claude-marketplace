@@ -11,6 +11,8 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { agyArgs, AgyProcess, checkAgyVersion, type AgyDriverEvent, type AgyExitInfo, type AgyProcessOptions } from "../src/agy-driver.ts";
+import { runAgyOneShot } from "../src/agy/one-shot.ts";
+import { trimToByteBudget } from "../src/byte-budget.ts";
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
 const STREAM_DIR = fileURLToPath(new URL("./fixtures/stream", import.meta.url));
@@ -58,7 +60,10 @@ interface Handle {
 	exits: AgyExitInfo[];
 }
 
-function startDriver(fixture: string, options: Omit<AgyProcessOptions, "cwd" | "argvPrefix"> & { argvPrefix?: string[] }): Handle {
+function startDriver(
+	fixture: string,
+	options: Omit<AgyProcessOptions, "cwd" | "argvPrefix"> & { argvPrefix?: string[] | undefined },
+): Handle {
 	const driver = new AgyProcess({
 		cwd: process.cwd(),
 		env: { ...process.env, FAKE_AGY_FIXTURE: fixture, FAKE_AGY_INIT_DELAY_MS: "5", FAKE_AGY_LINE_GAP_MS: "3" },
@@ -475,7 +480,7 @@ test("agyArgs builds the documented flag vector", () => {
 });
 
 test("version check: tested, untested, and strict refusal", async () => {
-	const tested = await checkAgyVersion([process.execPath, FAKE, "--version"], 5000);
+	const tested = await checkAgyVersion([process.execPath, FAKE, "--version"], process.env, 5000);
 	assert.strictEqual(tested.version, "1.4.2");
 	assert.strictEqual(tested.tested, true);
 	assert.strictEqual(tested.warning, null);
@@ -483,14 +488,14 @@ test("version check: tested, untested, and strict refusal", async () => {
 
 	process.env.FAKE_AGY_VERSION = "9.9.9";
 	try {
-		const untested = await checkAgyVersion([process.execPath, FAKE, "--version"], 5000);
+		const untested = await checkAgyVersion([process.execPath, FAKE, "--version"], process.env, 5000);
 		assert.strictEqual(untested.tested, false);
 		assert.match(untested.warning ?? "", /untested/);
 		assert.strictEqual(untested.strictRefusal, false);
 
 		process.env.AGY_ACP_STRICT_VERSION = "1";
 		try {
-			const refused = await checkAgyVersion([process.execPath, FAKE, "--version"], 5000);
+			const refused = await checkAgyVersion([process.execPath, FAKE, "--version"], process.env, 5000);
 			assert.strictEqual(refused.strictRefusal, true);
 		} finally {
 			delete process.env.AGY_ACP_STRICT_VERSION;
@@ -514,4 +519,47 @@ test("EOF mid-turn: a running turn survives, finishes, and the recorded exit lan
 	} finally {
 		await h.driver.dispose();
 	}
+});
+
+// F5: checkAgyVersion takes an env and used it for the spawn, then read the strict flag off
+// `process.env` - so a session launched with its own environment was judged against this process's.
+test("AGY_ACP_STRICT_VERSION is read from the env the caller passed, not the process's", async () => {
+	const status = await checkAgyVersion(
+		[process.execPath, FAKE, "--version"],
+		{ ...process.env, AGY_ACP_STRICT_VERSION: "1", FAKE_AGY_VERSION: "9.9.9" },
+		5000,
+	);
+	assert.strictEqual(status.tested, false, "the injected FAKE_AGY_VERSION reached the fake");
+	assert.strictEqual(status.strictRefusal, true, "the injected env must decide the refusal");
+	assert.strictEqual(process.env.AGY_ACP_STRICT_VERSION, undefined, "and the process's own env was never touched");
+});
+
+// The property both one-shot callers depend on and neither could test while it was copied twice: the
+// spawn timeout SIGTERMs one pid, so a child that ignores SIGTERM only dies if the GROUP is killed.
+test("runAgyOneShot kills the process group when the binary ignores SIGTERM", async () => {
+	const ignoreTerm = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+	const result = await runAgyOneShot([process.execPath, "-e", ignoreTerm], 300, process.env);
+	assert.strictEqual(result.timedOut, true, "the watchdog had to step in");
+	assert.notStrictEqual(result.signal, null, "the child was signalled, not exited");
+	assert.strictEqual(result.spawnError, null, "it did start");
+});
+
+// F6: the stderr tail was trimmed one code point per pass, re-measuring the whole buffer each time -
+// quadratic in the chunk, and agy writes its stack traces in one write.
+test("a megabyte of text in one call is trimmed to the budget promptly (linear, not per code point)", () => {
+	const started = Date.now();
+	const trimmed = trimToByteBudget("x".repeat(1024 * 1024), 64 * 1024);
+	const took = Date.now() - started;
+	assert.strictEqual(Buffer.byteLength(trimmed, "utf8"), 64 * 1024);
+	assert.ok(took < 250, `trimming took ${took} ms`);
+});
+
+test("the trim keeps the tail and never half a character", () => {
+	assert.strictEqual(trimToByteBudget("short", 64), "short", "under the budget is untouched");
+	// "\u20ac" is 3 bytes: a 10-byte budget holds three of them and never a split one.
+	assert.strictEqual(trimToByteBudget("\u20ac\u20ac\u20ac\u20ac\u20ac", 10), "\u20ac\u20ac\u20ac");
+	// A surrogate pair is 4 bytes and is dropped whole or kept whole.
+	assert.strictEqual(trimToByteBudget("ab\u{1F600}", 4), "\u{1F600}");
+	assert.strictEqual(trimToByteBudget("ab\u{1F600}", 3), "");
+	assert.strictEqual(trimToByteBudget("ab\u{1F600}", 0), "");
 });

@@ -86,8 +86,11 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	});
 
 	function handleNotification(method: string, params: unknown): void {
-		if (method === "session/cancel") cancelSession(params);
-		else log(`ignored notification: ${method}`);
+		if (method === "session/cancel") {
+			cancelSession(params);
+		} else {
+			log(`ignored notification: ${method}`);
+		}
 	}
 	connection.onClose((reason) => {
 		log(`connection closed: ${reason}`);
@@ -135,11 +138,17 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 
 	/** The session/new params: an object with an absolute cwd and an optional mcpServers array. */
 	function parseSessionNew(params: unknown): { cwd: string; mcpServers: unknown[] | undefined } {
-		if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/new params must be an object");
+		if (typeof params !== "object" || params === null) {
+			throw new RpcError(INVALID_PARAMS, "session/new params must be an object");
+		}
 		const p = params as Record<string, unknown>;
 		const cwd = p.cwd;
-		if (typeof cwd !== "string") throw new RpcError(INVALID_PARAMS, "cwd must be a string");
-		if (!path.isAbsolute(cwd)) throw new RpcError(INVALID_PARAMS, `cwd must be an absolute path: ${cwd}`);
+		if (typeof cwd !== "string") {
+			throw new RpcError(INVALID_PARAMS, "cwd must be a string");
+		}
+		if (!path.isAbsolute(cwd)) {
+			throw new RpcError(INVALID_PARAMS, `cwd must be an absolute path: ${cwd}`);
+		}
 		const mcpServers = p.mcpServers;
 		if (mcpServers !== undefined && (!Array.isArray(mcpServers) || mcpServers.some((s) => typeof s !== "object" || s === null))) {
 			throw new RpcError(INVALID_PARAMS, "mcpServers must be an array of server descriptors");
@@ -152,30 +161,42 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		let isDirectory = false;
 		try {
 			isDirectory = (await fs.promises.stat(cwd)).isDirectory();
-		} catch {
-			throw new RpcError(INVALID_PARAMS, `cwd does not exist: ${cwd}`);
+		} catch (err) {
+			throw new RpcError(INVALID_PARAMS, `cwd does not exist: ${cwd}`, { cause: err });
 		}
-		if (!isDirectory) throw new RpcError(INVALID_PARAMS, `cwd is not a directory: ${cwd}`);
+		if (!isDirectory) {
+			throw new RpcError(INVALID_PARAMS, `cwd is not a directory: ${cwd}`);
+		}
 		const status = await checkVersion();
 		if (status.strictRefusal) {
 			throw new RpcError(INTERNAL_ERROR, status.warning ?? "the agy version is refused by AGY_ACP_STRICT_VERSION", {
-				agyVersion: status.version,
+				data: { agyVersion: status.version },
 			});
 		}
-		if (status.warning) log(`agy version warning: ${status.warning}`);
+		if (status.warning) {
+			log(`agy version warning: ${status.warning}`);
+		}
 		// Before the session exists: its session/new result carries the list, and a client must not be
 		// able to pick a model we never advertised. A failure is not fatal - it yields `null`.
 		const modelList = await models.list();
 		assertStartSelection(launch.model, modelList);
+		// `session.start()` below is what produces the id, and the permission closure can only fire
+		// once the session is running - a `let` the closure reads keeps that order visible, and the
+		// null branch says what a request that somehow arrived earlier gets instead of a ReferenceError
+		// from a `const` declared further down.
+		let sessionId: string | null = null;
 		const session = new AgySession({
 			cwd,
 			...launch,
 			modelCatalog: models,
 			log,
-			notify: (sessionId, update) => connection.notify("session/update", { sessionId, update }),
-			requestPermission: (params, timeoutMs) => connection.request("session/request_permission", { ...params, sessionId }, timeoutMs),
+			notify: (id, update) => connection.notify("session/update", { sessionId: id, update }),
+			requestPermission: (permissionParams, timeoutMs) =>
+				sessionId === null
+					? Promise.reject(new RpcError(INTERNAL_ERROR, "a permission request arrived before session/new produced a session id"))
+					: connection.request("session/request_permission", { ...permissionParams, sessionId }, timeoutMs),
 		});
-		const sessionId = await session.start(); // a failure disposes the child and throws the RpcError
+		sessionId = await session.start(); // a failure disposes the child and throws the RpcError
 		registry.add(sessionId, session);
 		// The selection, advertised: the modes the bridge enforces (session/set_mode) and the ACP
 		// selectors for the model list and the effort levels (session/set_config_option). `models` is
@@ -207,7 +228,9 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 		if (status.warning) {
 			meta.agyVersion = { version: status.version, tested: status.tested, warning: status.warning };
 		}
-		if (Object.keys(meta).length > 0) result._meta = meta;
+		if (Object.keys(meta).length > 0) {
+			result._meta = meta;
+		}
 		return result;
 	}
 

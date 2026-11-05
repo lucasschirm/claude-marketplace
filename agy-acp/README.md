@@ -42,9 +42,20 @@ falling back to `os.tmpdir()`) holding `.agents/hooks.json` (one `PreToolUse` ho
 unguessable per-session name, passed to agy as an `--add-dir`) and a 0600 Unix socket.
 agy runs the hook (`src/bridge-hook.ts`) on every tool call; the hook dials the socket
 with the tool name, args and a per-session token and waits for a decision. The hook is
-fail-closed: every exit path prints one JSON decision (empty stdout would be an allow in
-agy), every denial carries the "Do not retry this call." wording (without it the model
-retried 5 times in the spike), and every path exits 0.
+fail-closed: every exit path prints one JSON decision and **waits for it to reach the pipe**
+before exiting (empty stdout would be an allow in agy, and a half-written line is the same
+failure - unparseable JSON is not a denial; a long deny reason does not fit the 64 KiB pipe
+buffer, so the exit leaves from the write's own callback with a bounded fallback), every
+denial carries the "Do not retry this call." wording (without it the model retried 5 times
+in the spike), and every path exits 0. Both streams the hook reads - its stdin payload and
+the bridge's answer - are capped at 1 MiB, past which it denies: it is the security boundary,
+so it must not be the one reader that buffers whatever it is handed.
+
+The bridge reads one JSON line per connection and caps it at 64 KiB
+(`BRIDGE_MAX_REQUEST_BYTES`): past that the connection is logged and destroyed **before** the
+token is compared, so an unauthenticated peer cannot make the server hold an unbounded buffer. A
+request whose `conversationId` is missing or empty is refused the same way - it cannot be matched
+to a session, and guessing one is how a call gets attributed to the wrong turn.
 
 Stale bridge dirs (a crashed run) are cleaned at startup: a dir is removed when it is
 over an hour old **and its socket no longer answers** - a live session's dir is never
@@ -211,7 +222,10 @@ The process model, from the spike (agy 1.4.2):
 - stdout is newline-delimited JSON events (split on `"\n"` only, never readline);
 - `result.usage`, `num_turns` and `duration_seconds` are cumulative per process and per resumed
   conversation - the driver emits per-turn deltas and keeps the raw cumulative state under
-  `result.cumulative` for the next process of a `--conversation` resume;
+  `result.cumulative` for the next process of a `--conversation` resume. Every delta is clamped at
+  zero: a counter that goes backwards (agy restarting its own count mid-conversation, a field that
+  stops being cumulative) would otherwise bill a negative turn. The delta carries `clamped: true`
+  when that happens and the driver logs it, so a wrong total is visible rather than silent;
 - SIGINT cancels the running turn (agy reports `error: "interrupted"` and kills its own tool
   children); closing stdin does **not** stop a running turn, so `dispose()` escalates:
   close stdin, `graceMs`, SIGTERM the process group, `termMs`, SIGKILL - nothing outlives it;
@@ -278,3 +292,19 @@ Closing stdin is the hang-up: the server disposes its sessions and their childre
 The package is wired into the repo's quality gates: `npm run qa` typechecks, lints and formats it,
 `scripts/check-quality.mjs` applies its invariants to `agy-acp/src/`, and `bash test/run.sh agy-acp`
 runs the unit tests under `agy-acp/test/`.
+
+`agy-acp/src/` is the strictest tree in the repo, because a code quality review of it
+(`docs/agy-acp-code-quality-review.md`) found 14 findings that every gate passed:
+
+- `tsconfig.json` adds `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` (plus four flags
+  that were already satisfied). `agy-acp/test/**` is exempt from the first by a measured decision -
+  128 errors, all in fixtures - so a test that indexes production data will not be caught by it;
+- four biome rules (`noShadow`, `noReturnAssign`, `noMultiAssign`, `useBlockStatements`) are errors
+  here and warnings everywhere else: this is the one tree where they measure zero;
+- four invariants in `scripts/check-quality.mjs` exist for this package - `stdoutExitDrain`,
+  `envAccessLocation`, `inboundBufferCap` and `settleOwnership`. Each has a fixture in
+  `test/quality-gate-fixtures.sh` that proves it still bites;
+- commits are gated before they exist: `.githooks/pre-commit` runs `npm run qa:static` on a checkout
+  of the staged tree (what the commit will contain, not what is on disk) and
+  `.githooks/commit-msg` stamps a `Quality-Gate` trailer, which CI's `commit-hygiene` job requires.
+  `npm run hooks:install` (automatic on `npm install`) is what turns that on.

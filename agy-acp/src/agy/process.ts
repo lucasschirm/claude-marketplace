@@ -1,10 +1,11 @@
 import { EventEmitter } from "node:events";
 import { spawnProcessGroup } from "../lib/child-process.ts";
 import { DEFAULT_MAX_FRAME_BYTES, FrameDecoder } from "../framing.ts";
-import { AGY_PROBE_EVENT, agyArgs } from "./args.ts";
+import { AGY_PROBE_EVENT, agyArgs, resolveArgv } from "./args.ts";
 import type { AgyProcessOptions } from "./args.ts";
 import type { AgyExitInfo, AgyResultEventDelta } from "./events.ts";
 import { initialStateOf, type AgyCumulative, cumulativeOf, parseAgyLine, resultDeltas } from "./contract.ts";
+import { trimToByteBudget } from "../byte-budget.ts";
 
 const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 const DEFAULT_STDERR_BYTES = 64 * 1024;
@@ -47,10 +48,10 @@ export class AgyProcess extends EventEmitter {
 		this.graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
 		this.termMs = options.termMs ?? DEFAULT_TERM_MS;
 		this.cumulativeState = initialStateOf(options.previous);
-		const argv = [...(options.argvPrefix ?? [options.command ?? "agy"]), ...agyArgs(options)];
+		const [command, ...prefixArgs] = resolveArgv(options);
 		this.child = spawnProcessGroup({
-			command: argv[0],
-			args: argv.slice(1),
+			command,
+			args: [...prefixArgs, ...agyArgs(options)],
 			cwd: options.cwd,
 			// ENOENT reports through "close" with code null - one terminal event either way.
 			env: options.env ?? process.env,
@@ -66,7 +67,9 @@ export class AgyProcess extends EventEmitter {
 			},
 		);
 		const { stdout, stderr, stdin } = this.child;
-		if (!stdout || !stderr || !stdin) throw new Error("agy's stdio is not piped - cannot drive it");
+		if (!stdout || !stderr || !stdin) {
+			throw new Error("agy's stdio is not piped - cannot drive it");
+		}
 		stdout.on("data", (d: Buffer) => this.decoder.push(d));
 		stderr.on("data", (d: Buffer) => this.appendStderr(this.stderrDecoder.decode(d, { stream: true })));
 		for (const stream of [stdout, stderr, stdin]) {
@@ -108,22 +111,38 @@ export class AgyProcess extends EventEmitter {
 
 	/** One raw line to agy's stdin; nothing is validated (tests exercise the fatal path this way). */
 	sendRaw(line: string): void {
-		if (this.exitedFlag) throw new Error("agy has exited; its stdin is closed");
+		if (this.exitedFlag) {
+			throw new Error("agy has exited; its stdin is closed");
+		}
 		const stdin = this.child.stdin;
-		if (!stdin) throw new Error("agy's stdin is not a pipe");
-		if (!stdin.write(`${line}\n`)) this.log("stdin backpressure - continuing (stream lines are small)");
+		if (!stdin) {
+			throw new Error("agy's stdin is not a pipe");
+		}
+		if (!stdin.write(`${line}\n`)) {
+			this.log("stdin backpressure - continuing (stream lines are small)");
+		}
 	}
 
 	/** Resolves with the init conversation_id via a probe event agy ignores; a timeout carries the stderr tail and allows a retry. */
 	probe(timeoutMs?: number): Promise<string> {
-		if (this.conversationIdValue !== null) return Promise.resolve(this.conversationIdValue);
-		if (this.exitedFlag) return Promise.reject(new Error(`agy has exited (code=${this.exitInfoValue?.code ?? "unknown"}); cannot probe`));
-		if (this.probePromise) return this.probePromise;
+		if (this.conversationIdValue !== null) {
+			return Promise.resolve(this.conversationIdValue);
+		}
+		if (this.exitedFlag) {
+			return Promise.reject(new Error(`agy has exited (code=${this.exitInfoValue?.code ?? "unknown"}); cannot probe`));
+		}
+		if (this.probePromise) {
+			return this.probePromise;
+		}
 		this.sendRaw(`{"event":"${AGY_PROBE_EVENT}"}`);
 		const ms = timeoutMs ?? this.probeTimeoutMs;
 		const promise = new Promise<string>((resolve, reject) => {
 			const timer = setTimeout(() => {
-				if (this.pendingProbe?.timer === timer) this.pendingProbe = this.probePromise = null; // a timeout allows a retry
+				if (this.pendingProbe?.timer === timer) {
+					// a timeout allows a retry
+					this.pendingProbe = null;
+					this.probePromise = null;
+				}
 				reject(new Error(`agy did not send init within ${ms} ms; stderr tail: ${this.stderrTail}`));
 			}, ms);
 			timer.unref();
@@ -135,18 +154,21 @@ export class AgyProcess extends EventEmitter {
 
 	interrupt(): void {
 		const pid = this.child.pid;
-		if (pid !== undefined)
+		if (pid !== undefined) {
 			try {
 				process.kill(pid, "SIGINT");
 			} catch (err) {
 				// ESRCH: already gone - nothing to cancel.
 				this.log(`interrupt failed: ${(err as Error).message}`);
 			}
+		}
 	}
 
 	/** Shuts the child down: close stdin, graceMs, SIGTERM, termMs, SIGKILL. Idempotent. */
 	dispose(): Promise<AgyExitInfo> {
-		if (this.disposePromise) return this.disposePromise;
+		if (this.disposePromise) {
+			return this.disposePromise;
+		}
 		this.disposePromise = new Promise<AgyExitInfo>((resolve) => {
 			const finish = () => resolve(this.exitInfoValue ?? { code: null, signal: null, stderrTail: this.stderrTail });
 			const afterKill = () => this.waitThen(1000, finish, finish);
@@ -160,13 +182,14 @@ export class AgyProcess extends EventEmitter {
 					finish,
 				);
 			const stdin = this.child.stdin;
-			if (stdin && !stdin.destroyed)
+			if (stdin && !stdin.destroyed) {
 				try {
 					stdin.end();
 				} catch (err) {
 					// A broken pipe at shutdown is not an error - the child is going away.
 					this.log(`closing stdin failed: ${(err as Error).message}`);
 				}
+			}
 			this.waitThen(
 				this.graceMs,
 				() => {
@@ -181,13 +204,14 @@ export class AgyProcess extends EventEmitter {
 
 	private signalGroup(signal: NodeJS.Signals): void {
 		const pid = this.child.pid;
-		if (pid !== undefined)
+		if (pid !== undefined) {
 			try {
 				process.kill(-pid, signal);
 			} catch (err) {
 				// ESRCH: the group is already gone.
 				this.log(`signalling process group ${-pid} failed: ${(err as Error).message}`);
 			}
+		}
 	}
 
 	private waitThen(ms: number, onTimeout: () => void, onExit: () => void): void {
@@ -195,22 +219,29 @@ export class AgyProcess extends EventEmitter {
 			setImmediate(onExit);
 			return;
 		}
+		// `settle` is declared before the two closures that call it - it is the one binding here that could be reached
+		// synchronously. Its own reads of `timer` and `onExitEvent` happen when it RUNS (a timeout, or an "exit" event),
+		// by which time both exist: neither `once` nor `setTimeout` can call back before this block ends.
 		let done = false;
-		const onExitEvent = () => settle(onExit);
-		this.once("exit", onExitEvent);
-		const timer = setTimeout(() => settle(onTimeout), ms);
-		timer.unref();
 		const settle = (fn: () => void) => {
-			if (done) return;
+			if (done) {
+				return;
+			}
 			done = true;
 			clearTimeout(timer);
 			this.off("exit", onExitEvent);
 			fn();
 		};
+		const onExitEvent = () => settle(onExit);
+		this.once("exit", onExitEvent);
+		const timer = setTimeout(() => settle(onTimeout), ms);
+		timer.unref();
 	}
 
 	private onExit(code: number | null, signal: NodeJS.Signals | null): void {
-		if (this.exitedFlag) return;
+		if (this.exitedFlag) {
+			return;
+		}
 		this.exitedFlag = true;
 		this.appendStderr(this.stderrDecoder.decode());
 		this.exitInfoValue = { code, signal, stderrTail: this.stderrTail };
@@ -223,7 +254,9 @@ export class AgyProcess extends EventEmitter {
 
 	private rejectPendingProbe(message: string): void {
 		const pending = this.pendingProbe;
-		if (!pending) return;
+		if (!pending) {
+			return;
+		}
 		this.pendingProbe = null;
 		// The drifted-init case: the child is still alive, so clear the cached promise for a retry.
 		this.probePromise = null;
@@ -244,12 +277,8 @@ export class AgyProcess extends EventEmitter {
 	}
 
 	private appendStderr(chunk: string): void {
-		this.stderrBuf += chunk;
-		// The budget is in bytes; trim one whole code point at a time so a multi-byte character never straddles the cut.
-		while (Buffer.byteLength(this.stderrBuf, "utf8") > this.stderrLimit && this.stderrBuf.length > 0) {
-			const cp = this.stderrBuf.codePointAt(0) ?? 0;
-			this.stderrBuf = this.stderrBuf.slice(cp > 0xffff ? 2 : 1);
-		}
+		// The budget is in bytes and the tail is what matters (the failure is at the end of what agy said).
+		this.stderrBuf = trimToByteBudget(this.stderrBuf + chunk, this.stderrLimit);
 	}
 
 	private handleLine(line: string): void {
@@ -282,6 +311,9 @@ export class AgyProcess extends EventEmitter {
 		// result: cumulative counters become per-turn deltas; the raw state is kept for a resume.
 		const cumulative = cumulativeOf(event.result);
 		const delta = resultDeltas(event.result, this.cumulativeState);
+		if (delta.clamped) {
+			this.log("agy's cumulative counters went backwards (a resume answered with a fresh conversation?) - deltas clamped at 0");
+		}
 		this.cumulativeState = cumulative;
 		this.emit("event", {
 			event: "result",

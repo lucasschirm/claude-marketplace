@@ -77,6 +77,7 @@ export class PermissionGate {
 	private readonly stream: StreamCalls;
 	private readonly asks: PendingAsks;
 	private disposedFlag = false;
+	private resolvedRoots: string[] | null = null;
 	private cancelledAtTurn = -1; // the prompt count when a session/cancel ran; -1 = never
 
 	constructor(opts: PermissionGateOptions) {
@@ -112,18 +113,30 @@ export class PermissionGate {
 		await this.bridge.start();
 	}
 
-	/** The resolved (realpath) workspace roots: the session cwd, resolved. */
-	private workspaceRoots(): string[] {
-		try {
-			return [fs.realpathSync(this.opts.cwd)];
-		} catch {
-			return [this.opts.cwd];
+	/**
+	 * The resolved (realpath) workspace roots: the session cwd, resolved once. A session's cwd is fixed at session/new so
+	 * this cannot go stale, and it used to be a synchronous realpathSync on the path every hook request takes - inside the
+	 * async handler that answers agy while a tool call waits.
+	 */
+	get workspaceRoots(): string[] {
+		if (this.resolvedRoots === null) {
+			try {
+				this.resolvedRoots = [fs.realpathSync(this.opts.cwd)];
+			} catch {
+				// An unresolvable cwd is reported by session/new; the policy falls back to the raw path.
+				this.resolvedRoots = [this.opts.cwd];
+			}
 		}
+		return this.resolvedRoots;
 	}
 
 	setMode(modeId: string): void {
-		if (!AGY_ACP_MODE_IDS.includes(modeId)) throw new Error(`unknown mode: ${modeId}`);
-		if (this.mode !== modeId) this.opts.log(`permission mode: ${this.mode} -> ${modeId}`);
+		if (!AGY_ACP_MODE_IDS.includes(modeId)) {
+			throw new Error(`unknown mode: ${modeId}`);
+		}
+		if (this.mode !== modeId) {
+			this.opts.log(`permission mode: ${this.mode} -> ${modeId}`);
+		}
 		this.mode = modeId;
 	}
 
@@ -133,7 +146,9 @@ export class PermissionGate {
 		stepIdx: number;
 		toolCall: { name: string; args: Record<string, unknown> };
 	}): Promise<BridgeReply> {
-		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() };
+		if (this.disposedFlag) {
+			return { decision: "deny", reason: sessionEndedReason() };
+		}
 		// No turn, no answer to give: the client cancelled it (its prompt is `cancelled` already), or
 		// agy exited mid-turn while a hook process of its own was still alive. Either way asking would
 		// put a dialog on screen that nothing can close, so the hook is refused with the reason instead.
@@ -148,7 +163,7 @@ export class PermissionGate {
 			return { decision: "deny", reason: sessionEndedReason() };
 		}
 		const { name, args } = req.toolCall;
-		const roots = this.workspaceRoots();
+		const roots = this.workspaceRoots;
 		const policy = decidePolicy({
 			mode: this.mode,
 			toolName: name,
@@ -177,7 +192,9 @@ export class PermissionGate {
 		// is conversation-guarded - our stream records describe main-conversation steps only.
 		this.stream.report(req, true); // in_progress update: the hook's args + the pending metadata
 		const outcome = await this.askClient(req.stepIdx, name, args, req.conversationId);
-		if (this.disposedFlag) return { decision: "deny", reason: sessionEndedReason() }; // a disposed session is not a user reject
+		if (this.disposedFlag) {
+			return { decision: "deny", reason: sessionEndedReason() }; // a disposed session is not a user reject
+		}
 		switch (outcome) {
 			case "allow":
 				return { decision: "allow" };
@@ -199,7 +216,9 @@ export class PermissionGate {
 	/** The client's answer for one call; aborted pending asks resolve as the reason they were aborted. */
 	private askClient(stepIdx: number, name: string, args: Record<string, unknown>, conversationId: string): Promise<AskOutcome> {
 		let resolveAbort: (kind: AskAbort) => void = () => {};
-		const abortP = new Promise<AskAbort>((r) => (resolveAbort = r));
+		const abortP = new Promise<AskAbort>((r) => {
+			resolveAbort = r;
+		});
 		const ask: PendingAsk = { abort: (kind) => resolveAbort(kind), conversationId, stepIdx };
 		this.asks.set(ask);
 		const clientP = this.opts
@@ -257,13 +276,17 @@ export class PermissionGate {
 	abortPending(why: string, kind: AskAbort = "ended"): void {
 		// Remembering *which* turn was cancelled is what makes the next hook's reason the cancel's own
 		// words rather than a generic "session ended" - and only for as long as no turn has run since.
-		if (kind === "cancelled") this.cancelledAtTurn = this.opts.turnCount();
+		if (kind === "cancelled") {
+			this.cancelledAtTurn = this.opts.turnCount();
+		}
 		this.asks.denyAll(why, kind);
 	}
 
 	/** Deny pendings and remove the bridge dir and socket. Idempotent. */
 	async dispose(): Promise<void> {
-		if (this.disposedFlag) return;
+		if (this.disposedFlag) {
+			return;
+		}
 		this.disposedFlag = true;
 		this.abortPending("the session was disposed");
 		await this.bridge.stop();

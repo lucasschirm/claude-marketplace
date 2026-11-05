@@ -17,7 +17,7 @@ import {
 	newPermissionToken,
 	PermissionGate,
 } from "./permission-gate.ts";
-import { runTurn, failActiveTools, settleCancelled, settleTurn, type PendingTurn } from "./turn.ts";
+import { runTurn, failActiveTools, settleCancelled, settleOnce, settleTurn, type PendingTurn } from "./turn.ts";
 import { mapStepToUpdates } from "./map-steps.ts";
 import { spawnSessionAgy } from "./spawn-agy.ts";
 import { TurnHeartbeat } from "./heartbeat.ts";
@@ -116,7 +116,7 @@ export class AgySession {
 		try {
 			await this.gate.start();
 		} catch (err) {
-			throw new RpcError(INTERNAL_ERROR, `the permission bridge could not start: ${(err as Error).message}`);
+			throw new RpcError(INTERNAL_ERROR, `the permission bridge could not start: ${(err as Error).message}`, { cause: err });
 		}
 		const driver = this.spawnDriver(false);
 		this.driver = driver;
@@ -130,15 +130,22 @@ export class AgySession {
 			await this.gate.dispose();
 			await driver.dispose();
 			this.driver = null;
-			throw new RpcError(INTERNAL_ERROR, `could not start agy: ${(err as Error).message}`, { stderrTail: driver.stderrTail });
+			throw new RpcError(INTERNAL_ERROR, `could not start agy: ${(err as Error).message}`, {
+				cause: err,
+				data: { stderrTail: driver.stderrTail },
+			});
 		}
 	}
 
 	/** One prompt; the caller must already know the session exists (the registry checks). */
 	prompt(blocks: unknown): Promise<AcpPromptResult> {
-		if (this.disposed) throw new RpcError(INTERNAL_ERROR, "session is closed");
+		if (this.disposed) {
+			throw new RpcError(INTERNAL_ERROR, "session is closed");
+		}
 		const text = flattenPrompt(blocks);
-		if (this.turn) throw new RpcError(TURN_IN_PROGRESS, "turn in progress");
+		if (this.turn) {
+			throw new RpcError(TURN_IN_PROGRESS, "turn in progress");
+		}
 		// The beat starts before the child is chosen: a respawn is silence a watchdog must read as waiting.
 		this.turnCountValue++; // the gate scopes a cancel to this turn number
 		this.heartbeat.start(this.config.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
@@ -157,7 +164,9 @@ export class AgySession {
 	 * answered too, and that turn never starts.
 	 */
 	cancel(): void {
-		if (this.disposed) return;
+		if (this.disposed) {
+			return;
+		}
 		const driver = this.driver;
 		if (!this.turn) {
 			// Idle between turns: a SIGINT would only kill a healthy child and buy a resume. Nothing is hung.
@@ -184,19 +193,21 @@ export class AgySession {
 
 	/** Kills the child (if any) and settles any pending turn `cancelled`; idempotent. */
 	async dispose(): Promise<void> {
-		if (this.disposed) return;
+		if (this.disposed) {
+			return;
+		}
 		this.disposed = true;
 		const driver = this.driver;
 		this.driver = null;
 		this.live = false;
 		this.heartbeat.stop();
-		const pending = this.pending;
-		if (pending && !pending.settled) {
-			// An interruption we caused is a cancellation, not an error (the session/cancel rule); stdin
-			// EOF is a half-close, so the client may still be reading what we already settled.
-			settleCancelled(this, "the session was disposed");
+		// An interruption we caused is a cancellation, not an error (the session/cancel rule); stdin EOF is
+		// a half-close, so the client may still be reading what we already settled. A turn that ended on
+		// its own settles nothing here - settleCancelled says so by returning false.
+		settleCancelled(this, "the session was disposed");
+		if (driver) {
+			await driver.dispose();
 		}
-		if (driver) await driver.dispose();
 		await this.gate.dispose(); // denies any pending permission request and removes the bridge dir
 	}
 
@@ -208,7 +219,9 @@ export class AgySession {
 		// exec. A stale child is therefore handled exactly like a dead one: relaunch, with --conversation
 		// so the conversation survives and with the flags we hold now.
 		const stale = current !== null && this.launchedKey !== this.choice.relaunchKey();
-		if (current && this.live && !this.needsRespawn && !stale) return current;
+		if (current && this.live && !this.needsRespawn && !stale) {
+			return current;
+		}
 		// A session with a conversation id always resumes it, whatever made the child go away - including
 		// a respawn that itself failed. Deriving this from the needsRespawn/stale flags instead loses the
 		// stickiness exactly then: neither flag survives the attempt, so the retry would launch a *new*
@@ -243,7 +256,8 @@ export class AgySession {
 			this.driver = null;
 			await driver.dispose();
 			throw new RpcError(INTERNAL_ERROR, `agy failed to ${resume ? "resume" : "start"}: ${(err as Error).message}`, {
-				stderrTail: driver.stderrTail,
+				cause: err,
+				data: { stderrTail: driver.stderrTail },
 			});
 		}
 	}
@@ -273,8 +287,9 @@ export class AgySession {
 		if (e.event === "init") {
 			this.choice.setReportedModel(e.init.model);
 			// First start: this.id is still empty (the probe sets it); a mismatch can only exist on a respawned driver - the one to log.
-			if (this.id !== "" && e.conversation_id !== this.id)
+			if (this.id !== "" && e.conversation_id !== this.id) {
 				this.config.log(`session ${this.id}: init id ${e.conversation_id} differs from ${this.id}`);
+			}
 			return;
 		}
 		if (e.event === "step_update") {
@@ -296,7 +311,9 @@ export class AgySession {
 	}
 
 	private onExit(driver: AgyProcess, info: AgyExitInfo): void {
-		if (driver !== this.driver) return; // a superseded child after a respawn
+		if (driver !== this.driver) {
+			return; // a superseded child after a respawn
+		}
 		if (!this.disposed) {
 			this.live = false;
 			this.needsRespawnValue = true;
@@ -308,15 +325,14 @@ export class AgySession {
 		}
 		// A cancel settled the turn when it was asked, so a cancelled child exiting is the expected
 		// ending here and reaches nothing below.
-		const pending = this.pending;
-		if (pending && !pending.settled) {
+		settleOnce(this, (pending) => {
 			// A child that dies on its own mid-turn: fail its still-active tools, then error the prompt.
 			failActiveTools(this, "the agy process exited before the turn finished");
 			const why = `exit code=${info.code ?? "none"} signal=${info.signal ?? "none"}`;
-			pending.settled = true;
-			this.pending = null;
-			pending.reject(new RpcError(INTERNAL_ERROR, `agy exited without a result (${why})`, { agyError: why, stderrTail: info.stderrTail }));
-		}
+			pending.reject(
+				new RpcError(INTERNAL_ERROR, `agy exited without a result (${why})`, { data: { agyError: why, stderrTail: info.stderrTail } }),
+			);
+		});
 	}
 
 	/** The session/update emitter (public: turn.ts settles turns through the session). */

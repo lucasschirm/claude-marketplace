@@ -37,14 +37,20 @@ export class FrameDecoder {
 	}
 
 	push(chunk: Buffer): void {
-		if (this.overflowed) return;
+		if (this.overflowed) {
+			return;
+		}
 		this.pending = this.pending.length === 0 ? chunk : Buffer.concat([this.pending, chunk]);
 		for (;;) {
 			const at = this.pending.indexOf(NEWLINE);
-			if (at < 0) break;
+			if (at < 0) {
+				break;
+			}
 			const frame = this.pending.subarray(0, at);
 			this.pending = this.pending.subarray(at + 1);
-			if (!this.emit(frame)) return;
+			if (!this.emit(frame)) {
+				return;
+			}
 		}
 		if (this.pending.length > this.maxFrameBytes) {
 			this.overflowed = true;
@@ -66,7 +72,9 @@ export class FrameDecoder {
 			this.onOverflow(bytes.length);
 			return false;
 		}
-		if (bytes.length === 0) return true;
+		if (bytes.length === 0) {
+			return true;
+		}
 		let line: string;
 		try {
 			line = utf8.decode(bytes);
