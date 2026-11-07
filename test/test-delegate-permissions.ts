@@ -1,17 +1,21 @@
-// Run with: node --test test/test-devin-permissions.ts
+// Run with: node --test test/test-delegate-permissions.ts
 import { test } from "node:test";
-import * as assert from "node:assert";
+import assert from "node:assert";
 import {
-	MODE_NAMES,
+	CANONICAL_MODES,
 	optionValues,
 	parsePermissionRequest,
 	permissionOutcome,
 	pickPermissionOption,
 	quoteCommand,
-	resolveAcpMode,
-} from "../extensions/lib/devin-permissions.ts";
-import { SessionSlots } from "../extensions/lib/devin-slots.ts";
-import { must } from "./helpers/must.ts";
+} from "../extensions/lib/delegate/permissions.ts";
+import { devinDriver } from "../extensions/lib/delegate/drivers/devin.ts";
+import { claudeDriver, pickClaudePermissionOption } from "../extensions/lib/delegate/drivers/claude.ts";
+
+// Each driver resolves the canonical mode names into its own wire vocabulary, so the same test body
+// runs against both and a table that is wrong for one of them fails here instead of in a live session.
+const resolveAcpMode = devinDriver.resolveMode.bind(devinDriver);
+const asAcp = (r: ReturnType<typeof resolveAcpMode>) => (r.ok ? { ok: true, acpMode: r.modeId } : r);
 
 // The session/request_permission params real devin acp sent in the 2026-10-22 incident.
 const REAL_REQUEST = {
@@ -33,17 +37,21 @@ const REAL_REQUEST = {
 // --- resolveAcpMode ---
 
 test("resolveAcpMode maps the tool aliases to ACP mode ids", () => {
-	assert.deepStrictEqual(resolveAcpMode("dangerous"), { ok: true, acpMode: "bypass" });
-	assert.deepStrictEqual(resolveAcpMode("auto"), { ok: true, acpMode: "smart" });
-	assert.deepStrictEqual(resolveAcpMode(" Accept-Edits "), { ok: true, acpMode: "accept-edits" });
-	for (const m of ["bypass", "smart", "plan", "ask"]) assert.deepStrictEqual(resolveAcpMode(m), { ok: true, acpMode: m });
+	assert.deepStrictEqual(asAcp(resolveAcpMode("dangerous")), { ok: true, acpMode: "bypass" });
+	assert.deepStrictEqual(asAcp(resolveAcpMode("auto")), { ok: true, acpMode: "smart" });
+	assert.deepStrictEqual(asAcp(resolveAcpMode(" Accept-Edits ")), { ok: true, acpMode: "accept-edits" });
+	for (const m of ["bypass", "smart", "plan", "ask"]) {
+		assert.deepStrictEqual(asAcp(resolveAcpMode(m)), { ok: true, acpMode: m });
+	}
 });
 
 test("resolveAcpMode refuses a mode Devin would silently ignore, listing the valid ones", () => {
 	const r = resolveAcpMode("yolo");
 	assert.strictEqual(r.ok, false);
 	if (!r.ok) {
-		for (const m of MODE_NAMES) assert.ok(r.error.includes(m), `error lists ${m}`);
+		for (const m of CANONICAL_MODES) {
+			assert.ok(r.error.includes(m), `error lists ${m}`);
+		}
 	}
 	assert.strictEqual(resolveAcpMode("").ok, false);
 });
@@ -118,44 +126,56 @@ test("quoteCommand caps long commands and says how much was cut", () => {
 	assert.strictEqual(quoteCommand("git status"), '"git status"');
 });
 
-// --- SessionSlots ---
+// --- the same canonical modes on Claude's vocabulary ---
 
-test("SessionSlots counts reserved starts before their session registers", () => {
-	let active = 0;
-	const slots = new SessionSlots(
-		() => active,
-		() => 2,
-	);
-	const a = slots.tryReserve();
-	const b = slots.tryReserve();
-	assert.ok(a && b, "two slots under a limit of 2");
-	assert.strictEqual(slots.tryReserve(), null, "a third start must wait although nothing has registered yet");
-	assert.strictEqual(slots.inFlight(), 2);
-
-	// The session registers, then its reservation is released: still 2 in flight.
-	active = 1;
-	a();
-	assert.strictEqual(slots.inFlight(), 2);
-	assert.strictEqual(slots.tryReserve(), null);
-
-	// A failed start releases its slot.
-	b();
-	assert.strictEqual(slots.inFlight(), 1);
-	assert.ok(slots.tryReserve(), "the freed slot can be taken");
+test("Claude resolves the canonical modes to its camelCase wire ids", () => {
+	const resolve = claudeDriver.resolveMode.bind(claudeDriver);
+	assert.deepStrictEqual(asAcp(resolve("dangerous")), { ok: true, acpMode: "bypassPermissions" });
+	assert.deepStrictEqual(asAcp(resolve("smart")), { ok: true, acpMode: "auto" });
+	assert.deepStrictEqual(asAcp(resolve("auto")), { ok: true, acpMode: "auto" });
+	assert.deepStrictEqual(asAcp(resolve("accept-edits")), { ok: true, acpMode: "acceptEdits" });
+	assert.deepStrictEqual(asAcp(resolve("plan")), { ok: true, acpMode: "plan" });
+	assert.deepStrictEqual(asAcp(resolve("ask")), { ok: true, acpMode: "default" });
+	// The wire id itself is accepted too: an agent's own name for a mode is not a mistake.
+	assert.deepStrictEqual(asAcp(resolve("bypassPermissions")), { ok: true, acpMode: "bypassPermissions" });
+	const bad = resolve("yolo");
+	assert.strictEqual(bad.ok, false);
 });
 
-test("SessionSlots release is idempotent and follows a changed limit", () => {
-	let limit = 1;
-	const slots = new SessionSlots(
-		() => 0,
-		() => limit,
-	);
-	const r = must(slots.tryReserve(), "a reserved slot");
-	r();
-	r();
-	assert.strictEqual(slots.inFlight(), 0, "a double release must not free a slot it does not hold");
-	slots.tryReserve();
-	assert.strictEqual(slots.tryReserve(), null);
-	limit = 3;
-	assert.ok(slots.tryReserve(), "raising the limit admits more");
+test("Claude's permission policy never chooses a durable widening", () => {
+	const options = [
+		{ optionId: "allow_once", name: "Allow", kind: "allow_once" },
+		{ optionId: "allow_always", name: "Always", kind: "allow_always" },
+		{ optionId: "reject_once", name: "Reject", kind: "reject_once" },
+		{ optionId: "reject_always", name: "Always reject", kind: "reject_always" },
+	];
+	assert.strictEqual(pickClaudePermissionOption(options, "allow"), "allow_once");
+	// allow_session has no honest target here: it must land on one approval, not on `allow_always`.
+	assert.strictEqual(pickClaudePermissionOption(options, "allow_session"), "allow_once");
+	assert.strictEqual(pickClaudePermissionOption(options, "reject"), "reject_once");
+	assert.strictEqual(claudeDriver.permission().degradesAllowSession, true);
+	// Devin, by contrast, has a real session-scoped option and must use it.
+	assert.strictEqual(devinDriver.permission().degradesAllowSession, false);
+});
+
+test("Claude's driver declares the capability differences that the engine depends on", () => {
+	const claude = claudeDriver.capabilities();
+	const devin = devinDriver.capabilities();
+	assert.strictEqual(claude.thinking, true, "Claude takes effort in band");
+	assert.strictEqual(devin.thinking, false, "Devin's effort is part of its model id");
+	assert.strictEqual(claude.blocksOwnCli, false, "blocking `claude` would block the operator's own CLI");
+	assert.strictEqual(devin.blocksOwnCli, true);
+	assert.strictEqual(devin.cli, "devin");
+});
+
+test("the launch plans carry the differences between the two agents", () => {
+	const devinPlan = devinDriver.launchPlan({ model: "swe-2-max", mode: "dangerous" }, "/tmp");
+	assert.deepStrictEqual(devinPlan.args, ["acp", "--model", "swe-2-max"]);
+	// DEVIN_MODEL must be set: the CLI reads it, and an inherited value of it outranks the flag.
+	assert.strictEqual(devinPlan.env?.DEVIN_MODEL, "swe-2-max");
+
+	const claudePlan = claudeDriver.launchPlan({ model: "sonnet", mode: "dangerous" }, "/tmp");
+	// The adapter has no model flag; the model is a session config option.
+	assert.deepStrictEqual(claudePlan.args, []);
+	assert.strictEqual(claudePlan.env?.CLAUDE_AGENT_ACP_PROTOCOL, "v1");
 });

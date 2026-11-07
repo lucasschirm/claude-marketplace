@@ -281,7 +281,7 @@
 			// test-devin-permissions.ts is the same case from the other side: it asserts that quoted
 			// Devin-supplied text carries no raw escape, bidi override or line break, so the control
 			// characters are the subject of the test.
-			"includes": ["extensions/lib/devin-diagnostics.ts", "test/test-devin-permissions.ts"],
+			"includes": ["extensions/lib/delegate/diagnostics.ts", "test/test-delegate-permissions.ts", "test/test-delegate-diagnostics.ts"],
 			"linter": {
 				"rules": {
 					"suspicious": {

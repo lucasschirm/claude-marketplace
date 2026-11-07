@@ -1,6 +1,6 @@
 /**
  * Shared non-blocking execution plumbing for this package's Pi extensions
- * (observe-pr, pr-tasks, orca-orchestration, devin-delegate).
+ * (observe-pr, pr-tasks, orca-orchestration, delegate-task).
  *
  * Pi *awaits* extension lifecycle handlers, so work awaited inside them delays the
  * host, not just the extension (verified in @earendil-works/pi-coding-agent):

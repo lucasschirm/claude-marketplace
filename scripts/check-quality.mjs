@@ -881,8 +881,9 @@ function checkWiredTests() {
 		.filter((f) => fs.existsSync(f))
 		.map((f) => fs.readFileSync(f, "utf-8"))
 		.join("\n");
-	// Named in run.sh's header: these start real Devin sessions, so they are run deliberately.
-	const deliberate = new Set(["test/test-devin-delegate.ts", "test/test-devin-delegate-lifecycle.ts"]);
+	// Named in run.sh's header: these start real delegated-agent sessions (they spend someone's model
+	// quota and depend on a logged-in CLI), so they are run deliberately and never in CI.
+	const deliberate = new Set(["test/test-delegate-live.ts", "test/test-delegate-live-lifecycle.ts"]);
 	const dirs = [
 		{ dir: testDir, prefix: "test" },
 		{ dir: path.join(ROOT, "agy-acp", "test"), prefix: "agy-acp/test" },
