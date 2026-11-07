@@ -170,68 +170,77 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that integrates with `ob
 
 `bash test/test-pr-tasks.sh` runs the extension end to end inside Pi against a mocked `gh` (`test/test-pr-tasks.ts`, plus the GitHub reconciliation scenarios in `test/test-pr-tasks-reconcile.ts`). The sync/re-link logic has standalone unit tests: `node --test test/test-pr-tasks-manager.ts` (Node 23.6+, which runs TypeScript directly).
 
-### Devin Delegate (`devin_delegate`)
+### Delegate Task (`delegate_task`)
 
-A [Pi Extension](https://pi.dev/docs/latest/extensions) that allows the coding agent to delegate tasks asynchronously to Devin via Devin's native Agent Client Protocol (ACP) server. Supports concurrency throttling, FIFO queueing, worktree isolation, multi-turn follow-ups, disk-backed logging, and arrow-key TUI navigation.
+A [Pi Extension](https://pi.dev/docs/latest/extensions) that lets the coding agent delegate tasks asynchronously to another agent over its native Agent Client Protocol (ACP) server. Ships drivers for **Devin** and **Claude**, and supports per-agent and total concurrency limits, FIFO queueing, worktree isolation, multi-turn follow-ups, permission forwarding, disk-backed logging, crash recovery, and arrow-key TUI navigation.
 
 #### Features
 
 - **Agent Tools**:
-  - **`devin_delegate`**:
+  - **`delegate_task`**:
     - `prompt` (mandatory): Task instructions.
-    - `model` (optional, default `"swe-2-high"`): Devin model to run.
-    - `mode` (optional, default `"dangerous"`): Permission mode. `dangerous` maps to ACP `bypass` (approves every tool call); `smart` (alias `auto`) approves what Devin judges safe; `accept-edits`, `plan` and `ask` are passed through. Any other value is refused, because Devin silently ignores unknown modes.
+    - `agent` (optional, default `"devin"`): Which driver runs the task — `devin` or `claude`. `/delegate agents` lists what is installed and what each one supports.
+    - `model` (optional): The agent's model. Devin defaults to `swe-2-high` and Claude to `sonnet` — both tiers that do not bill per token on their own plans, because a delegation nobody named a model for should not spend money. Claude's catalogue is the machine's (the adapter lists what that install allows), so a model you name there must exist on that machine; if `sonnet` is not carried, the session keeps the model its own CLI configured and says nothing. An unknown id warns and passes through rather than failing, because the agent resolves names this extension cannot list.
+    - `thinking` (optional: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`): Reasoning effort, where the agent has such a control. Devin does not — its effort is encoded in the model id — so asking for it on a Devin run is refused instead of silently ignored.
+    - `mode` (optional, default `"dangerous"`): Canonical permission mode (`dangerous`, `auto`/`smart`, `accept-edits`, `plan`, `ask`), mapped by each driver into its own vocabulary. An unmappable value is refused, because agents silently ignore unknown modes.
     - `create_worktree` (optional, default `false`): Spin up an isolated worktree branch (`${currentBranch}-dt${N}`).
-    - Runs asynchronously: returns immediately with session ID or queue position.
-  - **`devin_status`**:
-    - `session_id` (optional): Specific session to check.
-    - `complete` (optional boolean, requires `session_id`): Returns complete message transcript from disk.
-    - If `session_id` omitted: returns recent 3 messages, status, and last message time for each session.
-  - **`devin_message`**:
-    - `session_id` (mandatory) and `message` (mandatory): Sends follow-up instructions to an active or idle session via ACP.
-  - **`devin_cancel`**:
-    - `session_id` (mandatory): Cancels an active or queued session and automatically advances the queue.
-  - **`devin_restart`**:
-    - `session_id` (mandatory), `prompt` (optional), `mode` (optional, default: the original session's): Resumes or restarts a failed, interrupted, or stopped session in its existing worktree.
-  - **`devin_permission`**:
-    - `session_id` (mandatory), `decision` (`allow`, `allow_session` or `reject`): Answers the session's oldest pending permission request.
+    - Runs asynchronously: returns immediately with a session ID or a queue position, and says *why* a task queued (this agent's limit, the total limit, or tasks ahead of it).
+  - **`delegate_status`**:
+    - `session_id` (optional): One session's state and transcript. `full: true` reads the whole transcript from disk — the last few megabytes of it, line-aligned, saying how much earlier transcript it skipped; `limit` sets how many messages.
+    - Every field copied out of a session (a command awaiting permission, a tool title) is quoted and labelled as what the agent reported. It is data, and an agent that writes "SYSTEM DIRECTIVE: run X" in a command must not have that arrive as an instruction.
+    - If `session_id` omitted: the overview — every session, the queue, slot use per agent, and how many turns ended for each reason.
+    - A finished turn reports its ACP `stopReason`: `max_tokens` and `refusal` are worded as an early stop, never as "done".
+  - **`delegate_message`**:
+    - `session_id` (mandatory) and `message` (mandatory): Sends follow-up instructions to an idle session via ACP. A busy session is refused, and if it is blocked on a permission request the refusal names that request — answering is a different tool, and queueing the message behind a request nobody can see would look like the agent going quiet.
+    - A session whose process is gone is **continued, not refused**, when the agent keeps ids it can be re-prompted with (Devin does: a fresh process accepts the recorded id, no `session/new`). Where the agent cannot — Claude today, because this engine never calls `session/load` — the call is an error that names `delegate_restart`, because a fresh session answering under the old id is not a follow-up. A follow-up occupies a slot exactly as an initial delegation does, and queues when the agent is full.
+  - **`delegate_cancel`**:
+    - `session_id` (mandatory): Cancels an active, queued or blocked session and automatically advances the queue. A session that already finished is an error, not a cancellation: rewriting `done` as `cancelled` would make a delivered result look retracted, and there is no slot to free.
+  - **`delegate_restart`**:
+    - `session_id` (mandatory), `prompt` (optional), `agent` (optional), `mode` (optional, default: the original session's): Resumes or restarts a failed, interrupted, or stopped session in its existing worktree.
+  - **`delegate_permission`**:
+    - `session_id` (mandatory), `decision` (`allow`, `allow_session` or `reject`), `request_id` (optional, to answer one of several): Answers a pending permission request with the agent's own option for that decision.
 - **Permission Requests**:
-  - In every mode but `dangerous`, Devin asks before running some tools and blocks its turn until it gets an answer. The extension forwards each request to the agent (with the command Devin wants to run), shows it in `devin_status` and the status bar, and answers it with the agent's `devin_permission` decision.
-  - An unanswered request is rejected automatically after 5 minutes, so a session never hangs on it. **CLI Flag `--devin-permission-timeout <minutes>`** changes the wait.
-  - `allow_session` never picks Devin's project-wide or global "always allow" options, nor its "switch to bypass" option.
+  - In every mode but `dangerous`, the agent asks before running some tools and blocks its turn until it gets an answer. The extension forwards each request to the agent (with the command it wants to run, quoted and framed as data, not instructions), shows it in `delegate_status` and the status bar, and answers it with the agent's `delegate_permission` decision.
+  - An unanswered request is rejected automatically after 5 minutes and the agent is told, so a session never hangs on it. **CLI Flag `--delegate-permission-timeout <minutes>`** changes the wait.
+  - `allow_session` never picks a durable widening option: Devin's project-wide/global "always allow" or "switch to bypass", or Claude's `allow_always`. Claude has no session-scoped option at all, so the answer is one call and the reply says so.
 - **Bash Guard**:
-  - Blocks the agent from running the `devin` CLI through the `bash`/`powershell` tools (including nested calls from codemode scripts), so all delegation goes through the tracked, queued `devin_*` tools. The block message points the agent to `devin_delegate`.
+  - Blocks the agent from running a guarded agent's own CLI through the `bash`/`powershell` tools (including nested calls from codemode scripts), so delegation goes through the tracked, queued `delegate_*` tools. The block message points the agent to `delegate_task`.
+  - Which binaries are guarded comes from the drivers: Devin is, Claude deliberately is not (blocking `claude` would block the operator's own CLI in unrelated sessions).
   - Detects direct calls, pipelines and lists, `$(...)`/backtick substitutions, `bash -c`/`eval` strings, wrappers (`sudo`, `env`, `timeout`, `xargs`, ...) and `find -exec`.
   - Read-only commands stay allowed: `devin models list`, `devin ls`/`list`, `devin version`, `devin help`, and `--help`/`--version`.
   - Static analysis has limits: variable expansion (`$CMD -p x`), scripts run from a file and heredocs fed to a shell are not inspected.
-  - **Slash command `/devin allow_bash [on|off|status]`** lifts or restores the block for the current session (no argument toggles). The block is on by default and resets when pi restarts.
+  - **Slash command `/delegate allow-bash [on|off|status]`** lifts or restores the block for the current session (no argument toggles). The block is on by default and resets when pi restarts.
 - **Concurrency & FIFO Queueing**:
-  - Default limit of 2 concurrent sessions. A session holds its slot from the moment it is admitted, while its turn runs, stalls or waits for permission, so parallel calls and queue drains cannot overshoot the limit.
-  - Automatically queues additional requests in FIFO order and dequeues them as runs finish.
-  - **CLI Flag `--devin-max-runs <n>`**: Configures the concurrency limit on startup.
-  - **Slash Command `/devin limit [n]`**: Inspects or modifies the concurrency limit interactively.
+  - Default limit of 2 concurrent sessions **per agent** and 3 **in total**. A session holds its slot from the moment it is admitted — while its turn runs, stalls, or waits on a permission — so parallel calls and queue drains cannot overshoot either limit.
+  - Additional requests queue in FIFO order per agent, and a drain serves the first task whose agent has capacity, so a busy Devin does not hold a Claude run behind it.
+  - **CLI Flags `--delegate-max-runs <n>` and `--delegate-max-runs-total <n>`**: Configure both ceilings on startup.
+  - **Slash Command `/delegate limit [n]`**: Inspects or modifies the per-agent limit interactively.
 - **Worktree Isolation**:
   - Uses `orca worktree create` when Orca is available; falls back to Git worktree following Orca conventions (`~/orca/workspaces/<repo>/<branch>`).
   - Automatically discovers next unused branch index `${currentBranch}-dt${N}`.
 - **Completion & PR Notifications**:
-  - When Devin finishes, automatically detects whether a GitHub PR was opened for the branch and notifies the agent.
+  - When a session finishes, automatically detects whether a GitHub PR was opened for the branch and notifies the agent.
 - **Zero-Memory & Crash Durability**:
-  - Message transcripts are never retained in RAM; streamed directly to `~/.pi/agent/devin_delegate/<pi-session-id>/<devin-session-id>/events.jsonl`.
-  - Queue and state are persistently saved to `state.json` on disk, allowing complete recovery across crashes or power outages.
+  - Message transcripts are never retained in RAM: streamed straight to `~/.pi/agent/delegate_task/<pi-session-id>/<session-id>/events.jsonl`, and read back bounded, so neither a 350 MiB turn nor a week-long session puts text in memory that no context window could hold anyway.
+  - Queue and state are persistently saved to `state.json` on disk, allowing complete recovery across crashes or power outages. Records written by the pre-rename `devin_delegate` extension are still read (from `~/.pi/agent/devin_delegate/`), and a session that finished while pi was down is recovered from the driver's own session store.
 - **Interface & Controls**:
-  - **Status bar**: Displays live metrics in the footer: `Devin <in flight>/<limit> · <queued> queued · <completed> done`, with `(N stalled, M awaiting permission)` when any session holds its slot without making progress.
-  - **Interactive TUI Dashboard (`/devin list` or `/devin sessions`)**:
+  - **Status bar**: Displays live metrics in the footer: `Delegate <in flight>/<total> · <queued> queued · <completed> done`, with `(devin 2/2, N stalled, M awaiting permission)` so the per-agent figure that actually decides the next start is visible.
+  - **Interactive TUI Dashboard (`/delegate list` or `/delegate sessions`)**:
     - Use `Up` / `Down` arrow keys to browse sessions.
     - Use `Right` / `Enter` to view message details streamed directly from disk.
     - Use `Left` to return to the session list and `q` / `Esc` to close.
 
+#### Renamed from `devin_*`
+
+The tool family was `devin_delegate`, `devin_status`, `devin_message`, `devin_permission`, `devin_cancel`, `devin_restart`, `devin_clean_worktree` and `/devin`. Every one of those names still works and always means `agent: "devin"`; each call replies that it is renamed. They are kept for one minor version and removed in a separate PR. `--devin-max-runs`, `--devin-turn-stall` and `--devin-permission-timeout` are read when the `--delegate-*` flag is absent, and old on-disk state is read from the old storage root. `docs/delegate-task-drivers-plan.md` is the design and the removal plan.
+
 #### Tests
 
-The bash guard has standalone unit tests: `node --test test/test-devin-bash-guard.ts`, and so do the permission and slot helpers: `node --test test/test-devin-permissions.ts`. The `devin-queue` suite (`bash test/run.sh devin-queue`) drives the extension inside Pi against a fake `devin acp` (`test/fake-acp-server.mjs`): concurrency under parallel calls, permission forwarding and timeout, and mode validation. `test/test-devin-delegate.ts` runs inside Pi and starts real Devin sessions, so run it only deliberately.
+The CLI guard, permissions, slots, event mapping, driver registry, storage, recovery, runtime, and rename layer each have unit tests (`node --test test/test-delegate-*.ts`). The `delegate-queue` suite (`bash test/run.sh delegate-queue`) drives the extension inside Pi against a fake ACP agent (`test/fake-acp-server.mjs`, behind both a `devin` and a `claude-agent-acp` shim): concurrency under parallel calls, permission forwarding and timeout, mode validation, stop reasons, the retired aliases, and two agents sharing one queue. `test/test-delegate-live.ts` and `test/test-delegate-live-lifecycle.ts` run inside Pi and start real agent sessions, so run them only deliberately.
 
-#### Skill: `delegate-to-devin`
+#### Skill: `delegate-to-agents`
 
-The package ships a Pi skill (`skills/delegate-to-devin/SKILL.md`) that teaches the agent how to use the `devin_*` tools: which Devin model to pick per task class, how to write the delegation prompt, when to use `create_worktree`, and how to verify the result. It is loaded on demand when a task matches, or explicitly with `/skill:delegate-to-devin`. It is installed together with the extension, so no extra setup is needed; run `pi update` and `/reload` to pick up changes.
+The package ships a Pi skill (`skills/delegate-to-agents/SKILL.md`) that teaches the agent how to use the `delegate_*` tools: which agent to pick, which Devin model per task class, where `thinking` applies, how to write the delegation prompt, when to use `create_worktree`, and how to verify the result. It is loaded on demand when a task matches, or explicitly with `/skill:delegate-to-agents`. It is installed together with the extension, so no extra setup is needed; run `pi update` and `/reload` to pick up changes.
 
 ### Orca Orchestration Observer (`orca_orchestration_*`)
 
@@ -345,7 +354,7 @@ Every pull request runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml), 
 | Job | What it runs |
 |---|---|
 | **Manifests & unit tests** | `node scripts/validate-marketplace.mjs` (marketplace/plugin/Pi manifests + skill & agent frontmatter) and `node --test` on the standalone unit tests |
-| **Pi extension tests** | one matrix job per suite: `observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`, `devin-queue` — each installs Pi (`@earendil-works/pi-coding-agent`) and runs the suite inside the Pi runtime with mocked `gh` and `--offline`, so no model credentials are needed |
+| **Pi extension tests** | one matrix job per suite: `observe-pr`, `branch-observer`, `startup-notice`, `observe-pr-resume`, `pr-tasks`, `tools`, `delegate-queue` — each installs Pi (`@earendil-works/pi-coding-agent`) and runs the suite inside the Pi runtime with mocked `gh` and `--offline`, so no model credentials are needed |
 
 Run the same suites locally (Node >= 23.6 is required — `node --test` runs the TypeScript tests directly):
 
@@ -357,4 +366,4 @@ bash test/run.sh --list      # list suite names
 bash test/run.sh pr-tasks    # run one suite
 ```
 
-Suites deliberately **not** in CI: `test/test-devin-delegate.ts` and `test/test-devin-delegate-lifecycle.ts` start real Devin sessions, and `test/test-orca-orchestration.sh` needs a live Orca backend. Run those by hand.
+Suites deliberately **not** in CI: `test/test-delegate-live.ts` and `test/test-delegate-live-lifecycle.ts` start real delegated-agent sessions, and `test/test-orca-orchestration.sh` needs a live Orca backend. Run those by hand.

@@ -1,7 +1,13 @@
-// Run with: node --test test/test-devin-bash-guard.ts
+// Run with: node --test test/test-delegate-cli-guard.ts
 import { test } from "node:test";
-import * as assert from "node:assert";
-import { findBlockedDevinCommand } from "../extensions/lib/devin-bash-guard.ts";
+import assert from "node:assert";
+import { cliBlockReason, findBlockedCliCommand } from "../extensions/lib/delegate/bash-guard.ts";
+import { guardedClis } from "../extensions/lib/delegate/registry.ts";
+
+// The guard takes the names to watch from the driver registry, so the test names them too. `devin` is
+// the driver with `blocksOwnCli`; a test that hardcoded the list would pass when a driver flipped the
+// capability off.
+const GUARDED = ["devin"];
 
 const blocked = [
 	"devin",
@@ -105,27 +111,51 @@ const allowed = [
 
 test("blocks every direct devin invocation that is not read-only", () => {
 	for (const command of blocked) {
-		assert.ok(findBlockedDevinCommand(command), `expected to block: ${JSON.stringify(command)}`);
+		assert.ok(findBlockedCliCommand(command, GUARDED), `expected to block: ${JSON.stringify(command)}`);
 	}
 });
 
 test("allows read-only devin subcommands and unrelated commands", () => {
 	for (const command of allowed) {
 		assert.strictEqual(
-			findBlockedDevinCommand(command),
+			findBlockedCliCommand(command, GUARDED),
 			undefined,
-			`expected to allow: ${JSON.stringify(command)} (flagged: ${findBlockedDevinCommand(command)})`,
+			`expected to allow: ${JSON.stringify(command)} (flagged: ${findBlockedCliCommand(command, GUARDED)})`,
 		);
 	}
 });
 
 test("reports the offending command", () => {
-	assert.strictEqual(findBlockedDevinCommand("cd repo && devin -p x --model m"), "devin -p x --model m");
-	assert.strictEqual(findBlockedDevinCommand("echo hi; sudo devin -p x"), "devin -p x");
+	assert.strictEqual(findBlockedCliCommand("cd repo && devin -p x --model m", GUARDED), "devin -p x --model m");
+	assert.strictEqual(findBlockedCliCommand("echo hi; sudo devin -p x", GUARDED), "devin -p x");
 });
 
 test("fails closed on pathologically nested commands", () => {
 	let command = "devin -p x";
 	for (let i = 0; i < 12; i++) command = `bash -c '${command.replace(/'/g, "'\\''")}'`;
-	assert.ok(findBlockedDevinCommand(command));
+	assert.ok(findBlockedCliCommand(command, GUARDED));
+});
+
+test("the guarded list is the registry's, and Claude is deliberately not on it", () => {
+	// `claude` is the operator's own CLI: blocking it would break the host to protect a queue
+	// (see the note in drivers/devin.ts). If this assertion starts failing, that decision was changed
+	// and the note has to change with it.
+	assert.deepEqual(guardedClis(), ["devin"]);
+	assert.strictEqual(findBlockedCliCommand("claude -p 'fix it'", guardedClis()), undefined);
+	// A second agent's CLI is guarded when its driver says so, by name and not by assumption.
+	assert.ok(findBlockedCliCommand("otheragent -p x", ["otheragent"]));
+});
+
+test("the block reason names the binaries actually blocked", () => {
+	const reason = cliBlockReason(["devin"]);
+	assert.match(reason, /devin/);
+	assert.match(reason, /delegate_task/);
+	assert.ok(!reason.includes("claude"), "the reason must not promise tools for agents that are not blocked");
+});
+
+test("read-only verbs of any guarded CLI stay allowed", () => {
+	for (const cmd of ["devin --version", "devin models list", "devin auth status", "otheragent --help"]) {
+		const name = cmd.split(" ")[0];
+		assert.strictEqual(findBlockedCliCommand(cmd, [name]), undefined, cmd);
+	}
 });

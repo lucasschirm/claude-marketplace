@@ -11,31 +11,50 @@
     "inboundBufferCap": 0,
     "envAccessLocation": 2,
     "stdoutExitDrain": 0,
-    "emptyCatch": 47,
+    "emptyCatch": 42,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
-    "biome.performance/useTopLevelRegex": 448,
-    "biome.performance/noAwaitInLoops": 89,
-    "biome.performance/noNamespaceImport": 191,
-    "biome.style/useBlockStatements": 968,
-    "biome.suspicious/noShadow": 71,
-    "biome.suspicious/noReturnAssign": 13,
-    "biome.complexity/noExcessiveLinesPerFunction": 8,
-    "biome.complexity/noExcessiveCognitiveComplexity": 65,
-    "biome.suspicious/noExplicitAny": 151,
-    "biome.suspicious/noConsole": 10
+    "biome.performance/useTopLevelRegex": 563,
+    "biome.performance/noAwaitInLoops": 91,
+    "biome.performance/noNamespaceImport": 185,
+    "biome.style/useBlockStatements": 879,
+    "biome.suspicious/noShadow": 72,
+    "biome.suspicious/noReturnAssign": 14,
+    "biome.complexity/noExcessiveLinesPerFunction": 9,
+    "biome.complexity/noExcessiveCognitiveComplexity": 56,
+    "biome.suspicious/noExplicitAny": 162,
+    "biome.suspicious/noConsole": 8
   },
   "files": {
     "extensions/compaction-fail-recovery.ts": 734,
-    "extensions/devin-delegate.ts": 2677,
-    "extensions/lib/acp-client.ts": 325,
+    "extensions/delegate-task.ts": 299,
     "extensions/lib/ci-verdict.ts": 142,
-    "extensions/lib/devin-bash-guard.ts": 277,
-    "extensions/lib/devin-diagnostics.ts": 69,
-    "extensions/lib/devin-permissions.ts": 137,
-    "extensions/lib/devin-slots.ts": 44,
+    "extensions/lib/delegate/bash-guard.ts": 333,
+    "extensions/lib/delegate/compat.ts": 154,
+    "extensions/lib/delegate/dashboard.ts": 202,
+    "extensions/lib/delegate/diagnostics.ts": 69,
+    "extensions/lib/delegate/drivers/claude.ts": 279,
+    "extensions/lib/delegate/drivers/devin.ts": 195,
+    "extensions/lib/delegate/events.ts": 228,
+    "extensions/lib/delegate/permissions.ts": 222,
+    "extensions/lib/delegate/persist.ts": 117,
+    "extensions/lib/delegate/pr-detect.ts": 50,
+    "extensions/lib/delegate/process.ts": 79,
+    "extensions/lib/delegate/queue.ts": 453,
+    "extensions/lib/delegate/recovery.ts": 300,
+    "extensions/lib/delegate/registry.ts": 225,
+    "extensions/lib/delegate/runtime.ts": 513,
+    "extensions/lib/delegate/session.ts": 521,
+    "extensions/lib/delegate/slots.ts": 81,
+    "extensions/lib/delegate/storage.ts": 107,
+    "extensions/lib/delegate/tools-session.ts": 357,
+    "extensions/lib/delegate/tools.ts": 289,
+    "extensions/lib/delegate/transcript.ts": 210,
+    "extensions/lib/delegate/transport.ts": 417,
+    "extensions/lib/delegate/types.ts": 304,
+    "extensions/lib/delegate/worktree.ts": 201,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
@@ -426,8 +445,65 @@
         "agy-acp/src/update-map.ts: 166 lines > baseline 152 (files may only shrink)",
         "biome.jsonc changed since these numbers were recorded (53be27d25534b862 -> 2c5c6196c267ee3b): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
       ]
+    },
+    {
+      "at": "2026-11-06",
+      "reason": "devin_delegate became the delegate_task driver family: one file split into modules plus new test suites moved biome rule counts, and observe-pr shed two lines",
+      "changes": [
+        "biome.complexity/noExcessiveLinesPerFunction: 8 -> 9",
+        "biome.performance/useTopLevelRegex: 448 -> 488",
+        "biome.suspicious/noExplicitAny: 151 -> 156",
+        "biome.suspicious/noReturnAssign: 13 -> 14",
+        "biome.jsonc changed since these numbers were recorded (2c5c6196c267ee3b -> 4a7e658c148e7ff2): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-11-07",
+      "reason": "New delegate unit suites assert with inline regexes and wait loops, and three modules grew for their test seams",
+      "changes": [
+        "biome.performance/noAwaitInLoops: 88 -> 92",
+        "biome.performance/useTopLevelRegex: 488 -> 556",
+        "biome.suspicious/noShadow: 71 -> 72",
+        "extensions/lib/delegate/runtime.ts: 488 lines > baseline 475 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 339 lines > baseline 333 (files may only shrink)",
+        "extensions/lib/delegate/transport.ts: 379 lines > baseline 373 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-07",
+      "reason": "review fixes: honest exits, bounded recovery, slot-owning follow-ups",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 55 -> 56",
+        "biome.performance/useTopLevelRegex: 556 -> 561",
+        "biome.style/useBlockStatements: 877 -> 879",
+        "biome.suspicious/noExplicitAny: 156 -> 162",
+        "extensions/lib/delegate/compat.ts: 154 lines > baseline 97 (files may only shrink)",
+        "extensions/lib/delegate/drivers/claude.ts: 279 lines > baseline 243 (files may only shrink)",
+        "extensions/lib/delegate/drivers/devin.ts: 195 lines > baseline 191 (files may only shrink)",
+        "extensions/lib/delegate/permissions.ts: 222 lines > baseline 209 (files may only shrink)",
+        "extensions/lib/delegate/persist.ts: 117 lines > baseline 93 (files may only shrink)",
+        "extensions/lib/delegate/queue.ts: 453 lines > baseline 369 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 300 lines > baseline 272 (files may only shrink)",
+        "extensions/lib/delegate/registry.ts: 225 lines > baseline 178 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 513 lines > baseline 488 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 521 lines > baseline 434 (files may only shrink)",
+        "extensions/lib/delegate/storage.ts: 107 lines > baseline 83 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 357 lines > baseline 339 (files may only shrink)",
+        "extensions/lib/delegate/tools.ts: 289 lines > baseline 286 (files may only shrink)",
+        "extensions/lib/delegate/transcript.ts: 210 lines > baseline 175 (files may only shrink)",
+        "extensions/lib/delegate/transport.ts: 417 lines > baseline 379 (files may only shrink)",
+        "extensions/lib/delegate/types.ts: 304 lines > baseline 274 (files may only shrink)",
+        "extensions/lib/delegate/worktree.ts: 201 lines > baseline 189 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-07",
+      "reason": "tests for the review fixes use inline matchers",
+      "changes": [
+        "biome.performance/useTopLevelRegex: 561 -> 563"
+      ]
     }
   ],
-  "generatedFrom": "15849b3",
-  "biomeConfigHash": "2c5c6196c267ee3b"
+  "generatedFrom": "d800a63",
+  "biomeConfigHash": "4a7e658c148e7ff2"
 }

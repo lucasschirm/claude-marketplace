@@ -1,7 +1,7 @@
 // One place that asks git and gh where we are.
 //
 // Four files answered "which repo, which branch, which PR" for themselves (`observe-pr.ts`,
-// `pr-tasks.ts`, `devin-delegate.ts`, `lib/orca-client.ts`) and the answers had quietly diverged in
+// `pr-tasks.ts`, `delegate-task.ts`, `lib/orca-client.ts`) and the answers had quietly diverged in
 // ways each looked harmless alone:
 //
 //   - two spellings of "the current branch": `branch --show-current` (empty when detached) and
