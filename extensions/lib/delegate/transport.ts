@@ -24,6 +24,15 @@ import type { LaunchPlan } from "./types.ts";
 export type AcpId = number | string;
 
 /** A request the agent sent to us. */
+/*
+ * How long after `exit` to wait for the stdio pipes before reporting the exit anyway.
+ *
+ * A grandchild that inherited the pipes can hold `close` open indefinitely; the session must still
+ * settle. Two seconds is longer than any real flush and short enough that a wedged child is reported
+ * before a human notices.
+ */
+const EXIT_GRACE_MS = 2_000;
+
 export interface AcpIncomingRequest {
 	id: AcpId;
 	method: string;
@@ -49,6 +58,9 @@ export class DelegateTransport {
 	private onExitCallback?: (code: number | null, signal: string | null) => void;
 	private onRequestCallback?: (req: AcpIncomingRequest) => boolean;
 	private isDisposed = false;
+	/** True once the child's stdio closed — after the last line it wrote was read. */
+	private streamsClosed = false;
+	private exitInfo: { code: number | null; signal: string | null } | null = null;
 
 	private cwd: string;
 	private plan: LaunchPlan;
@@ -126,10 +138,24 @@ export class DelegateTransport {
 			this.logEvent("stderr", chunk.toString());
 		});
 
-		this.child.on("exit", (code, signal) => {
-			if (!this.isDisposed && this.onExitCallback) {
-				this.onExitCallback(code, signal);
+		// The exit report, once, and only after stdout has been drained.
+		//
+		// `exit` says the process is gone; it does not say the lines it wrote have been read. An agent that
+		// answers the prompt and exits immediately — the normal shape of a one-turn ACP run — used to have
+		// its final frames arrive after the session was already settled as interrupted, because the exit
+		// callback fired on `exit` and the readline queue still held them. `close` fires when the pipes are
+		// closed, which is after the last line. The timer is the liveness guarantee: a grandchild that
+		// inherited the stdout pipe can keep `close` from ever arriving, and a session that never settles is
+		// worse than one that settles from a line or two late.
+		let delivered = false;
+		const deliver = (code: number | null, signal: string | null): void => {
+			if (delivered || this.isDisposed) {
+				return;
 			}
+			delivered = true;
+			this.onExitCallback?.(code, signal);
+		};
+		this.child.on("exit", (code, signal) => {
 			for (const req of this.pendingRequests.values()) {
 				if (req.timer) {
 					clearTimeout(req.timer);
@@ -137,6 +163,18 @@ export class DelegateTransport {
 				req.reject(new Error(`${this.plan.label} exited with code ${code}`));
 			}
 			this.pendingRequests.clear();
+			if (this.streamsClosed) {
+				deliver(code, signal);
+			} else {
+				this.exitInfo = { code, signal };
+				const grace = setTimeout(() => deliver(code, signal), EXIT_GRACE_MS);
+				grace.unref?.();
+			}
+		});
+		this.child.on("close", (code, signal) => {
+			this.streamsClosed = true;
+			const info = this.exitInfo ?? { code, signal };
+			deliver(info.code, info.signal);
 		});
 
 		// Handshake: initialize. The result used to be discarded; it is kept (and returned) because the

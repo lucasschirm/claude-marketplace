@@ -13,7 +13,7 @@
 import { CANONICAL_MODES, type ModeResolution } from "./permissions.ts";
 import type { AgentDriver, Selection, ThinkingLevel } from "./types.ts";
 import { THINKING_LEVELS } from "./types.ts";
-import { DEVIN_THINKING_UNSUPPORTED, devinDriver } from "./drivers/devin.ts";
+import { devinDriver } from "./drivers/devin.ts";
 import { claudeDriver } from "./drivers/claude.ts";
 
 /** The agent used when the caller does not name one. One release of this default, then reconsider. */
@@ -23,6 +23,21 @@ const DRIVERS: Record<string, AgentDriver> = {
 	devin: devinDriver,
 	claude: claudeDriver,
 };
+
+/**
+ * The agent's own name for itself — `Devin`, `Claude` — for anything a human or a model reads.
+ *
+ * An id is for maps, a title is for sentences. A reply that says "devin has no way to continue" reads like
+ * a different tool from the one that said "Devin" two lines earlier, and falling back to the id is always
+ * better than throwing over a name.
+ */
+export function agentTitle(agentId?: string): string {
+	if (!agentId) {
+		return "agent";
+	}
+	const found = findAgent(agentId);
+	return found.ok ? found.driver.title : agentId;
+}
 
 export function listDrivers(): AgentDriver[] {
 	return Object.values(DRIVERS);
@@ -72,11 +87,28 @@ export function thinkingDescription(): string {
 	const supporting = listDrivers()
 		.filter((d) => d.capabilities().thinking)
 		.map((d) => d.id);
-	const refusing = listDrivers()
-		.filter((d) => !d.capabilities().thinking)
-		.map((d) => d.id);
-	const tail = refusing.length ? ` Refused for: ${refusing.join(", ")} — ${DEVIN_THINKING_UNSUPPORTED}` : "";
-	return `Reasoning effort: ${THINKING_LEVELS.join(", ")}. Supported by: ${supporting.join(", ") || "no agent"}.${tail}`;
+	const refusing = listDrivers().filter((d) => !d.capabilities().thinking);
+	// Each refusing driver says why in its own words. The engine used to speak for all of them with Devin's
+	// sentence, which told a future third agent to go change its `swe-2-high` model id.
+	const tail = refusing.length
+		? ` Refused for: ${refusing.map((d) => `${d.id} (${d.capabilities().thinkingRefusal?.() ?? "no reasoning-effort control"})`).join("; ")}.`
+		: "";
+	const levels = supportedLevels();
+	return `Reasoning effort: ${THINKING_LEVELS.join(", ")}. Supported by: ${supporting.join(", ") || "no agent"}.${levels}${tail}`;
+}
+
+/** The levels at least one registered driver can apply — the honest intersection of "valid" and "usable". */
+function supportedLevels(): string {
+	const usable = new Set<string>();
+	for (const d of listDrivers()) {
+		if (d.capabilities().thinking) {
+			for (const level of d.capabilities().thinkingLevels?.() ?? THINKING_LEVELS) {
+				usable.add(level);
+			}
+		}
+	}
+	const missing = THINKING_LEVELS.filter((l) => !usable.has(l));
+	return missing.length ? ` No registered agent applies: ${missing.join(", ")}.` : "";
 }
 
 /** Model sentence, per driver, from each driver's own catalogue. */
@@ -150,8 +182,23 @@ export function admit(params: { agent?: string; model?: string; thinking?: strin
 				error: `Unknown thinking level '${params.thinking}'. Valid levels: ${THINKING_LEVELS.join(", ")}.`,
 			};
 		}
-		if (!driver.capabilities().thinking) {
-			return { ok: false, code: "THINKING_UNSUPPORTED", error: `${driver.title}: ${DEVIN_THINKING_UNSUPPORTED}` };
+		const caps = driver.capabilities();
+		if (!caps.thinking) {
+			return {
+				ok: false,
+				code: "THINKING_UNSUPPORTED",
+				error: `${driver.title}: ${caps.thinkingRefusal?.() ?? "this agent has no reasoning-effort control"}`,
+			};
+		}
+		// The level has to be one *this* agent can apply. A level admitted and then refused on the wire costs a
+		// spawned session, a slot, and a warning buried at the end of a tool result the caller already read.
+		const offered = caps.thinkingLevels?.() ?? THINKING_LEVELS;
+		if (!offered.includes(level)) {
+			return {
+				ok: false,
+				code: "THINKING_UNAVAILABLE",
+				error: `${driver.title} offers ${offered.join(", ")} for thinking; '${level}' is not one of them.`,
+			};
 		}
 		thinking = level as ThinkingLevel;
 	}

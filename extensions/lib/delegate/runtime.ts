@@ -13,7 +13,7 @@
 
 import type { ExtensionAPI, ExtensionToolContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { DelegateTransport } from "./transport.ts";
-import { quoteCommand } from "./permissions.ts";
+import { commandForCaller } from "./permissions.ts";
 import { extractCliError, stripAnsi } from "./diagnostics.ts";
 import { logError as fileLogError, logWarn as fileLogWarn } from "../extension-log.ts";
 import { commandExists, createTaskScope, WriteQueue } from "../nonblocking.ts";
@@ -177,7 +177,17 @@ export class DelegateRuntime {
 		if (!targetUI) {
 			return;
 		}
+		// Wrapped because a status line must never be the thing that throws. Several callers reach it from a
+		// `catch` or a `finally` (a rejected turn, a child that exited), where a throw from the host's own
+		// renderer would become an unhandled rejection in pi — the extension crashing the host over a label.
+		try {
+			this.renderStatusUI(targetUI);
+		} catch (err: any) {
+			this.logError(`Could not update the status line: ${err?.message ?? err}`);
+		}
+	}
 
+	private renderStatusUI(targetUI: ExtensionUIContext): void {
 		let stalledCount = 0;
 		let settledCount = 0;
 		for (const s of this.sessions.values()) {
@@ -347,8 +357,14 @@ export class DelegateRuntime {
 		if (!list) {
 			return;
 		}
+		const client = this.activeClients.get(sessionId);
 		for (const r of list) {
 			clearTimeout(r.timer);
+			// Answer it before forgetting it. A conformant agent waits for the answer to its own request, so
+			// dropping it silently is how a turn that ended on one channel blocks on another forever; only
+			// the stall watchdog would notice, and by then the connection is long idle.
+			client?.respond(r.requestId, { outcome: { outcome: "cancelled" } });
+			client?.logEvent("permission_answer", { requestId: r.requestId, decision: "cancelled", optionId: null, by: "turn-end" });
 		}
 		this.pendingPermissions.delete(sessionId);
 	}
@@ -361,7 +377,10 @@ export class DelegateRuntime {
 		requestId?: number | string,
 	): (PermissionRequest & { optionId?: string }) | null {
 		const list = this.pendingPermissions.get(sessionId);
-		const idx = !list ? -1 : requestId === undefined ? 0 : list.findIndex((r) => r.requestId === requestId);
+		// Compared as text. The wire id is `number | string` — the JSON-RPC spec allows both, and this tool's
+		// parameter is a string — so a numeric id from an agent could never be answered by an explicit
+		// `request_id`, and the status line would offer one (`request_id=7`) that always failed.
+		const idx = !list ? -1 : requestId === undefined ? 0 : list.findIndex((r) => String(r.requestId) === String(requestId));
 		if (!list || idx < 0 || idx >= list.length) {
 			return null;
 		}
@@ -388,7 +407,7 @@ export class DelegateRuntime {
 			// been answered, so the operator approved things they could not see.
 			const minutes = Math.max(1, Math.round(this.getPermissionTimeoutMs() / 60_000));
 			this.sendAgentMessage(
-				`The permission request of session ${sessionId} ${quoteCommand(req.command)} got no answer in ${minutes} minute(s) and was rejected automatically. The agent continues without it; decide faster or answer with delegate_permission before the timeout.`,
+				`The permission request of session ${sessionId} ${commandForCaller(req.command)} got no answer in ${minutes} minute(s) and was rejected automatically. The agent continues without it; decide faster or answer with delegate_permission before the timeout.`,
 			);
 		}
 		this.updateStatusUI();
@@ -483,5 +502,11 @@ export class DelegateRuntime {
 		this.totalInvoked = 0;
 		this.totalCompleted = 0;
 		this.currentPiSessionId = "default";
+		// Dropped, not kept. Pi awaits `session_shutdown` and then tears the context down; a delayed
+		// diagnostic — a write queue that fails after the drain, a child that reports its exit — would call
+		// into a dead context. Falling back to the log instead is the difference between a lost line and an
+		// exception inside a rejection handler. It also releases the previous session's UI object, which is
+		// exactly the leak this line existed to prevent before the engine moved into a class.
+		this.ui = undefined;
 	}
 }

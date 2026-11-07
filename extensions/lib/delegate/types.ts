@@ -52,8 +52,24 @@ export interface LaunchPlan {
 export interface DriverCapabilities {
 	/** false ⇒ `delegate_task` refuses `thinking` for this agent rather than ignoring it. */
 	thinking: boolean;
-	/** A session id survives the ACP server process, or the agent offers load/resume. */
+	/**
+	 * A recorded session id can be prompted again after its process is gone, **and this engine implements the
+	 * way back in** (`reattachSession`: spawn, then prompt the recorded id). An agent that merely advertises
+	 * `loadSession` is not enough — the adapter call would have to be made, so such a driver declares false
+	 * until there is a loader behind it. `followUp` refuses to continue a session whose driver says false.
+	 */
 	resume: boolean;
+
+	/**
+	 * The canonical `thinking` levels this driver can actually apply. Absent means every level the tool offers.
+	 *
+	 * Validation without this is a promise the wire may break: an effort the agent does not accept costs a
+	 * slot, a spawned session and a warning buried in a tool result, when the answer was known beforehand.
+	 */
+	thinkingLevels?(): readonly string[];
+
+	/** The sentence this driver says when `thinking` is refused, in its own words about its own models. */
+	thinkingRefusal?(): string;
 	cancel: boolean;
 	/** The agent asks `session/request_permission` and blocks the turn until answered. */
 	permissions: boolean;
@@ -101,8 +117,15 @@ export interface UsageTotals {
 	output?: number;
 }
 
+/**
+ * One update from an agent, after its driver has said what it means.
+ *
+ * There is deliberately no `session.started` / `turn.completed` / `turn.failed` here: those moments are
+ * the engine's own — it created the session, it holds the prompt promise, it knows how the turn ended —
+ * and a kind that no mapper can ever emit is a lie waiting to drift. The vocabulary an agent advertises at
+ * `session/new` and the stop reason of a turn are recorded where the engine acts on them.
+ */
 export type DelegateEvent =
-	| { kind: "session.started"; sessionId: string; modes?: readonly string[]; models?: readonly string[] }
 	| { kind: "assistant.delta"; text: string }
 	| { kind: "assistant.completed"; text: string }
 	| { kind: "thought.delta"; text: string }
@@ -112,8 +135,6 @@ export type DelegateEvent =
 	| { kind: "usage.updated"; used?: number; size?: number; tokens: UsageTotals }
 	| { kind: "selection.updated"; options: Record<string, string[]> }
 	| { kind: "mode.changed"; modeId: string }
-	| { kind: "turn.completed"; stopReason: StopReason }
-	| { kind: "turn.failed"; error: string }
 	| { kind: "ignored"; reason: string };
 
 /** Normalized `session/prompt` outcome. `unknown` is an honest answer, not a bug: an agent may send a
@@ -196,7 +217,7 @@ export interface QueuedTask {
 	queueId: string;
 	agent: string;
 	prompt: string;
-	/** Resolved model id, or undefined for "the agent's default". */
+	/** Model id as the caller asked for it; undefined means the driver's default. */
 	model?: string;
 	thinking?: ThinkingLevel;
 	mode: string;
@@ -212,13 +233,22 @@ export interface QueuedTask {
 
 export interface SessionMeta {
 	sessionId: string;
+	/**
+	 * The session this one was delegated from, when the caller was itself a delegated session.
+	 *
+	 * Recorded on the session, not only on the queued task that carried it, so a transcript or a status
+	 * report can still say whose child this after the queue entry is gone.
+	 */
+	parentSessionId?: string;
 	queueId?: string;
 	agent: string;
 	prompt: string;
-	/** The model that actually runs (after a thinking→model rewrite). */
+	/**
+	 * The model id this session was asked to run, undefined meaning the driver's own default. There is no
+	 * second field for "what was requested": nothing rewrites a model any more (Devin's effort is part of the
+	 * model id, so `thinking` on a Devin task is refused rather than translated into a different model).
+	 */
 	model?: string;
-	/** What the caller asked for, kept so `delegate_status` can show both when they differ. */
-	requestedModel?: string;
 	thinking?: ThinkingLevel;
 	mode: string;
 	createWorktree: boolean;

@@ -132,6 +132,10 @@ export const devinDriver: AgentDriver = {
 	capabilities(): DriverCapabilities {
 		return {
 			thinking: false,
+			// Devin's effort lives in the model id (`swe-2-high` vs `swe-2-max`), so the refusal has to name
+			// models to be useful — and only this driver knows them. A third agent without thinking will supply
+			// its own sentence for the same reason: the engine has no business explaining another agent's models.
+			thinkingRefusal: () => DEVIN_THINKING_UNSUPPORTED,
 			// Devin session ids outlive the ACP server process: re-attaching spawns a fresh `devin acp`
 			// and prompts the old id without session/new. No session/load needed.
 			resume: true,

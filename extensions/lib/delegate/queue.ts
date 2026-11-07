@@ -13,9 +13,10 @@
 
 import { extractCliError } from "./diagnostics.ts";
 import { detectPullRequest } from "./pr-detect.ts";
-import { findAgent } from "./registry.ts";
-import { quoteCommand } from "./permissions.ts";
-import { configureSession, installDrainer, spawnSession, startTurn } from "./session.ts";
+import { agentTitle, findAgent } from "./registry.ts";
+import { commandForCaller } from "./permissions.ts";
+import { configureSession, installDrainer, reattachSession, spawnSession, startTurn } from "./session.ts";
+import type { DelegateTransport } from "./transport.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { createWorktree, releaseWorktree } from "./worktree.ts";
 import type { AgentDriver, QueuedTask, Selection, SessionMeta } from "./types.ts";
@@ -109,7 +110,14 @@ export async function delegate(rt: DelegateRuntime, req: DelegateRequest): Promi
 		return { ok: true, queued: task, position, queueTotal, reason, warnings: [] };
 	}
 	// `announce: false` — this caller is holding a tool result that already contains the id.
-	return startNow(rt, task, release, req.driver, { announce: false });
+	const res = await startNow(rt, task, release, req.driver, { announce: false });
+	if (!res.ok) {
+		// This call is the event that freed the slot. The queue used to be re-run only when a *dequeued*
+		// start failed, so a first task that died at spawn left everything behind it waiting for some
+		// unrelated event, while the capacity to run them already existed.
+		void drainQueue(rt);
+	}
+	return res;
 }
 
 /** Reserve held: provision, spawn, configure, run. Always releases the reservation exactly once. */
@@ -129,6 +137,9 @@ async function startNow(
 	{ announce = true }: { announce?: boolean } = {},
 ): Promise<DelegateResult> {
 	let registered = false;
+	let provisionedHere = false;
+	let started: SessionMeta | undefined;
+	let client: DelegateTransport | undefined;
 	try {
 		if (task.createWorktree && !task.worktreePath) {
 			const wt = await provisionWorktree(rt, task);
@@ -136,37 +147,66 @@ async function startNow(
 				release();
 				return { ok: false, code: "WORKTREE_CREATE_FAILED", error: wt.error };
 			}
+			provisionedHere = true;
 		}
 		const cwd = task.worktreePath ?? rt.baseDir;
 		const selection: Selection = { model: task.model, thinking: task.thinking, mode: task.mode };
-		const { meta, client } = await spawnSession(rt, driver, selection, {
+		const spawned = await spawnSession(rt, driver, selection, {
 			prompt: task.prompt,
 			cwd,
 			queueId: task.queueId,
 			createWorktree: task.createWorktree,
 		});
+		started = spawned.meta;
+		client = spawned.client;
 		// Registered: from here the session holds the slot itself, through its own status.
 		registered = true;
 		release();
 
-		meta.queueId = task.queueId;
-		meta.worktreePath = task.worktreePath;
-		meta.worktreeBranch = task.worktreeBranch;
-		meta.worktreeId = task.worktreeId;
-		meta.parentWorktreeId = task.parentWorktreeId;
-		meta.worktreeStatus = task.worktreePath ? "active" : undefined;
+		started.queueId = task.queueId;
+		started.parentSessionId = task.parentSessionId;
+		started.worktreePath = task.worktreePath;
+		started.worktreeBranch = task.worktreeBranch;
+		started.worktreeId = task.worktreeId;
+		started.parentWorktreeId = task.parentWorktreeId;
+		started.worktreeStatus = task.worktreePath ? "active" : undefined;
 
-		const warnings = await configureSession(rt, driver, meta, client, selection);
-		startTurn(rt, meta, client, task.prompt);
-		if (announce) {
-			rt.sendAgentMessage(`Your session started with id: ${meta.sessionId}`);
+		const warnings = await configureSession(rt, driver, started, client, selection);
+		if (started.status === "cancelled") {
+			// Cancelled while its mode and model were still being chosen — a window that is two round trips
+			// long. Starting the turn anyway would hand the caller back a session it had just stopped, with a
+			// live process behind it.
+			client.dispose();
+			return { ok: false, code: "CANCELLED_DURING_START", error: "the session was cancelled while it was being configured" };
 		}
-		return { ok: true, started: meta, warnings };
+		startTurn(rt, started, client, task.prompt);
+		if (announce) {
+			rt.sendAgentMessage(`Your session started with id: ${started.sessionId}`);
+		}
+		return { ok: true, started, warnings };
 	} catch (err) {
+		const reason = extractCliError(err) ?? String(err);
 		if (!registered) {
 			release();
+			if (provisionedHere && task.worktreePath) {
+				// A folder created for a session that never existed: nothing else owns it, so nothing else
+				// will ever clean it up. (A queued task's folder is released by `delegate_cancel`.)
+				const { removeOrcaWorktree } = await import("../orca-client.ts");
+				void removeOrcaWorktree(task.worktreeId || `path:${task.worktreePath}`).catch(() => {});
+			}
+		} else if (started && client) {
+			// Registered, and then something threw on the way to the first turn. Left alone, that is a
+			// session recorded `running` with a client that will never run a turn: a slot nothing releases and
+			// a status line that lies. Close it as the failed start it is.
+			started.status = "failed";
+			started.error = reason;
+			started.finishedAt = Date.now();
+			client.dispose();
+			rt.activeClients.delete(started.sessionId);
+			rt.persistSessionMeta(started, true);
+			rt.persistState();
+			rt.updateStatusUI();
 		}
-		const reason = extractCliError(err) ?? String(err);
 		rt.logError(`Failed to start ${task.agent} session for ${task.queueId}: ${reason}`);
 		return { ok: false, code: "START_FAILED", error: reason };
 	}
@@ -205,8 +245,10 @@ export async function drainQueue(rt: DelegateRuntime): Promise<void> {
 			const [task] = rt.queue.splice(idx, 1);
 			const release = rt.slots.tryReserve(task.agent);
 			if (!release) {
-				// Lost the race between the scan and the reservation: put it back and stop.
-				rt.queue.unshift(task);
+				// Lost the race between the scan and the reservation. Put it back **where it came from**: a
+				// task found further down the queue (this scan looks past an agent at its limit) must not be
+				// promoted to the head, and the positions already quoted to callers must stay true.
+				rt.queue.splice(idx, 0, task);
 				break;
 			}
 			rt.persistState();
@@ -255,13 +297,9 @@ export async function followUp(
 	meta: SessionMeta,
 	prompt: string,
 ): Promise<{ ok: true } | { ok: false; code: string; error: string }> {
-	const client = rt.activeClients.get(meta.sessionId);
-	if (!client) {
-		return {
-			ok: false,
-			code: "NO_CONNECTION",
-			error: "the session's process is gone — use delegate_restart to run it again (in the same worktree, with a new session id)",
-		};
+	const driver = findAgent(meta.agent);
+	if (!driver.ok) {
+		return { ok: false, code: "AGENT_UNAVAILABLE", error: `the driver '${meta.agent}' is no longer registered: ${driver.error}` };
 	}
 	if (meta.status === "running" || meta.status === "stalled") {
 		// "Still working" is the wrong story when the session is blocked on a decision the caller could
@@ -274,17 +312,57 @@ export async function followUp(
 				code: "BUSY_AWAITING_PERMISSION",
 				error:
 					`the session is currently running and is blocked on a permission request. ` +
-					`Awaiting permission to run: ${quoteCommand(pending[0].command)}${pending.length > 1 ? ` (+${pending.length - 1} more)` : ""}. ` +
+					`Awaiting permission to run: ${commandForCaller(pending[0].command)}${pending.length > 1 ? ` (+${pending.length - 1} more)` : ""}. ` +
 					`Answer with delegate_permission(session_id='${meta.sessionId}', decision=allow|allow_session|reject) to unblock it, or delegate_cancel to stop it.`,
 			};
 		}
 		return { ok: false, code: "BUSY", error: "the session is still working; wait for it or delegate_cancel first" };
 	}
+
+	// A follow-up turn occupies capacity exactly the way an initial one does, so it asks for the slot the
+	// same way. Without this the limits were a suggestion: two running sessions plus a follow-up was a third
+	// turn inside a per-agent limit of two, and the status line reported more in flight than there were.
+	const release = rt.slots.tryReserve(meta.agent);
+	if (!release) {
+		const reason = queueReason(rt, meta.agent);
+		return {
+			ok: false,
+			code: "LIMIT",
+			error:
+				`${agentTitle(meta.agent)} is at its capacity (${reason === "total-limit" ? "the total limit across agents" : "this agent's limit"}), so the session cannot take another turn. ` +
+				`Wait for one to finish, or raise the limit with "/delegate limit <n>".`,
+		};
+	}
+
+	let client = rt.activeClients.get(meta.sessionId);
+	if (!client) {
+		if (!driver.driver.capabilities().resume) {
+			release();
+			return {
+				ok: false,
+				code: "NO_CONNECTION",
+				error: `${agentTitle(meta.agent)} has no way to continue a session whose process is gone — use delegate_restart to run the prompt again (same worktree, new session id)`,
+			};
+		}
+		try {
+			client = await reattachSession(rt, driver.driver, meta);
+		} catch (err: any) {
+			release();
+			return {
+				ok: false,
+				code: "REATTACH_FAILED",
+				error: `could not re-attach to the session: ${extractCliError(err) ?? err?.message ?? err}`,
+			};
+		}
+	}
+	// The reservation ends where the session's own `running` status begins — the same handoff an initial
+	// start makes in `startNow`. Between them there is no window in which the turn is uncounted.
+	release();
 	startTurn(rt, meta, client, prompt);
 	return { ok: true };
 }
 
-export type CancelOutcome = "queued" | "session" | "not_found";
+export type CancelOutcome = "queued" | "session" | "not_running" | "not_found";
 
 /**
  * Cancel a queued task or a running session.
@@ -309,6 +387,12 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	const meta = rt.sessions.get(targetId);
 	if (!meta) {
 		return "not_found";
+	}
+	if (meta.status !== "running" && meta.status !== "stalled" && !rt.activeClients.has(targetId)) {
+		// Already finished. Cancelling it used to rewrite `failed` as `cancelled`, count a second completion
+		// for one turn, run the worktree release a settled session already ran, and tell the caller "the slot
+		// is free" when no slot was held.
+		return "not_running";
 	}
 
 	meta.status = "cancelled";

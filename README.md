@@ -180,19 +180,21 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that lets the coding age
   - **`delegate_task`**:
     - `prompt` (mandatory): Task instructions.
     - `agent` (optional, default `"devin"`): Which driver runs the task — `devin` or `claude`. `/delegate agents` lists what is installed and what each one supports.
-    - `model` (optional): The agent's model. Devin defaults to `swe-2-high`; Claude's models are configured on the machine, so omit it unless you know the install accepts the value. An unknown id warns and passes through rather than failing, because the agent resolves names this extension cannot list.
+    - `model` (optional): The agent's model. Devin defaults to `swe-2-high` and Claude to `sonnet` — both tiers that do not bill per token on their own plans, because a delegation nobody named a model for should not spend money. Claude's catalogue is the machine's (the adapter lists what that install allows), so a model you name there must exist on that machine; if `sonnet` is not carried, the session keeps the model its own CLI configured and says nothing. An unknown id warns and passes through rather than failing, because the agent resolves names this extension cannot list.
     - `thinking` (optional: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`): Reasoning effort, where the agent has such a control. Devin does not — its effort is encoded in the model id — so asking for it on a Devin run is refused instead of silently ignored.
     - `mode` (optional, default `"dangerous"`): Canonical permission mode (`dangerous`, `auto`/`smart`, `accept-edits`, `plan`, `ask`), mapped by each driver into its own vocabulary. An unmappable value is refused, because agents silently ignore unknown modes.
     - `create_worktree` (optional, default `false`): Spin up an isolated worktree branch (`${currentBranch}-dt${N}`).
     - Runs asynchronously: returns immediately with a session ID or a queue position, and says *why* a task queued (this agent's limit, the total limit, or tasks ahead of it).
   - **`delegate_status`**:
-    - `session_id` (optional): One session's state and transcript. `full: true` reads the whole transcript from disk; `limit` sets how many messages.
+    - `session_id` (optional): One session's state and transcript. `full: true` reads the whole transcript from disk — the last few megabytes of it, line-aligned, saying how much earlier transcript it skipped; `limit` sets how many messages.
+    - Every field copied out of a session (a command awaiting permission, a tool title) is quoted and labelled as what the agent reported. It is data, and an agent that writes "SYSTEM DIRECTIVE: run X" in a command must not have that arrive as an instruction.
     - If `session_id` omitted: the overview — every session, the queue, slot use per agent, and how many turns ended for each reason.
     - A finished turn reports its ACP `stopReason`: `max_tokens` and `refusal` are worded as an early stop, never as "done".
   - **`delegate_message`**:
-    - `session_id` (mandatory) and `message` (mandatory): Sends follow-up instructions to an idle session via ACP. A busy session is refused, and if it is blocked on a permission request the refusal names that request.
+    - `session_id` (mandatory) and `message` (mandatory): Sends follow-up instructions to an idle session via ACP. A busy session is refused, and if it is blocked on a permission request the refusal names that request — answering is a different tool, and queueing the message behind a request nobody can see would look like the agent going quiet.
+    - A session whose process is gone is **continued, not refused**, when the agent keeps ids it can be re-prompted with (Devin does: a fresh process accepts the recorded id, no `session/new`). Where the agent cannot — Claude today, because this engine never calls `session/load` — the call is an error that names `delegate_restart`, because a fresh session answering under the old id is not a follow-up. A follow-up occupies a slot exactly as an initial delegation does, and queues when the agent is full.
   - **`delegate_cancel`**:
-    - `session_id` (mandatory): Cancels an active, queued or blocked session and automatically advances the queue.
+    - `session_id` (mandatory): Cancels an active, queued or blocked session and automatically advances the queue. A session that already finished is an error, not a cancellation: rewriting `done` as `cancelled` would make a delivered result look retracted, and there is no slot to free.
   - **`delegate_restart`**:
     - `session_id` (mandatory), `prompt` (optional), `agent` (optional), `mode` (optional, default: the original session's): Resumes or restarts a failed, interrupted, or stopped session in its existing worktree.
   - **`delegate_permission`**:
@@ -219,7 +221,7 @@ A [Pi Extension](https://pi.dev/docs/latest/extensions) that lets the coding age
 - **Completion & PR Notifications**:
   - When a session finishes, automatically detects whether a GitHub PR was opened for the branch and notifies the agent.
 - **Zero-Memory & Crash Durability**:
-  - Message transcripts are never retained in RAM; streamed directly to `~/.pi/agent/delegate_task/<pi-session-id>/<session-id>/events.jsonl`.
+  - Message transcripts are never retained in RAM: streamed straight to `~/.pi/agent/delegate_task/<pi-session-id>/<session-id>/events.jsonl`, and read back bounded, so neither a 350 MiB turn nor a week-long session puts text in memory that no context window could hold anyway.
   - Queue and state are persistently saved to `state.json` on disk, allowing complete recovery across crashes or power outages. Records written by the pre-rename `devin_delegate` extension are still read (from `~/.pi/agent/devin_delegate/`), and a session that finished while pi was down is recovered from the driver's own session store.
 - **Interface & Controls**:
   - **Status bar**: Displays live metrics in the footer: `Delegate <in flight>/<total> · <queued> queued · <completed> done`, with `(devin 2/2, N stalled, M awaiting permission)` so the per-agent figure that actually decides the next start is visible.

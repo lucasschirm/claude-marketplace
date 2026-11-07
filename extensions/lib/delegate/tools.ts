@@ -15,6 +15,7 @@ import { Type } from "typebox";
 import { admit, agentDescription, DEFAULT_AGENT, modelDescription, modeDescription, thinkingDescription } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { delegate, type QueueReason } from "./queue.ts";
+import { commandForCaller } from "./permissions.ts";
 import { readFullTranscript, readLastMessages } from "./transcript.ts";
 import type { SessionMeta } from "./types.ts";
 import { capList } from "../tool-result.ts";
@@ -159,7 +160,9 @@ function sessionReport(rt: DelegateRuntime, meta: SessionMeta, full: boolean, li
 	if (pending.length > 0) {
 		const [first, ...rest] = pending;
 		lines.push(
-			`Awaiting permission (request ${first.requestId}): ${JSON.stringify(first.command)}${rest.length > 0 ? ` (+${rest.length} more)` : ""} — answer with delegate_permission(session_id='${meta.sessionId}', decision=allow|allow_session|reject, request_id=${JSON.stringify(first.requestId)}).`,
+			// Quoted, capped and framed like every other surface that shows this text, and the id is printed the
+			// way the tool asks it back (as text), because a copy-pasteable line is the point of showing it.
+			`Awaiting permission (request ${first.requestId}): ${commandForCaller(first.command)}${rest.length > 0 ? ` (+${rest.length} more)` : ""} — answer with delegate_permission(session_id='${meta.sessionId}', decision=allow|allow_session|reject, request_id='${String(first.requestId)}').`,
 		);
 	}
 	lines.push("");

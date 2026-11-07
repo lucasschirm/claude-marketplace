@@ -160,7 +160,9 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 		// `Delegate 0/3 · 0 queued · 4 done` — the headline is the total ceiling; the per-agent figure is
 		// the parenthesised `devin 0/2`, which only appears while an agent holds or waits for capacity.
 		const slotsFree = () => waitFor("all slots free", () => /^Delegate 0\/\d+ · 0 queued/.test(lastStatus()), 30_000);
-		const transcript = async (id: string) => text(await call("delegate_status", { session_id: id, complete: true }));
+		// `full` is the parameter that reads the whole transcript from disk; `limit` would cap it at three
+		// messages and the assertions below look for lines that are not in the last three.
+		const transcript = async (id: string) => text(await call("delegate_status", { session_id: id, full: true }));
 		function samplePeak(): () => number {
 			let peak = 0;
 			const timer = setInterval(() => {
@@ -228,7 +230,7 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 			const answer = await call("delegate_permission", { session_id: q2Id, decision: "allow" });
 			assert.ok(!answer.isError, `delegate_permission must succeed (got: ${text(answer)})`);
 			await waitFor("the allowed turn to finish", () => agentMessages.some((m) => m.startsWith(`The session ${q2Id} is done.`)), 15_000);
-			const q2Transcript = text(await call("delegate_status", { session_id: q2Id, complete: true }));
+			const q2Transcript = text(await call("delegate_status", { session_id: q2Id, full: true }));
 			assert.match(q2Transcript, /Permission outcome: allow_once\./);
 			const again = await call("delegate_permission", { session_id: q2Id, decision: "allow" });
 			assert.ok(again.isError, "answering when nothing is pending must be an error");
@@ -242,7 +244,7 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 			const q3Id = startedId(q3);
 			created.push(q3Id);
 			await waitFor("the timed-out turn to finish", () => agentMessages.some((m) => m.startsWith(`The session ${q3Id} is done.`)), 20_000);
-			const q3Transcript = text(await call("delegate_status", { session_id: q3Id, complete: true }));
+			const q3Transcript = text(await call("delegate_status", { session_id: q3Id, full: true }));
 			assert.match(q3Transcript, /Permission outcome: reject_once\./);
 			assert.ok(autoRejected(q3Id), "the agent must be told the request was rejected automatically");
 			permissionTimeoutMinutes = "1";
@@ -475,11 +477,16 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 			console.log("Q13: the retired aliases still answer, and say they are retired...");
 			await slotsFree();
 			fakeEnv({ FAKE_DELAY_MS: "500" });
-			const q13 = await call("devin_delegate", { prompt: "through the old name", mode: "dangerous", agent: "claude" });
+			const q13 = await call("devin_delegate", { prompt: "through the old name", mode: "dangerous" });
 			assert.ok(!q13.isError, text(q13));
 			// The alias is not a silent pass-through: `agent` is forced, because a caller that wrote
 			// `devin_delegate` meant Devin, and a rename must not change what their prompt does.
 			assert.strictEqual(q13.details.agent, "devin", `devin_delegate must mean devin: ${text(q13)}`);
+			// A caller that named another agent through the old name is refused, not silently re-pointed: running
+			// Devin when they asked for Claude is a rename changing what the prompt means.
+			const q13conflict = await call("devin_delegate", { prompt: "x", agent: "claude" });
+			assert.ok(q13conflict.isError, "an explicit non-Devin agent through an old name must not run");
+			assert.match(text(q13conflict), /always means Devin[\s\S]*Call delegate_task with agent='claude'/i);
 			// The note is appended, so `content[0]` still holds the answer a pre-rename caller parses.
 			assert.match(allText(q13), /\[deprecated\] devin_delegate → delegate_task/);
 			created.push(startedId(q13));
@@ -554,11 +561,16 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 			console.log("Q13: the retired aliases still answer, and say they are retired...");
 			await slotsFree();
 			fakeEnv({ FAKE_DELAY_MS: "500" });
-			const q13 = await call("devin_delegate", { prompt: "through the old name", mode: "dangerous", agent: "claude" });
+			const q13 = await call("devin_delegate", { prompt: "through the old name", mode: "dangerous" });
 			assert.ok(!q13.isError, text(q13));
 			// The alias is not a silent pass-through: `agent` is forced, because a caller that wrote
 			// `devin_delegate` meant Devin, and a rename must not change what their prompt does.
 			assert.strictEqual(q13.details.agent, "devin", `devin_delegate must mean devin: ${text(q13)}`);
+			// A caller that named another agent through the old name is refused, not silently re-pointed: running
+			// Devin when they asked for Claude is a rename changing what the prompt means.
+			const q13conflict = await call("devin_delegate", { prompt: "x", agent: "claude" });
+			assert.ok(q13conflict.isError, "an explicit non-Devin agent through an old name must not run");
+			assert.match(text(q13conflict), /always means Devin[\s\S]*Call delegate_task with agent='claude'/i);
 			// The note is appended, so `content[0]` still holds the answer a pre-rename caller parses.
 			assert.match(allText(q13), /\[deprecated\] devin_delegate → delegate_task/);
 			created.push(startedId(q13));

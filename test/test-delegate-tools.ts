@@ -425,9 +425,34 @@ test("a session whose agent process died is reported as interrupted, not as stil
 		await h.settle();
 		assert.equal(stub.rt.sessions.get("ag-fake-1")?.status, "interrupted");
 		assert.match(stub.sent.at(-1) ?? "", /ag-fake-1/);
+		// Devin ids outlive the process, so a follow-up continues the session instead of refusing: spawn, prompt
+		// the recorded id, no `session/new`. The refusal belongs to the agent that cannot do that, next.
+		const res = await h.run("delegate_message", { session_id: "ag-fake-1", message: "still there?" });
+		assert.notEqual(res.isError, true, textOf(res));
+		assert.match(textOf(res), /Sent to Devin session ag-fake-1/);
+		assert.equal(stub.rt.sessions.get("ag-fake-1")?.status, "running");
+	} finally {
+		stub.restoreHome();
+	}
+});
+
+test("a follow-up for an agent that cannot resume is refused, and names the way back", async () => {
+	// Claude is the agent whose ids this engine cannot re-prompt: the adapter advertises `loadSession` and
+	// nothing here calls it. The caller has to hear "this conversation is not continuing" and be pointed at
+	// `delegate_restart`, or the next thing they read is a stranger's reply wearing the old session id.
+	const stub = makeStub();
+	const h = harness([{ hang: true }], stub);
+	try {
+		await h.run("delegate_task", { agent: "claude", prompt: "the agent will die" });
+		await h.settle();
+		h.agents[0].die(1);
+		await h.settle();
 		const res = await h.run("delegate_message", { session_id: "ag-fake-1", message: "still there?" });
 		assert.equal(res.isError, true);
-		assert.match(textOf(res), /restart/i);
+		assert.match(textOf(res), /delegate_restart/);
+		// The refusal must not cost capacity: a slot reserved for a session that never spawned is one nobody
+		// gets back, and the next delegation of the same agent queues behind it.
+		assert.equal(stub.rt.slots.inFlight(), 0);
 	} finally {
 		stub.restoreHome();
 	}

@@ -11,6 +11,7 @@ import {
 } from "../extensions/lib/delegate/permissions.ts";
 import { devinDriver } from "../extensions/lib/delegate/drivers/devin.ts";
 import { claudeDriver, pickClaudePermissionOption } from "../extensions/lib/delegate/drivers/claude.ts";
+import type { SelectionContext } from "../extensions/lib/delegate/types.ts";
 
 // Each driver resolves the canonical mode names into its own wire vocabulary, so the same test body
 // runs against both and a table that is wrong for one of them fails here instead of in a live session.
@@ -166,6 +167,78 @@ test("Claude's driver declares the capability differences that the engine depend
 	assert.strictEqual(claude.blocksOwnCli, false, "blocking `claude` would block the operator's own CLI");
 	assert.strictEqual(devin.blocksOwnCli, true);
 	assert.strictEqual(devin.cli, "devin");
+});
+
+/** A `SelectionContext` that records what the driver asked the wire for. */
+function selectionCtx(offered: Record<string, string[]>) {
+	const calls: Array<{ configId: string; value: string }> = [];
+	return {
+		calls,
+		ctx: {
+			sessionId: "s-1",
+			cwd: "/tmp",
+			request: async (method: string, params: any) => {
+				if (method === "session/set_config_option") calls.push({ configId: params.configId, value: params.value });
+				return {};
+			},
+			advertisedOptions: () => offered,
+		},
+	};
+}
+
+/**
+ * The Claude driver's `applySelection`, asserted present once.
+ *
+ * The method is optional on the driver interface (Devin has none), so every call site would otherwise need
+ * a `!` — and a lint rule that reads as an error exists precisely to stop that habit in tests, where it
+ * hides "the driver stopped offering this" behind an unhelpful TypeError.
+ */
+async function applyClaude(ctx: SelectionContext, selection: { model?: string; thinking?: string }): Promise<string[]> {
+	const apply = claudeDriver.applySelection;
+	if (!apply) {
+		throw new Error("the Claude driver must offer applySelection");
+	}
+	return apply(ctx, selection as never);
+}
+
+test("Claude runs on sonnet when the caller named no model", async () => {
+	// `default` on the wire means "whatever this machine's CLI is configured with", which is how a
+	// delegated task ends up on the operator's most expensive model by accident.
+	const { calls, ctx } = selectionCtx({ model: ["default", "opus", "fable", "sonnet", "haiku"] });
+	const warnings = await applyClaude(ctx, {});
+	assert.deepStrictEqual(calls, [{ configId: "model", value: "sonnet" }]);
+	assert.deepStrictEqual(warnings, []);
+	assert.strictEqual(claudeDriver.models().default, "sonnet", "the tool text names the model it will use");
+});
+
+test("an install whose allowlist carries no sonnet keeps its own model, and says nothing", async () => {
+	// The default is ours, not a promise the caller made: refusing to apply it is not news, and
+	// warning about it on every delegation would train the reader to ignore warnings.
+	const { calls, ctx } = selectionCtx({ model: ["claude-opus-5"] });
+	const warnings = await applyClaude(ctx, {});
+	assert.deepStrictEqual(calls, []);
+	assert.deepStrictEqual(warnings, []);
+});
+
+test("a model the caller named is sent even when it is not advertised, and its refusal is reported", async () => {
+	const refuse: SelectionContext = {
+		sessionId: "s-1",
+		cwd: "/tmp",
+		request: async () => {
+			throw new Error("-32602: invalid config value");
+		},
+		advertisedOptions: () => ({ model: ["opus"] }),
+	};
+	const warnings = await applyClaude(refuse, { model: "claude-fable-5" });
+	assert.equal(warnings.length, 1, "a refusal about a model the caller chose is worth reporting");
+	assert.match(warnings[0] ?? "", /claude-fable-5/);
+});
+
+test("effort is only claimed when the resolved model offers it", async () => {
+	const { calls, ctx } = selectionCtx({ model: ["sonnet"], effort: ["low", "medium"] });
+	const warnings = await applyClaude(ctx, { thinking: "max" });
+	assert.deepStrictEqual(calls, [{ configId: "model", value: "sonnet" }], "the unavailable effort was never sent");
+	assert.match(warnings.join(" "), /offers no 'max' effort/);
 });
 
 test("the launch plans carry the differences between the two agents", () => {

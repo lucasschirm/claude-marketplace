@@ -49,8 +49,39 @@ test("an old name means Devin even when the parameters ask for another agent", a
 		aliasSpecs([spec]).find((s) => s.name === "devin_delegate"),
 		"the alias",
 	);
-	await alias.execute("id-1", { prompt: "x", agent: "claude" }, undefined, undefined, {} as never);
-	assert.deepStrictEqual(seen, [{ prompt: "x", agent: "devin" }]);
+	const res: any = await alias.execute("id-1", { prompt: "x", agent: "claude" }, undefined, undefined, {} as never);
+	// Refused, not rewritten. A caller that wrote `agent: "claude"` meant Claude; running Devin and reporting a
+	// session would be the rename doing the one thing a rename must not do: change what the call means.
+	assert.equal(res.isError, true);
+	assert.match(res.content[0].text, /always means Devin/);
+	assert.match(res.content[0].text, /Call delegate_task with agent='claude'/);
+	assert.deepStrictEqual(seen, []);
+});
+
+test("devin_status's `complete` asks delegate_status for the full transcript", async () => {
+	// The parameter was renamed along with the tool. Translate it, or a prompt written against the old name
+	// gets three messages where it asked for the whole conversation, and a note that says nothing about it.
+	const { spec, seen } = fakeTarget("delegate_status");
+	const alias = must(
+		aliasSpecs([spec]).find((s) => s.name === "devin_status"),
+		"the alias",
+	);
+	await alias.execute("id-1", { session_id: "s", complete: true }, undefined, undefined, {} as never);
+	// `agent` is pinned here the way the old name pinned Devin by construction — `delegate_status` gained an
+	// agent filter, and an unpinned `devin_status` would list Claude sessions under a Devin name.
+	assert.deepStrictEqual(seen, [{ session_id: "s", full: true, agent: "devin" }]);
+});
+
+test("devin_restart does not pin an agent the old tool never had", async () => {
+	// `delegate_restart`'s `agent` means "restart on this driver". Forcing devin would take a Claude session
+	// and restart it on Devin with Claude's model id — a vendor switch, mid-task, in silence.
+	const { spec, seen } = fakeTarget("delegate_restart");
+	const alias = must(
+		aliasSpecs([spec]).find((s) => s.name === "devin_restart"),
+		"the alias",
+	);
+	await alias.execute("id-1", { session_id: "s" }, undefined, undefined, {} as never);
+	assert.deepStrictEqual(seen, [{ session_id: "s" }]);
 });
 
 test("the wrapped call passes the signal, context and update callback through unchanged", async () => {

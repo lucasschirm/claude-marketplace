@@ -759,3 +759,54 @@ change to the Devin driver only, and §14.4's reporting rule stays worth having 
 - **`claude-agent-acp` advertises `loadSession: true`, fork/resume/list, steering and subagents at
   handshake** — recorded in §10.4/§10.5, and the basis for the `resume` capability in §4.2 being real
   rather than speculative.
+
+---
+
+## 12. Review round: what two independent reviews found, and what changed
+
+Two reviewers read `d800a63` end to end — Claude (Orca worker) and Devin (`swe-2-high`), the latter running
+through the deprecated `devin_*` alias surface, which is itself the compatibility test. They agreed on three
+things and disagreed on two; all of it is in the code now.
+
+**Both found, both fixed:**
+
+- **The transcript wrote the wrong event names.** `eventToLogEntries` emitted `assistant.delta` /
+  `tool.started` while every reader (and the pre-refactor log on disk) reads `assistant_message`,
+  `tool_call`. `delegate_status` was never wrong — it had nothing to read. Fixed at the writer, with the
+  names documented as the format and a regression test naming the pre-refactor spellings.
+- **`stopReason` was normalized, stored and printed, then thrown away** at the transport boundary: the
+  central promise of the refactor ("a turn that stopped early does not say done") was unenforced. The
+  transport now carries a `TurnResult` with the reason; `max_tokens`/`refusal` are reported as early stops.
+- **The transcript died with the child.** ACP has no `session/close`, so the last chunk of a turn could be
+  killed in the pipe. A `session.close()` flush was the reviewer's suggestion and it does not exist; the fix
+  is to settle the turn on `close` (stdio drained) rather than on `exit`, with a grace timer.
+- **A permission prompt was an instruction injection channel**: raw command text, unquoted, prefixed "may
+  run" — and pi trains its models to obey exactly that shape. Now `commandForCaller()` quotes it, labels it
+  as what the agent reported, and escapes the quotes so it cannot masquerade as the end of the sentence.
+
+**One found, both right:**
+
+- Recovery (Claude): queued tasks were restored *after* the session reads, so a budget cutoff could drop
+  them, and the next `persistState()` rewrote `state.json` from a queue that no longer held them — silently
+  deleting work that was on disk. Fixed by ordering (queue first), by not writing at all on a cutoff
+  (`persistDisabled`, since the tool path refuses until recovery completes anyway), and by keeping recorded
+  session dirs so a legacy session's events stay where they are readable.
+- Follow-ups (Devin): `delegate_message` neither held a slot nor refused a busy session, and re-attached by
+  creating a **new** session while reporting the old id. Now: the refusal comes before the slot (a refusal
+  must not cost capacity), a follow-up holds a slot for its whole turn and drains the queue when it ends,
+  and a re-attach either continues the recorded id (`reattachSession`, spawning without `session/new`) or is
+  refused with `delegate_restart` named. `resume: true` now means "re-promptable by id **and** implemented
+  here", which is why Claude's flipped to false: the adapter advertises `loadSession` and nothing calls it.
+
+**Where the fix went differently than suggested:**
+
+- `delegate_cancel` on a finished session: one reviewer wanted an idempotent success; it refuses instead,
+  because `cancelled` over `done` rewrites an outcome the caller already got and there is no slot to free.
+- Permission option selection: the reviewer saw the engine choosing `allow_always` because the *kind* was
+  matched before the *id*. Both are fixed — exact id first, kind as fallback — and a test now asserts the
+  durable option is never chosen while `allow_once` is on the table.
+
+**Accepted, documented:** the transport's inherited inline-regex/cognitive-complexity debt (the ratchet
+records the growth the fixes caused); and `runtime.ts`/`session.ts` crossing their line budgets, which is
+the price of the review's "the caller must not sequence what the engine knows" — the session file is where
+the two settlement paths were split, and the fix moved ownership inward rather than into a new file.

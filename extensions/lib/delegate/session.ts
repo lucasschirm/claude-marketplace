@@ -14,6 +14,7 @@
 import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
 import { getEventsLogPath } from "./storage.ts";
+import { eventLogPath } from "./persist.ts";
 import { defaultMapUpdate, eventToLogEntries, stopReasonPhrase, normalizeStopReason } from "./events.ts";
 import { detectPullRequest } from "./pr-detect.ts";
 import type { DelegateRuntime } from "./runtime.ts";
@@ -68,15 +69,18 @@ export function attach(rt: DelegateRuntime, client: DelegateTransport, meta: Ses
 		}
 		rt.flushBuffers(meta);
 		// A mid-turn process exit is an interruption, not a failure: the agent's own session is still
-		// there, and `delegate_restart` can pick it up (Devin: by id; others: by session/load).
-		meta.status = code === 0 ? "idle" : "interrupted";
+		// there, and `delegate_message` re-attaches to it (see `reattachSession`).
+		//
+		// Exit code 0 is an interruption too, and used to be recorded as `idle` in silence. The turn was
+		// open: whatever the exit code, the agent stopped answering before it reported a stop reason, and a
+		// caller that hears nothing waits for a completion notice that is never coming. The code still
+		// belongs in the sentence — 0 means it closed the connection on purpose, which is worth knowing.
+		meta.status = "interrupted";
 		meta.finishedAt = Date.now();
-		if (code !== 0) {
-			meta.error = `${labelOf(rt, meta.agent)} exited with code ${code} (turn in flight)`;
-			rt.sendAgentMessage(
-				`The session ${meta.sessionId} was interrupted: ${meta.error}. Check it with "delegate_status" or restart it with "delegate_restart".`,
-			);
-		}
+		meta.error = `${labelOf(rt, meta.agent)} exited with code ${code} in the middle of the turn (no stop reason reported)`;
+		rt.sendAgentMessage(
+			`The session ${meta.sessionId} was interrupted: ${meta.error}. Check it with "delegate_status" or restart it with "delegate_restart".`,
+		);
 		rt.persistSessionMeta(meta, true);
 		rt.totalCompleted++;
 		rt.persistState();
@@ -144,8 +148,17 @@ function consume(
 			}
 			return;
 		}
-		case "session.started":
+		case "mode.changed": {
+			// The agent moved the session to a mode we did not ask for. `delegate_status` reads `meta.mode`,
+			// and a session that quietly fell back to `default` must not keep being reported as the
+			// `dangerous` one the caller requested — that is the difference between a permission prompt that
+			// arrives because the agent is cautious and one that arrives because a request was refused.
+			meta.mode = event.modeId;
+			for (const entry of eventToLogEntries(event)) {
+				client.logEvent(entry.type, entry.data);
+			}
 			return;
+		}
 		default:
 			for (const entry of eventToLogEntries(event)) {
 				client.logEvent(entry.type, entry.data);
@@ -261,6 +274,10 @@ async function settle(rt: DelegateRuntime, meta: SessionMeta, reason: ReturnType
 	meta.finishedAt = Date.now();
 	rt.totalCompleted++;
 	rt.persistSessionMeta(meta, true);
+	// The transcript records why the turn ended, not just that it did. `max_tokens` and `refusal` are the
+	// two stop reasons a reader must be able to find after the fact, and a transcript that ends mid-
+	// sentence with no marker is indistinguishable from a turn that ran out of budget.
+	rt.appendEventLog(meta, "turn_completed", { stopReason: reason });
 
 	let prSuffix = " No pullrequest was created";
 	if (meta.worktreePath) {
@@ -315,17 +332,17 @@ export async function spawnSession(
 	const client = rt.makeTransport(opts.cwd, plan);
 	let meta: SessionMeta | undefined;
 
-	// Installed before `start()`: a child that dies during the handshake must not leave a session in
-	// `running`, holding a slot with nothing behind it.
-	client.setOnExit((code) => {
-		if (meta) {
-			attachExitOnly(rt, meta, code);
-		}
-	});
+	// No exit handler is installed here on purpose. Until `attach` runs there is no session to report on —
+	// `meta` is assigned and attached in the same synchronous block, and a child that dies during the
+	// handshake is handled by the catch below, which disposes the transport and lets the start fail.
 
+	let sessionId = "";
+	let advertised: Record<string, string[]> = {};
 	try {
 		await client.start();
-		const sessionId = await createSession(client, plan.label, opts.cwd);
+		const created = await createSession(client, plan.label, opts.cwd);
+		sessionId = created.sessionId;
+		advertised = created.options;
 		client.setLogFilePath(logPathFor(rt, sessionId));
 
 		meta = {
@@ -346,6 +363,15 @@ export async function spawnSession(
 		};
 		const registered = meta;
 		attach(rt, client, registered);
+		// Seed what `session/new` advertised into the per-session catalogue `configureSession` reads. Order
+		// matters: `attach` installs the map, this fills it, and the driver's selection runs after both.
+		const catalogue = rt.configOptions.get(sessionId);
+		if (catalogue) {
+			for (const [id, values] of Object.entries(advertised)) {
+				catalogue.set(id, values);
+			}
+		}
+		client.logEvent("session_started", { sessionId, configOptions: advertised });
 		rt.sessions.set(sessionId, registered);
 		rt.activeClients.set(sessionId, client);
 		rt.persistSessionMeta(registered, true);
@@ -359,30 +385,91 @@ export async function spawnSession(
 	}
 }
 
-/** The exit path for a session that never finished registering: nothing to notify, just stop the leak. */
-function attachExitOnly(rt: DelegateRuntime, meta: SessionMeta, code: number | null): void {
-	rt.stopStallWatchdog(meta.sessionId);
-	rt.activeClients.delete(meta.sessionId);
-	if (meta.status !== "running" && meta.status !== "stalled") {
-		return;
-	}
-	meta.status = code === 0 ? "idle" : "interrupted";
-	meta.finishedAt = Date.now();
-	rt.persistSessionMeta(meta, true);
+interface NewSession {
+	sessionId: string;
+	/**
+	 * What the session advertises about itself at creation: every select-style config option with its
+	 * value list, under its option id (`mode`, `model`, `effort`, …), plus `modes`/`models` when the agent
+	 * still speaks the pre-config-option shape.
+	 *
+	 * This is the only place the vocabulary is available. The installed adapter answers `session/new` with
+	 * it and sends a `config_option_update` *only when something changes*, so a reader that waited for the
+	 * notification had a permanently empty picture of a session it was about to configure — every
+	 * "this model offers no such effort" pre-check was dead code, and every refusal message that wanted
+	 * to list the valid values had none to list.
+	 */
+	options: Record<string, string[]>;
 }
 
-async function createSession(client: DelegateTransport, label: string, cwd: string): Promise<string> {
+/** The value list of one select-style config option, in whatever shape this agent sent it. */
+function optionValues(option: any): string[] {
+	const raw = option?.options ?? option?.values ?? [];
+	const list = Array.isArray(raw) ? raw : [];
+	return list
+		.map((o: any) => (typeof o === "string" ? o : (o?.value ?? o?.id)))
+		.filter((v: unknown): v is string => typeof v === "string" && v.length > 0);
+}
+
+async function createSession(client: DelegateTransport, label: string, cwd: string): Promise<NewSession> {
 	const res: any = await client.request("session/new", { cwd, mcpServers: [] }, SETUP_TIMEOUT_MS);
 	const sessionId = res?.sessionId;
 	if (typeof sessionId !== "string" || !sessionId) {
 		throw new Error(`${label} answered session/new without a sessionId`);
 	}
-	return sessionId;
+	const options: Record<string, string[]> = {};
+	for (const opt of Array.isArray(res?.configOptions) ? res.configOptions : []) {
+		const id = typeof opt?.id === "string" ? opt.id : "";
+		if (id) {
+			options[id] = optionValues(opt);
+		}
+	}
+	// The older shape, for an agent that has not moved to config options yet.
+	const modes = Array.isArray(res?.modes?.availableModes) ? res.modes.availableModes : [];
+	if (modes.length && !options.mode) {
+		options.mode = modes.map((m: any) => m?.id).filter((v: unknown): v is string => typeof v === "string");
+	}
+	const models = Array.isArray(res?.models?.availableModels) ? res.models.availableModels : [];
+	if (models.length && !options.model) {
+		options.model = models.map((m: any) => m?.id).filter((v: unknown): v is string => typeof v === "string");
+	}
+	return { sessionId, options };
 }
 
 function logPathFor(rt: DelegateRuntime, sessionId: string): string {
 	// Resolved only now that the id exists, so a file is never renamed to dodge a collision.
 	return getEventsLogPath(rt.currentPiSessionId, sessionId);
+}
+
+/**
+ * Bring a lost connection back, on the same session id, so a conversation can continue.
+ *
+ * The agent keeps its own session state; what pi loses across a restart, a crash between turns, or a
+ * backfilled recovery is the *process*, not the conversation. Spawning a fresh transport and prompting the
+ * recorded id continues it — what the pre-rename extension did, and what a caller means by "send this
+ * session another message". A driver that cannot do that (`capabilities().resume === false`) is never
+ * re-attached: minting a new id and passing it off as the same session would silently drop the context the
+ * caller was writing into, which is worse than saying "use delegate_restart".
+ *
+ * The slot is the caller's business (see `followUp`): this spawns, it does not reserve.
+ */
+export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
+	const cwd = meta.worktreePath ?? rt.baseDir;
+	const selection: Selection = { model: meta.model, thinking: meta.thinking, mode: meta.mode };
+	const client = rt.makeTransport(cwd, driver.launchPlan(selection, cwd));
+	try {
+		await client.start();
+		client.setLogFilePath(eventLogPath(rt, meta));
+	} catch (err) {
+		client.dispose();
+		throw err;
+	}
+	// The wiring a live session has: updates, permission requests, the exit path that reports an interrupted
+	// turn. `attach` owns the session's config-option catalogue from here.
+	attach(rt, client, meta);
+	rt.activeClients.set(meta.sessionId, client);
+	meta.pid = client.pid;
+	rt.persistSessionMeta(meta, true);
+	return client;
 }
 
 /**

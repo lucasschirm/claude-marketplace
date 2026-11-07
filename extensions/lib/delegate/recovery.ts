@@ -17,7 +17,7 @@
 import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
-import { getStatePath, LEGACY_STORAGE_ROOT, readTextFileWithRetry, sessionFileCandidates, STORAGE_ROOT } from "./storage.ts";
+import { firstExisting, getStatePath, LEGACY_STORAGE_ROOT, readTextFileWithRetry, sessionFileCandidates, STORAGE_ROOT } from "./storage.ts";
 import type { PersistedState, QueuedTask, SessionMeta, SessionStatus } from "./types.ts";
 import { drainQueue } from "./queue.ts";
 
@@ -137,11 +137,13 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	} else if (state.maxRuns && state.maxRuns > 0) {
 		rt.maxRuns = state.maxRuns;
 	}
+	// The total is never below the per-agent limit, here or at startup. Reading a persisted 3 back over a
+	// `--delegate-max-runs 5` would produce a runtime where one agent can hold 5 of 3 slots.
 	const flagTotal = rt.flag("delegate-max-runs-total");
 	if (flagTotal !== undefined) {
 		const parsed = Number.parseInt(flagTotal, 10);
 		if (!Number.isNaN(parsed) && parsed > 0) {
-			rt.maxRunsTotal = parsed;
+			rt.maxRunsTotal = Math.max(parsed, rt.maxRuns);
 		}
 	} else if (state.maxRunsTotal && state.maxRunsTotal > 0) {
 		rt.maxRunsTotal = Math.max(state.maxRunsTotal, rt.maxRuns);
@@ -151,6 +153,27 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	rt.totalCompleted = state.totalCompleted || 0;
 	for (const [id, dir] of Object.entries(state.sessionDirs ?? {})) {
 		rt.sessionDirs.set(id, dir);
+	}
+
+	// The queue is restored before any session is read, and the counters before that. The budget for this
+	// pass is a few seconds; a pass that ran out of it used to return from the middle of the session loop,
+	// leaving the FIFO empty while its tasks were still on disk — and the next `persistState()` from any
+	// tool call then wrote that emptiness back. Order is the fix: whatever the budget allows, the queue is
+	// already in memory by the time anything can be interrupted.
+	if (Array.isArray(state.queue)) {
+		rt.queue.length = 0;
+		for (const t of state.queue) {
+			const task = normalizeTask(t, rt);
+			if (task) {
+				rt.queue.push(task);
+			}
+		}
+	}
+	// An aborted pass has read enough to know what was there and not enough to say what is. Writing the
+	// half-loaded view back would delete the sessions it never reached, so a killed recovery leaves the
+	// file alone and the next pi reads the same state again.
+	if (signal?.aborted) {
+		return report;
 	}
 
 	if (Array.isArray(state.sessionIds)) {
@@ -167,21 +190,18 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			}
 			rt.sessions.set(sessionId, meta);
 			report.recovered++;
-			// Re-anchor under the current storage dir, which heals a session recorded elsewhere.
-			rt.persistSessionMeta(meta, true);
+			// No unconditional re-anchor here. A recovered record is written again when something about it
+			// changed — `reconcileInFlight` and the backfill both persist what they mutate — and copying every
+			// legacy record into the new root at boot made two copies of a session that had done nothing, with
+			// its transcript still in the old one.
 		}
 	}
 
-	if (Array.isArray(state.queue)) {
-		rt.queue.length = 0;
-		for (const t of state.queue) {
-			const task = normalizeTask(t, rt);
-			if (task) {
-				rt.queue.push(task);
-			}
-		}
+	// The loop above may have been cut short; the queue restored above is not a reason to write a partial
+	// session list back over the file that still holds the rest.
+	if (signal?.aborted) {
+		return report;
 	}
-
 	rt.persistState();
 	rt.updateStatusUI();
 	drainQueue(rt);
@@ -190,32 +210,40 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 
 /** The state file, from this root or the pre-rename one. */
 async function readState(piSessionId: string): Promise<string | null> {
-	for (const root of [STORAGE_ROOT, LEGACY_STORAGE_ROOT]) {
-		try {
-			return await readTextFileWithRetry(getStatePath(piSessionId, root));
-		} catch {
-			/* try the next root */
-		}
+	const found = await firstExisting([getStatePath(piSessionId, STORAGE_ROOT), getStatePath(piSessionId, LEGACY_STORAGE_ROOT)]);
+	if (!found) {
+		return null;
 	}
-	return null;
+	try {
+		return await readTextFileWithRetry(found);
+	} catch {
+		// There a moment ago and unreadable now. Reported as "no prior state" rather than a crash, and
+		// recovery writes nothing in that case, so the file still holds what it held.
+		return null;
+	}
 }
 
 async function readMeta(rt: DelegateRuntime, piSessionId: string, sessionId: string, recordedDir?: string): Promise<SessionMeta | null> {
-	for (const p of sessionFileCandidates(piSessionId, sessionId, "meta.json", recordedDir)) {
-		let raw: string;
-		try {
-			raw = await readTextFileWithRetry(p);
-		} catch {
-			continue;
-		}
-		try {
-			return normalizeMeta(JSON.parse(raw));
-		} catch (err) {
-			rt.logWarn(`Could not read ${p}: ${extractCliError(err)}`);
-			return null;
-		}
+	// `firstExisting` rather than reading each candidate: a pre-rename session misses on its new-root path
+	// by design, and a miss through `readTextFileWithRetry` sleeps 150 ms. Times dozens of sessions, times
+	// a 5 s boot budget, that is how legacy sessions stopped being recovered at all.
+	const found = await firstExisting(sessionFileCandidates(piSessionId, sessionId, "meta.json", recordedDir));
+	if (!found) {
+		return null;
 	}
-	return null;
+	let raw: string;
+	try {
+		raw = await readTextFileWithRetry(found);
+	} catch (err) {
+		rt.logWarn(`Could not read ${found}: ${extractCliError(err)}`);
+		return null;
+	}
+	try {
+		return normalizeMeta(JSON.parse(raw));
+	} catch (err) {
+		rt.logWarn(`Could not read ${found}: ${extractCliError(err)}`);
+		return null;
+	}
 }
 
 /**

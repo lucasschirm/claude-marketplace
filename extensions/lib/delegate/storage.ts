@@ -64,10 +64,34 @@ export function sessionFileCandidates(
 }
 
 /**
+ * The first path that is actually there, without paying for the ones that are not.
+ *
+ * Candidate lists exist because a file may live under either root, and reading them by trying to open
+ * each one meant every pre-rename session cost the full ENOENT retry delay of `readTextFileWithRetry`
+ * before falling through to its real location. Recovery loads dozens of sessions inside one 5 s budget,
+ * and the misses, not the reads, are what blew it: 40 legacy sessions took 5.1 s and the budget killed
+ * the pass halfway through. `access` costs one syscall and no sleep.
+ */
+export async function firstExisting(paths: readonly string[]): Promise<string | null> {
+	for (const p of paths) {
+		try {
+			await fsp.access(p);
+			return p;
+		} catch {
+			/* the next candidate */
+		}
+	}
+	return null;
+}
+
+/**
  * Tolerate transient ENOENT (observed on shared volumes: directories flapping between visible and
  * ENOENT within seconds) by retrying once after a short delay. The delay is an ordinary timer: the
  * Atomics.wait version this replaces froze the event loop — and with it the TUI — for 150 ms per
  * retried file, right in the middle of session_start.
+ *
+ * Only ever call it on a path you have already decided should exist (`firstExisting`, or a file this
+ * process just wrote). On a candidate list it turns a normal miss into a 150 ms pause.
  */
 export async function readTextFileWithRetry(p: string): Promise<string> {
 	try {

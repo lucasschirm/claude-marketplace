@@ -139,9 +139,29 @@ export function readFullTranscript(rt: DelegateRuntime, meta: SessionMeta): stri
 	if (!file) {
 		return `No transcript logged yet for session ${meta.sessionId}. Initial prompt: "${meta.prompt}"`;
 	}
-	let content: string;
+	// Bounded on purpose. The whole design says a transcript lives on disk and never in RAM; reading one
+	// `readFileSync` of the whole file breaks that promise the moment a long-running session's log grows into
+	// the hundreds of megabytes, and the result is a tool result no model can read either. So: read at most
+	// the last few megabytes (line-aligned), and return at most a bounded tail, saying what was skipped.
+	let content = "";
+	let skippedBytes = 0;
 	try {
-		content = fs.readFileSync(file, "utf-8");
+		const size = fs.statSync(file).size;
+		const fd = fs.openSync(file, "r");
+		try {
+			skippedBytes = Math.max(0, size - FULL_READ_MAX_BYTES);
+			const length = size - skippedBytes;
+			const buffer = Buffer.alloc(length);
+			fs.readSync(fd, buffer, 0, length, skippedBytes);
+			content = buffer.toString("utf-8");
+		} finally {
+			fs.closeSync(fd);
+		}
+		// A slice that starts mid-line parses as nothing; drop the fragment so the first line shown is real.
+		if (skippedBytes > 0) {
+			const firstBreak = content.indexOf("\n");
+			content = firstBreak >= 0 ? content.slice(firstBreak + 1) : "";
+		}
 	} catch (err: any) {
 		return `Failed to read transcript for ${meta.sessionId}: ${err?.message ?? String(err)}`;
 	}
@@ -166,8 +186,23 @@ export function readFullTranscript(rt: DelegateRuntime, meta: SessionMeta): stri
 			entries.push(`[${obj.timestamp}] Error: ${JSON.stringify(obj.data ?? {})}`);
 		}
 	}
-	return entries.join("\n\n") || `Initial prompt: "${meta.prompt}" (no assistant turns logged)`;
+	const body = entries.join("\n\n");
+	if (!body) {
+		return `Initial prompt: "${meta.prompt}" (no assistant turns logged)`;
+	}
+	const head =
+		skippedBytes > 0 ? `… ${skippedBytes} bytes of earlier transcript skipped; showing the last ${FULL_READ_MAX_BYTES} bytes …\n\n` : "";
+	return (
+		head +
+		(body.length > FULL_OUTPUT_MAX_CHARS
+			? `${head ? "" : "… earlier transcript trimmed …\n\n"}${body.slice(-FULL_OUTPUT_MAX_CHARS)}`
+			: body)
+	);
 }
+
+/** How much of a transcript is read into memory for `full: true` — and how much of it the caller sees. */
+const FULL_READ_MAX_BYTES = 4 * 1024 * 1024;
+const FULL_OUTPUT_MAX_CHARS = 40_000;
 
 function clip(text: string): string {
 	return text.length > 100 ? `${text.slice(0, 100)}…` : text;

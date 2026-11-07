@@ -25,6 +25,22 @@ import type { AgentDriver, Catalogue, DriverCapabilities, DriverHealth, LaunchPl
 /** The adapter's own config-option ids (`session-config-ids.d.ts`, `session-model.d.ts`, `acp-agent.d.ts`). */
 const CONFIG = { model: "model", effort: "effort" } as const;
 
+/**
+ * The model a Claude delegation uses when the caller did not name one. `default` would be the honest
+ * wire value, but it means "whatever this machine's CLI is configured with", which is how a delegated
+ * task silently ends up on the operator's most expensive model. `sonnet` is verified present in the
+ * advertised vocabulary of the installed adapter; an install that allowlists other models keeps its own
+ * configuration rather than hearing a warning on every delegation (see `applySelection`).
+ */
+export const CLAUDE_MODEL_DEFAULT = "sonnet";
+
+/**
+ * The effort values this adapter advertises for the `effort` config option: `default, low, medium, high,
+ * xhigh, max`. Verified against the installed adapter's `session/new` answer, because the alternative is
+ * guessing which of the tool's seven canonical levels a given vendor happens to accept.
+ */
+const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+
 /** Canonical mode → the mode id Claude's `session/set_mode` parses (`session-mode.js parseMode`). */
 const CLAUDE_MODE_ALIASES: Record<string, string> = {
 	dangerous: "bypassPermissions",
@@ -47,7 +63,10 @@ function bypassAvailable(): boolean {
 	const uid =
 		(process as { getuid?: () => number; geteuid?: () => number }).geteuid?.() ?? (process as { getuid?: () => number }).getuid?.();
 	const isRoot = uid === 0;
-	return !isRoot || process.env.IS_SANDBOX !== undefined;
+	// `!!IS_SANDBOX`, not `!== undefined`: that is the test the adapter makes, and an empty `IS_SANDBOX=""`
+	// would otherwise have this driver offer `bypassPermissions` for the adapter to clamp to `default` — the
+	// exact silent degradation the check exists to refuse.
+	return !isRoot || Boolean(process.env.IS_SANDBOX);
 }
 
 /** Cached so a burst of delegations does not spawn a CLI per call. */
@@ -133,8 +152,16 @@ export const claudeDriver: AgentDriver = {
 	capabilities(): DriverCapabilities {
 		return {
 			thinking: true,
-			// The adapter advertises `loadSession: true` plus session fork/resume/list.
-			resume: true,
+			// The adapter advertises `loadSession` (and fork/resume/list), but this engine has no loader: what
+			// re-attaching does here is "spawn, then prompt the recorded id", which is what Devin's server
+			// supports and has not been shown to work against this one. Declaring `true` would let
+			// `delegate_message` promise the continuation of a conversation nothing restores.
+			resume: false,
+			// The effort vocabulary this install advertises, minus `default` (which means "whatever the model
+			// picks" — what omitting `thinking` already does). No Claude model here offers `off` or `minimal`, so
+			// asking for one is refused at admission instead of costing a spawned session and a warning buried in
+			// a tool result.
+			thinkingLevels: () => CLAUDE_EFFORT_LEVELS,
 			cancel: true,
 			permissions: true,
 			plans: true,
@@ -175,12 +202,19 @@ export const claudeDriver: AgentDriver = {
 	 */
 	async applySelection(ctx: SelectionContext, sel: Selection): Promise<string[]> {
 		const warnings: string[] = [];
-		const model = sel.model?.trim();
-		if (model) {
+		const wanted = sel.model?.trim();
+		const model = wanted ?? CLAUDE_MODEL_DEFAULT;
+		const offeredModels = ctx.advertisedOptions()[CONFIG.model] ?? [];
+		// Our default is applied best-effort: an install whose allowlist omits `sonnet` keeps the model its
+		// own CLI configured instead of hearing a warning on every delegation. A model the caller named is
+		// always sent, so a refusal is reported about a choice they made, not one we guessed. An install
+		// that advertised no model list at all gets the attempt, because there the default is a request and
+		// not a contradiction.
+		if (wanted || offeredModels.length === 0 || offeredModels.includes(model)) {
 			try {
 				await ctx.request("session/set_config_option", { sessionId: ctx.sessionId, configId: CONFIG.model, value: model });
 			} catch (err: any) {
-				warnings.push(`model '${model}' was refused: ${err?.message ?? String(err)}`);
+				if (wanted) warnings.push(`model '${model}' was refused: ${err?.message ?? String(err)}`);
 			}
 		}
 		if (sel.thinking) {
@@ -216,7 +250,9 @@ export const claudeDriver: AgentDriver = {
 		// `values` is empty on purpose: the adapter lists models per session from the CLI's settings,
 		// including whatever allowlist or gateway the operator configured. Anything hardcoded here
 		// would be a lie about someone else's install, so validation defers to the wire.
-		return { default: "default", values: [], onUnknown: "warn" };
+		// The default is not a guess but the tool's own choice: `sonnet` is what a delegation costs by
+		// default, and a session that wanted more asks for it.
+		return { default: CLAUDE_MODEL_DEFAULT, values: [], onUnknown: "warn" };
 	},
 
 	modes(): Catalogue {

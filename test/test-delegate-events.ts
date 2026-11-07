@@ -163,7 +163,9 @@ test("transcript line names keep the pre-refactor spellings", () => {
 	assert.deepStrictEqual(eventToLogEntries({ kind: "tool.started", toolCallId: "t", title: "x" }), [
 		{ type: "tool_call", data: { toolCallId: "t", title: "x" } },
 	]);
-	assert.deepStrictEqual(eventToLogEntries({ kind: "turn.failed", error: "boom" }), [{ type: "error", data: { message: "boom" } }]);
+	assert.deepStrictEqual(eventToLogEntries({ kind: "mode.changed", modeId: "bypass" }), [
+		{ type: "mode_update", data: { modeId: "bypass" } },
+	]);
 });
 
 test("streaming deltas are not written as transcript lines", () => {

@@ -12,7 +12,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { admit, findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { cancelSession, delegate, followUp, type DelegateRequest } from "./queue.ts";
-import { PERMISSION_DECISIONS, type PermissionDecision, quoteCommand } from "./permissions.ts";
+import { commandForCaller, PERMISSION_DECISIONS, type PermissionDecision } from "./permissions.ts";
 import { releaseWorktree } from "./worktree.ts";
 import type { SessionMeta } from "./types.ts";
 import { begin, errorResult, queueReasonText, textResult, type ToolSpec } from "./tools.ts";
@@ -120,7 +120,7 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 				const remaining = rt.pendingPermissions.get(meta.sessionId) ?? [];
 				const stillWaiting =
 					remaining.length > 0
-						? `\nAwaiting permission to run: ${quoteCommand(remaining[0].command)}${remaining.length > 1 ? ` (+${remaining.length - 1} more)` : ""}. Answer with "delegate_permission".`
+						? `\nAwaiting permission to run: ${commandForCaller(remaining[0].command)}${remaining.length > 1 ? ` (+${remaining.length - 1} more)` : ""}. Answer with "delegate_permission".`
 						: "";
 				return textResult(rt, "delegate_permission", permissionReply(meta.agent, decision, answered.optionId) + stillWaiting, {
 					result: "answered",
@@ -145,6 +145,17 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 				if (outcome === "not_found") {
 					const missing = `Nothing running or queued with id '${params.session_id}'. delegate_status lists the ids.`;
 					return errorResult(rt, "delegate_cancel", missing, { code: "NOT_FOUND" });
+				}
+				if (outcome === "not_running") {
+					// It finished. Saying "cancelled, the slot is free" would claim a slot that was never held and
+					// rewrite a recorded outcome in the caller's mind.
+					const meta = rt.sessions.get(String(params.session_id));
+					return errorResult(
+						rt,
+						"delegate_cancel",
+						`Session '${params.session_id}' is not running (it is ${meta?.status ?? "unknown"}), so there is nothing to cancel.`,
+						{ code: "NOT_RUNNING", status: meta?.status },
+					);
 				}
 				return textResult(
 					rt,
@@ -313,14 +324,19 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 						notes.push(`${meta.sessionId}: no worktree`);
 						continue;
 					}
-					if (params.force === true) {
-						// Force is the caller's assertion that the safety check's answer does not matter.
-						// It still has to be said out loud in the result, because the alternative is a
-						// silent rm -rf of somebody's uncommitted work.
-						rt.logWarn(`force-releasing worktree ${meta.worktreePath} of ${meta.sessionId} without the safety check`);
+					if (meta.status === "running" || meta.status === "stalled") {
+						// The agent is working in that folder. Removing it under a live process — or marking the
+						// session's worktree `retained` so the PR hook and the cancel path both stop looking at it —
+						// is worse than refusing, whatever `force` was passed for.
+						return errorResult(
+							rt,
+							"delegate_clean_worktree",
+							`Session ${meta.sessionId} is ${meta.status}; its worktree is where it is working. Cancel it first, then clean.`,
+							{ code: "SESSION_ACTIVE", session_id: meta.sessionId },
+						);
 					}
 					try {
-						const res = await releaseWorktree(rt, meta);
+						const res = await releaseWorktree(rt, meta, { force: params.force === true });
 						notes.push(`${meta.sessionId}: ${res.note}`);
 					} catch (err) {
 						notes.push(`${meta.sessionId}: failed (${extractCliError(err)})`);
@@ -329,6 +345,10 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 				if (targets.length === 0) {
 					return textResult(rt, "delegate_clean_worktree", "No settled session holds an active worktree.", { result: "nothing_to_do" });
 				}
+				// What changed is worth a line even when nothing was removed: `kept: <reason>` is the answer to
+				// "why is this folder still here", and the operator is the only one who can decide to force it.
+				rt.persistState();
+				rt.updateStatusUI();
 				return textResult(rt, "delegate_clean_worktree", notes.join("\n"), { result: "done", sessions: targets.length });
 			},
 		},

@@ -160,7 +160,11 @@ function worktreeFolder(repo: string, branch: string): string {
  * or left uncommitted edits, and only the first two are recoverable after `rm -rf`. An unknown answer
  * keeps the folder.
  */
-export async function releaseWorktree(rt: DelegateRuntime, meta: SessionMeta): Promise<{ removed: boolean; note: string }> {
+export async function releaseWorktree(
+	rt: DelegateRuntime,
+	meta: SessionMeta,
+	opts: { force?: boolean } = {},
+): Promise<{ removed: boolean; note: string }> {
 	if (!meta.worktreePath) {
 		return { removed: false, note: "no worktree" };
 	}
@@ -168,11 +172,19 @@ export async function releaseWorktree(rt: DelegateRuntime, meta: SessionMeta): P
 		return { removed: false, note: "already released" };
 	}
 
-	const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch, undefined, { timeoutMs: READ_TIMEOUT_MS });
-	if (!safety.safe) {
-		meta.worktreeStatus = "retained";
-		rt.persistSessionMeta(meta, true);
-		return { removed: false, note: `kept: ${safety.reason ?? "uncommitted or unpushed work"}` };
+	if (opts.force !== true) {
+		const safety = await checkWorktreeSafety(meta.worktreePath, meta.worktreeBranch, undefined, { timeoutMs: READ_TIMEOUT_MS });
+		if (!safety.safe) {
+			meta.worktreeStatus = "retained";
+			rt.persistSessionMeta(meta, true);
+			return { removed: false, note: `kept: ${safety.reason ?? "uncommitted or unpushed work"}` };
+		}
+	}
+	// Forced is the caller asserting the work is disposable. It still goes in the log, because the
+	// alternative is an untraceable deletion of somebody's uncommitted branch — and the tool result repeats
+	// it, so a folder cannot be forced out of existence without that appearing somewhere a human will read.
+	else {
+		rt.logWarn(`force-releasing the worktree ${meta.worktreePath} of ${meta.sessionId} without the safety check`);
 	}
 
 	// orca addresses a worktree by its id when it has one, and by path otherwise. `force` is safe here
@@ -184,5 +196,5 @@ export async function releaseWorktree(rt: DelegateRuntime, meta: SessionMeta): P
 	}
 	meta.worktreeStatus = "released";
 	rt.persistSessionMeta(meta, true);
-	return { removed: true, note: `removed ${meta.worktreePath}` };
+	return { removed: true, note: `removed ${meta.worktreePath}${opts.force === true ? " (forced: the safety check was skipped)" : ""}` };
 }

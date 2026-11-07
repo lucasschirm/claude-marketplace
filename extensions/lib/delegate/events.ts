@@ -221,8 +221,6 @@ export function eventToLogEntries(event: DelegateEvent): Array<{ type: string; d
 			return [{ type: "plan_update", data: { entries: event.entries, done: event.done } }];
 		case "mode.changed":
 			return [{ type: "mode_update", data: { modeId: event.modeId } }];
-		case "turn.failed":
-			return [{ type: "error", data: { message: event.error } }];
 		default:
 			return [];
 	}

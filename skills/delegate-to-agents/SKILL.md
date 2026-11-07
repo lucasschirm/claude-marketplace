@@ -9,7 +9,7 @@ description: Use when handing research, planning, code review, debugging, or cod
 
 The `delegate_*` tools run another agent's session in the background over its Agent Client Protocol (ACP) server. `delegate_task` returns immediately; the result arrives later as a follow-up message.
 
-**Core principle: name the `agent`, the `model`, and the reason. Both defaults are deliberately modest.** `agent` defaults to `devin` (for one release — say it explicitly anyway), and Devin's default model `swe-2-high` is only right for simple coding, so omitting `model` quietly under-powers research, review and complex work.
+**Core principle: name the `agent`, the `model`, and the reason. Both defaults are deliberately modest.** `agent` defaults to `devin` (for one release — say it explicitly anyway), Devin's default model is `swe-2-high` (right only for simple coding) and Claude's is `sonnet`, so omitting `model` quietly under-powers research, review and complex work.
 
 ## Tools
 
@@ -17,8 +17,8 @@ The `delegate_*` tools run another agent's session in the background over its Ag
 | :--- | :--- |
 | `delegate_task` | Start a task. Params: `prompt` (required), `agent`, `model`, `thinking`, `mode`, `create_worktree`. |
 | `delegate_status` | Check sessions. No args: every session and the queue. `session_id`: state plus recent messages; `full: true` for the whole transcript. |
-| `delegate_message` | Send a follow-up to an idle session (`session_id`, `message`). |
-| `delegate_cancel` | Cancel a running, queued or blocked session (session id or queue id). |
+| `delegate_message` | Send a follow-up to an idle session (`session_id`, `message`). It is a turn of work: it holds a slot, or queues. A session whose process died is continued when the agent re-accepts its id (Devin), and refused with a pointer to `delegate_restart` when it does not (Claude) — a new conversation wearing an old id is not a follow-up. |
+| `delegate_cancel` | Cancel a running, queued or blocked session (session id or queue id). A session that already finished is an error, not a cancellation — it holds no slot, and its result stands. |
 | `delegate_permission` | Answer a session's pending permission request (`session_id`, `decision`: `allow`, `allow_session` or `reject`; `request_id` when several are pending). |
 | `delegate_restart` | Resume a failed, interrupted or stopped session in its original worktree. Optional new `prompt`, `agent`, `mode`. |
 | `delegate_clean_worktree` | Release and delete the worktree of a settled session (`session_id`), or of every settled session whose PRs are merged/closed (`all_settled: true`). Optional `force`. |
@@ -36,7 +36,7 @@ Do not run an agent's own CLI through bash. The guarded agents (currently Devin)
 | Agent | Use it when |
 | :--- | :--- |
 | `devin` (default) | Default for coding, review and research runs. Models are picked per task class (table below). |
-| `claude` | You want Claude rather than Devin: a second opinion from a different model family, or work where Claude's own tooling and habits fit better. Its model and effort are configured on the machine, so pass `model` only when you know the install accepts it. |
+| `claude` | You want Claude rather than Devin: a second opinion from a different model family, or work where Claude's own tooling and habits fit better. Defaults to `sonnet`, with effort through `thinking`. Its catalogue is the machine's — the adapter lists whatever that install allows — so pass `model` only when you know this one carries the value. |
 
 A second agent is a real second opinion, not a retry: when you ask for a review of work the first agent did, delegate to the *other* one. Capacity is limited per agent **and** in total, so a busy Devin does not block a Claude run.
 
@@ -58,7 +58,7 @@ Pick the model by what a *successful run must do*, not by prompt length.
 - Writing or updating tests is complex unless it is a mechanical assertion tweak in one file.
 - A spike that must install, execute or measure things is coding class even if the deliverable is a report.
 
-`devin models list | grep Free` lists free models. Use one if a session reports that usage is exhausted.
+`devin models list | grep Free` lists the models that do not bill per token — the `swe-2-*` and `swe-2-flash-*` ids. The rest do, and they are what exhausts an account: `*-lightning` and `fusion-*` ids burned a whole day's quota on two review sessions here, and every delegation after them failed with "daily usage quota has been exhausted" while the `swe-2-*` ids kept running. Name a paid id only when the task needs its speed or context, and drop to a free `swe-2-*` id when a session reports usage exhausted.
 
 ## Choosing `thinking`
 
