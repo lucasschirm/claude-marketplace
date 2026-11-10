@@ -11,7 +11,6 @@
 
 import type { AcpSessionUpdate } from "./acp.ts";
 import { cancelledReason, sessionEndedReason } from "./permission.ts";
-import { toolCallIdOf } from "./update-map.ts";
 
 /**
  * Why an ask stopped waiting without the client answering. `reject` is the hook vanishing (it
@@ -32,6 +31,8 @@ export interface PendingAsk {
 	abort: (kind: AskAbort) => void;
 	conversationId: string;
 	stepIdx: number;
+	/** The client-facing tool call this ask belongs to (a subagent's ask points at the call that spawned it). */
+	toolCallId: string;
 }
 
 export interface PendingAsksHost {
@@ -105,7 +106,7 @@ export class PendingAsks {
 		const reason = kind === "cancelled" ? cancelledReason() : sessionEndedReason();
 		this.host.notify({
 			sessionUpdate: "tool_call_update",
-			toolCallId: toolCallIdOf(ask.conversationId, ask.stepIdx),
+			toolCallId: ask.toolCallId,
 			_meta: { permission: { state: kind, reason } },
 		});
 	}

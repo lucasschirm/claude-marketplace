@@ -222,7 +222,7 @@ test("a wrong token or an empty conversation-id closes the connection with no re
 		}
 	}
 });
-test("a subagent's own conversation id is accepted (same token; the call still goes through policy + the client)", async () => {
+test("a subagent conversation id the session reports is accepted (same token; the call still goes through policy + the client)", async () => {
 	const handled: string[] = [];
 	const server = new BridgeServer({
 		log: () => {},
@@ -232,6 +232,7 @@ test("a subagent's own conversation id is accepted (same token; the call still g
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
+		acceptsConversation: (id) => id === "conv-1-sub",
 		handle: async (req) => {
 			handled.push(req.conversationId);
 			return { decision: "allow" };
@@ -248,6 +249,41 @@ test("a subagent's own conversation id is accepted (same token; the call still g
 		});
 		assert.strictEqual(line, JSON.stringify({ decision: "allow" }), "the sub conversation is served, not closed");
 		assert.deepStrictEqual(handled, ["conv-1-sub"], "the request reached the handler");
+	} finally {
+		await server.stop();
+	}
+});
+test("a conversation the session never reported is denied with a reason (never reaches the handler)", async () => {
+	const handled: string[] = [];
+	const logs: string[] = [];
+	const server = new BridgeServer({
+		log: (l) => logs.push(l),
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK,
+		hookTimeoutSec: 60,
+		maxHoldMs: 5000,
+		conversationId: () => "conv-1",
+		acceptsConversation: (id) => id === "conv-1-sub",
+		handle: async (req) => {
+			handled.push(req.conversationId);
+			return { decision: "allow" };
+		},
+		onConnectionLost: () => {},
+	});
+	await server.start();
+	try {
+		const { line } = await askSocket(server.socketPath, {
+			token: "tok-1",
+			conversationId: "conv-1-stranger",
+			stepIdx: 4,
+			toolCall: { name: "run_command", args: {} },
+		});
+		assert.ok(line.includes('"decision":"deny"'), "an authenticated hook gets a denial, not silence");
+		assert.ok(line.includes("not this session or a subagent it reported"), "the reason names the attribution failure");
+		assert.ok(line.includes("Do not retry this call"), "and the no-retry wording");
+		assert.deepStrictEqual(handled, [], "the request never reached the handler");
+		assert.ok(logs.join("\n").includes("belongs to no subagent of this session"), "the refusal was logged");
 	} finally {
 		await server.stop();
 	}
@@ -967,6 +1003,10 @@ test("the gate: a subagent's pending ask (same step index, sub conversation) is 
 			cwd: workspace,
 			requestImpl: () => new Promise((r) => asks.push({ resolve: r })),
 		});
+		// The subagent was reported on a spawning call: its conversation id is accepted from then on.
+		h.gate.onSubagentInfo(2, [
+			{ conversation_id: "conv-1-sub", role: "File Creator", type_name: "self", initial_prompt: "", log_uri: "", workspace_uris: [] },
+		]);
 		// A main ask and a subagent ask at the same step index, both policy-asks (run_command).
 		const mainP = h.ask(5, "run_command", { CommandLine: "ls" });
 		// The subagent ask on a raw connection we control (so its hook side can be dropped).
@@ -1005,10 +1045,16 @@ test("the gate: a subagent's auto-allowed call (a colliding step index) does not
 		h = await startGateHarness({ cwd: workspace });
 		// The main conversation's step 3 went ACTIVE (the stream recorded its parameters)...
 		h.gate.onStreamActive(3, "run_command", { CommandLine: "ls" });
-		// ...and a subagent's in-workspace read_file (auto-allowed) lands on the same step index.
+		// ...and a reported subagent's in-workspace read_file (auto-allowed) lands on the same step index.
+		h.gate.onSubagentInfo(2, [
+			{ conversation_id: "conv-1-sub", role: "File Creator", type_name: "self", initial_prompt: "", log_uri: "", workspace_uris: [] },
+		]);
 		const r = await h.ask(3, "read_file", { Path: path.join(workspace, "a.txt") }, "conv-1-sub");
 		assert.strictEqual(r.decision, "allow", "the subagent's in-workspace read is auto-allowed");
-		assert.strictEqual(h.updates.length, 0, "no tool_call_update for the main step (no bogus in_progress / argsRewritten)");
+		assert.ok(
+			!h.updates.some((u) => u.toolCallId === "conv-1:3"),
+			"no tool_call_update for the main step (no bogus in_progress / argsRewritten)",
+		);
 		assert.ok(!h.logs.some((l) => l.includes("args rewritten")), "no bogus rewrite log");
 	} finally {
 		await h?.gate.dispose();

@@ -6,6 +6,8 @@
 // the model's recorded reaction), a client-silence deadline denial, plan-mode local denial,
 // accept-edits auto-allow, default-mode write asks, allow-always recording, a bridge-reference
 // denial (client never asked), rewritten-args detection, and the bridge dir cleanup on dispose.
+// Issue #59: a subagent's run_command asks under the parent invoke_subagent call and its progress
+// rides there, an unreported conversation id is denied, and plan mode denies a subagent's write.
 import * as assert from "node:assert";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -575,5 +577,143 @@ test("session/new advertises the three default modes; bypass needs the operator'
 		assert.strictEqual(upd?.currentModeId, "bypass");
 	} finally {
 		enabled.close();
+	}
+});
+
+// ---------------------------------------------------------------- subagents (issue #59)
+
+/** The subagent the recorded `subagent-tool-call` scenario started (its terminal step's subagent_info). */
+const SUBAGENT_CONVERSATION = "b84dcd44-dd9e-4f13-a5dc-26c5e3b897de";
+
+interface HookLogEntry {
+	conversationId: string;
+	name: string;
+	code: number | null;
+	stdout: string;
+}
+
+/** A private hook log file (the fake appends one line per hook run); removed by the caller's dir. */
+function tempHookLog(): string {
+	return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-hooklog-")), "hooks.jsonl");
+}
+
+function hookLogAt(file: string): HookLogEntry[] {
+	if (!fs.existsSync(file)) {
+		return [];
+	}
+	return fs
+		.readFileSync(file, "utf8")
+		.split("\n")
+		.filter((l) => l !== "")
+		.map((l) => JSON.parse(l) as HookLogEntry);
+}
+
+test("a subagent's run_command asks under the parent invoke_subagent call, and its progress rides there", async () => {
+	LOGS.length = 0;
+	const log = tempHookLog();
+	const h = await startHarness("subagent-tool-call", {
+		FAKE_AGY_SUBAGENT_TOOL: JSON.stringify({ name: "run_command", args: { CommandLine: "touch sub1.txt" } }),
+		FAKE_AGY_HOOK_LOG: log,
+	});
+	try {
+		const sid = await newSession(h);
+		const promptP = h.request("session/prompt", {
+			sessionId: sid,
+			prompt: [{ type: "text", text: promptsForFixture("subagent-tool-call")[0] }],
+		});
+		// The parent invoke_subagent call asks too (default mode), then the subagent's own run_command.
+		await answerAsTheyArrive(h, 2);
+		const pr = await promptP;
+		assert.strictEqual(pr.stopReason, "end_turn");
+		assert.strictEqual(h.permissionRequests.length, 2, "the parent ask and the subagent's ask");
+		const subAsk = h.permissionRequests[1].params;
+		const parentId = `${sid}:2`;
+		const tc = subAsk.toolCall as { toolCallId?: string; title?: string; rawInput?: { CommandLine?: string } };
+		assert.strictEqual(tc.toolCallId, parentId, "the ask references the parent invoke_subagent tool call");
+		assert.ok(
+			String(tc.title).includes('subagent "File Creator": run_command: touch sub1.txt'),
+			`the title says a subagent is asking: ${String(tc.title)}`,
+		);
+		assert.strictEqual(tc.rawInput?.CommandLine, "touch sub1.txt", "the args are the subagent's own");
+		const meta = subAsk._meta as { subagent?: { conversationId?: string; toolCallId?: string } };
+		assert.strictEqual(meta.subagent?.conversationId, SUBAGENT_CONVERSATION, "the subagent's id rides in _meta");
+		assert.strictEqual(
+			meta.subagent?.toolCallId,
+			`${SUBAGENT_CONVERSATION}:0`,
+			"its own tool call id, which never collides with a parent step",
+		);
+		const progress = h.updates.filter(
+			(u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === parentId && (u._meta as { subagent?: unknown })?.subagent,
+		);
+		assert.ok(progress.length >= 1, "the subagent's activity is a tool_call_update on the parent call");
+		assert.ok(
+			JSON.stringify(progress[0].content).includes("is running run_command: touch sub1.txt"),
+			`the progress content says what the subagent runs: ${JSON.stringify(progress[0].content)}`,
+		);
+		assert.ok(
+			!h.updates.some((u) => u.sessionUpdate === "tool_call" && String(u.toolCallId).startsWith(SUBAGENT_CONVERSATION)),
+			"the subagent's step is never a tool call of its own in the parent stream",
+		);
+	} finally {
+		h.close();
+		fs.rmSync(path.dirname(log), { recursive: true, force: true });
+	}
+});
+
+test("a hook from a conversation the session never reported is denied, and the client is never asked", async () => {
+	LOGS.length = 0;
+	const log = tempHookLog();
+	const stranger = "0f0f0f0f-0000-4000-8000-000000000000";
+	const h = await startHarness("tool-allowed-skip-permissions", {
+		FAKE_AGY_STRAY_HOOK: JSON.stringify({ conversationId: stranger, name: "run_command", args: { CommandLine: "touch stray.txt" } }),
+		FAKE_AGY_HOOK_LOG: log,
+	});
+	try {
+		const sid = await newSession(h);
+		const promptP = h.request("session/prompt", {
+			sessionId: sid,
+			prompt: [{ type: "text", text: promptsForFixture("tool-allowed-skip-permissions")[0] }],
+		});
+		await answerAsTheyArrive(h, 1);
+		const pr = await promptP;
+		assert.strictEqual(pr.stopReason, "end_turn");
+		assert.strictEqual(h.permissionRequests.length, 1, "only the main conversation's call asked");
+		const stray = hookLogAt(log).find((e) => e.conversationId === stranger);
+		assert.ok(stray, "the stray hook ran");
+		assert.ok(stray.stdout.includes('"decision":"deny"'), "it was denied");
+		assert.ok(stray.stdout.includes("not this session or a subagent it reported"), "the reason names the attribution failure");
+		assert.ok(stray.stdout.includes("Do not retry this call"), "the denial does not invite a retry");
+	} finally {
+		h.close();
+		fs.rmSync(path.dirname(log), { recursive: true, force: true });
+	}
+});
+
+test("plan mode denies a subagent's write locally: the client is never asked, the reason is the plan-mode one", async () => {
+	LOGS.length = 0;
+	const log = tempHookLog();
+	// ALLOW_RESUME / ALLOW_SELECTION: the mode change costs a respawn onto a `--mode plan` child.
+	const h = await startHarness("subagent-tool-call", {
+		FAKE_AGY_SUBAGENT_TOOL: JSON.stringify({ name: "write_file", args: { Path: "sub1.txt", Content: "x" } }),
+		FAKE_AGY_HOOK_LOG: log,
+		FAKE_AGY_ALLOW_RESUME: "1",
+		FAKE_AGY_ALLOW_SELECTION: "1",
+	});
+	try {
+		const sid = await newSession(h);
+		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
+		const pr = await h.request("session/prompt", {
+			sessionId: sid,
+			prompt: [{ type: "text", text: promptsForFixture("subagent-tool-call")[0] }],
+		});
+		assert.strictEqual(pr.stopReason, "end_turn");
+		assert.strictEqual(h.permissionRequests.length, 0, "no client ask in plan mode");
+		const write = hookLogAt(log).find((e) => e.name === "write_file");
+		assert.ok(write, "the subagent's write reached the bridge");
+		assert.ok(write.stdout.includes("plan mode is read-only"), "the subagent inherits the session's mode policy");
+		assert.ok(write.stdout.includes("Do not retry this call"));
+	} finally {
+		h.close();
+		fs.rmSync(path.dirname(log), { recursive: true, force: true });
 	}
 });
