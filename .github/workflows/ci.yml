@@ -133,7 +133,7 @@ jobs:
 
   # Extension suites that run inside the Pi runtime. They use mock `gh`/Pi APIs
   # and `--offline`, so no model credentials are needed.
-  # Excluded on purpose: test-devin-delegate(.ts|-lifecycle.ts) start real Devin
+  # Excluded on purpose: test-delegate-live(.ts|-lifecycle.ts) start real Devin
   # sessions, and test-orca-orchestration.sh needs a live Orca backend.
   pi-extension-tests:
     name: Pi extension tests (${{ matrix.suite }})
@@ -158,7 +158,7 @@ jobs:
           - pr-tasks-gh-failure
           - pr-tasks-reconcile
           - tools
-          - devin-queue
+          - delegate-queue
     steps:
       - uses: actions/checkout@v4
 

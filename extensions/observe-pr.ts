@@ -1052,11 +1052,11 @@ export default async function (pi: ExtensionAPI) {
 				const status = state === "MERGED" ? "merged" : "canceled";
 				sendAgentMessage(`Stoping observing the pr ${prNumber}. The PR was ${status}. You will no longer receive updates about this PR.`);
 				stopObserving(prNumber);
-				if (typeof (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__ === "function") {
-					try {
-						await (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__(prNumber, state);
-					} catch {}
-				}
+				// The delegate extension, renamed. The old slot is tried too, for an install that has not updated.
+				const hook = (globalThis as any).__PI_ON_PR_CLOSED_DELEGATE__ ?? (globalThis as any).__PI_ON_PR_CLOSED_DEVIN__;
+				try {
+					await hook?.(prNumber, state);
+				} catch {}
 				if (typeof (globalThis as any).__PI_ON_PR_CLOSED__ === "function") {
 					try {
 						await (globalThis as any).__PI_ON_PR_CLOSED__(prNumber, state, pr.cwd);

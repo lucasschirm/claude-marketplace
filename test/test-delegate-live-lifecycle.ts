@@ -5,18 +5,18 @@
 //
 // T1+T2: a turn longer than the old 60s timeout must complete (idle) with the
 //        streamed assistant chunks captured (regression: issue #16)
-// T3:    devin_cancel mid-turn must kill the process (no orphans)
+// T3:    delegate_cancel mid-turn must kill the process (no orphans)
 // T4:    a process death mid-turn must mark interrupted (not failed), and
-//        devin_restart must start a working follow-up turn
+//        delegate_restart must start a working follow-up turn
 // T5:    an out-of-vocab model (swe-2-max) must not fail the session and the
 //        redundant set_config_option(model) call must not be made
 // T6:    recovery reconciliation: dead-pid -> interrupted; live-pid -> killed + interrupted
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import ext from "../extensions/devin-delegate.ts";
-import * as assert from "node:assert";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
+import ext from "../extensions/delegate-task.ts";
+import assert from "node:assert";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { must } from "./helpers/must.ts";
@@ -31,7 +31,7 @@ export default function testRunner(pi: ExtensionAPI): void {
 			return pi.registerTool(t);
 		},
 		// Record agent notifications instead of steering the real pi agent: a woken
-		// agent calls devin_restart/devin_message on its own, spawning extra sessions
+		// agent calls delegate_restart/delegate_message on its own, spawning extra sessions
 		// that occupy concurrency slots and make later tests (T5) flaky.
 		sendUserMessage(content: any, _opts?: any) {
 			agentMessages.push(typeof content === "string" ? content : JSON.stringify(content));
@@ -79,7 +79,7 @@ exit 0
 		sleeper.unref();
 		fixtureLivePid = sleeper.pid || 0;
 
-		const dir = path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId);
+		const dir = path.join(os.homedir(), ".pi", "agent", "delegate_task", realPiSessionId);
 		fs.mkdirSync(dir, { recursive: true });
 		const metaDead: any = {
 			sessionId: "rec-dead-1",
@@ -106,7 +106,7 @@ exit 0
 
 	ext(mockPi);
 
-	// Poll devin_status until the session reaches `want` or `timeoutMs` elapses.
+	// Poll delegate_status until the session reaches `want` or `timeoutMs` elapses.
 	async function waitForStatus(statusTool: any, mockCtx: any, sessionId: string, want: string, timeoutMs: number): Promise<string> {
 		const deadline = Date.now() + timeoutMs;
 		let last = "unknown";
@@ -134,10 +134,10 @@ exit 0
 			sessionManager: { getSessionId: () => realPiSessionId },
 		} as any;
 
-		const delegateTool = must(registeredTools.get("devin_delegate"), "the devin_delegate tool");
-		const statusTool = must(registeredTools.get("devin_status"), "the devin_status tool");
-		const cancelTool = must(registeredTools.get("devin_cancel"), "the devin_cancel tool");
-		const restartTool = must(registeredTools.get("devin_restart"), "the devin_restart tool");
+		const delegateTool = must(registeredTools.get("delegate_task"), "the delegate_task tool");
+		const statusTool = must(registeredTools.get("delegate_status"), "the delegate_status tool");
+		const cancelTool = must(registeredTools.get("delegate_cancel"), "the delegate_cancel tool");
+		const restartTool = must(registeredTools.get("delegate_restart"), "the delegate_restart tool");
 		const created: string[] = [];
 
 		console.log("=== Devin Delegate LIFECYCLE tests (fake acp) ===");
@@ -178,7 +178,7 @@ exit 0
 			const t1Status = await waitForStatus(statusTool, mockCtx, t1Id, "idle", 120_000);
 			assert.strictEqual(t1Status, "idle", `T1 session must be idle after long turn (was ${t1Status})`);
 			const t1Meta = JSON.parse(
-				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t1Id, "meta.json"), "utf-8"),
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "delegate_task", realPiSessionId, t1Id, "meta.json"), "utf-8"),
 			);
 			assert.strictEqual(t1Meta.status, "idle");
 			assert.strictEqual(t1Meta.error, undefined, "T1 must not be marked failed");
@@ -189,7 +189,7 @@ exit 0
 			assert.match(t2.content[0].text, /Working on it:/, "T2: streamed chunk must be captured");
 			assert.match(t2.content[0].text, /Final answer from fake devin\./, "T2: final assistant output must be captured");
 			const events = fs
-				.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t1Id, "events.jsonl"), "utf-8")
+				.readFileSync(path.join(os.homedir(), ".pi", "agent", "delegate_task", realPiSessionId, t1Id, "events.jsonl"), "utf-8")
 				.split("\n");
 			assert.ok(
 				events.some((l) => l.includes('"usage_update"')),
@@ -218,7 +218,7 @@ exit 0
 			assert.match(t3c.content[0].text, /was cancelled/);
 			await sleepMs(3000); // SIGKILL fallback is +1.5s
 			const t3Meta = JSON.parse(
-				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t3Id, "meta.json"), "utf-8"),
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "delegate_task", realPiSessionId, t3Id, "meta.json"), "utf-8"),
 			);
 			let t3alive = true;
 			try {
@@ -247,7 +247,7 @@ exit 0
 			const t4Status = await waitForStatus(statusTool, mockCtx, t4Id, "interrupted", 30_000);
 			assert.strictEqual(t4Status, "interrupted", `T4 must be interrupted (was ${t4Status})`);
 			const t4Meta = JSON.parse(
-				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4Id, "meta.json"), "utf-8"),
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "delegate_task", realPiSessionId, t4Id, "meta.json"), "utf-8"),
 			);
 			assert.notStrictEqual(t4Meta.status, "failed", "T4: process death must not be marked failed");
 			assert.match(t4Meta.error || "", /code 42/);
@@ -285,7 +285,7 @@ exit 0
 			const t4cStatus = await waitForStatus(statusTool, mockCtx, t4cId, "idle", 30_000);
 			assert.strictEqual(t4cStatus, "idle", `T4c clean exit must be idle, not failed (was ${t4cStatus})`);
 			const t4cMeta = JSON.parse(
-				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "devin_delegate", realPiSessionId, t4cId, "meta.json"), "utf-8"),
+				fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "delegate_task", realPiSessionId, t4cId, "meta.json"), "utf-8"),
 			);
 			assert.notStrictEqual(t4cMeta.status, "failed", "T4c: clean exit must not be marked failed by the prompt catch path");
 			process.env.FAKE_EXIT_CODE = "42";

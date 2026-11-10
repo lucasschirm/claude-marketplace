@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Fake `devin acp` server for devin-delegate lifecycle tests.
+// Fake ACP agent server (`devin acp`, and the same script as `claude-agent-acp`) for the delegate
+// extension's queue and lifecycle suites.
 //
 // Driven by env vars (set by the test extension before each spawn):
 //   FAKE_DELAY_MS      ms to wait before answering session/prompt (default 70000)
@@ -15,6 +16,8 @@
 //                      ends when all are answered and reports the outcomes in request order
 //   FAKE_PERMISSION_COMMAND  the command text the request carries (default: an rg command)
 //   FAKE_NEW_FAIL_FILE if this file exists, the first session/new to claim it (atomic rename) fails
+//   FAKE_STOP_REASON   the stopReason answered for session/prompt (default "end_turn"). A truncating
+//                      agent is the case the extension must not report as success.
 //
 // It mimics real `devin acp` behavior that matters to the extension:
 //  - streams session/update events (agent_message_chunk, tool_call, usage_update)
@@ -41,6 +44,7 @@ const sendUnknownRequest = process.env.FAKE_UNKNOWN_REQUEST === "1";
 const permissionCount = parseInt(process.env.FAKE_PERMISSION_COUNT || "1", 10);
 const permissionCommand = process.env.FAKE_PERMISSION_COMMAND || "rg -l table-access-policy backend/test/help/";
 const newFailFile = process.env.FAKE_NEW_FAIL_FILE || "";
+const stopReason = process.env.FAKE_STOP_REASON || "end_turn";
 
 // Claim the one-shot failure: rename is atomic, so of several concurrent spawns exactly one fails.
 function claimNewFailure() {
@@ -116,7 +120,7 @@ function permissionParams() {
 function finishTurn(promptId, text) {
 	if (pendingPromptId !== promptId) return; // turn was cancelled
 	update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
-	send({ jsonrpc: "2.0", id: promptId, result: { stopReason: "end_turn" } });
+	send({ jsonrpc: "2.0", id: promptId, result: { stopReason } });
 	pendingPromptId = null;
 	clearMarker(turnMarker);
 }
@@ -158,7 +162,13 @@ rl.on("line", (line) => {
 		send({
 			jsonrpc: "2.0",
 			id: msg.id,
-			result: { protocolVersion: 1, agentCapabilities: {}, agentInfo: { name: "fake-devin", version: "0.0.0" } },
+			result: {
+				protocolVersion: 1,
+				agentCapabilities: {},
+				// FAKE_AGENT_NAME lets this one script stand in for a second driver: the cross-agent test
+				// runs it behind a `claude-agent-acp` shim. The name is what the extension echoes back.
+				agentInfo: { name: process.env.FAKE_AGENT_NAME || "fake-devin", version: "0.0.0" },
+			},
 		});
 	} else if (m === "session/new") {
 		if (claimNewFailure()) {

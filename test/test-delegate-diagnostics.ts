@@ -1,7 +1,7 @@
-// Run with: node --test test/test-devin-tui-safety.ts
+// Run with: node --test test/test-delegate-diagnostics.ts
 import { test } from "node:test";
-import * as assert from "node:assert";
-import { stripAnsi, extractCliError } from "../extensions/lib/devin-diagnostics.ts";
+import assert from "node:assert";
+import { stripAnsi, extractCliError } from "../extensions/lib/delegate/diagnostics.ts";
 
 // --- stripAnsi ---
 

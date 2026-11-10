@@ -1,6 +1,11 @@
 /**
- * Detects shell commands that invoke the `devin` CLI, so the Devin Delegate extension can block
- * them and steer the agent to the `devin_*` tools instead.
+ * Detects shell commands that invoke a delegated agent's own CLI, so the delegate extension can block
+ * them and steer the agent to the `delegate_*` tools instead.
+ *
+ * Which binaries are guarded is data, not a regex in this file: it is the `cli` of every driver whose
+ * `capabilities().blocksOwnCli` is true. Today that is Devin only, deliberately — the guard exists so
+ * delegation cannot be routed around the queue, and `claude` is the operator's own CLI (pi itself may
+ * be driving it), so blocking it would break the host to protect a queue. See `drivers/devin.ts`.
  *
  * Static analysis of a command string cannot be complete. It covers direct calls, pipelines and
  * lists, `$(...)`/backtick substitutions, `bash -c`/`eval` strings, wrapper commands (`sudo`,
@@ -32,7 +37,7 @@ const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
 const RESERVED = new Set(["!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "fi", "done"]);
 const EXEC_FLAGS = new Set(["-exec", "-execdir", "-ok", "-okdir", "-x", "-X", "--exec", "--exec-batch"]);
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
-// Flags that make `devin` do real work even when a help flag is also present.
+// Flags that make a guarded CLI do real work even when a help flag is also present.
 const WORK_FLAGS = new Set(["-p", "--print", "--prompt-file", "-c", "--continue", "-r", "--resume", "--"]);
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const REDIRECT_WORD = /^(?:\d*|&)(?:>>?|<<<?|<|>&|<&|>\|)/;
@@ -52,27 +57,33 @@ function findClosing(input: string, start: number, open: string, close: string):
 			i++;
 		} else if (c === "'" && open === "(") {
 			const end = input.indexOf("'", i + 1);
-			if (end === -1) return input.length;
+			if (end === -1) {
+				return input.length;
+			}
 			i = end;
 		} else if (c === '"' && open === "(") {
 			for (i++; i < input.length && input[i] !== '"'; i++) {
-				if (input[i] === "\\") i++;
+				if (input[i] === "\\") {
+					i++;
+				}
 			}
 		} else if (open === "(" && c === open) {
 			depth++;
 		} else if (c === close) {
 			depth--;
-			if (depth === 0) return i;
+			if (depth === 0) {
+				return i;
+			}
 		}
 	}
 	return input.length;
 }
 
 /** Splits a shell string into simple commands (lists of words), recursing into substitutions. */
-function parseCommands(input: string, out: string[][], depth: number): void {
+function parseCommands(input: string, out: string[][], depth: number, guarded: readonly string[]): void {
 	if (depth > MAX_DEPTH) {
-		// Too deeply nested to analyze: fail closed.
-		out.push(["devin", "<nested-too-deeply>"]);
+		// Too deeply nested to analyze: fail closed, under a name the guard is actually watching.
+		out.push([guarded[0] ?? "agent", "<nested-too-deeply>"]);
 		return;
 	}
 
@@ -82,18 +93,22 @@ function parseCommands(input: string, out: string[][], depth: number): void {
 	const heredocs: Array<{ delimiter: string; stripTabs: boolean }> = [];
 
 	const flushWord = () => {
-		if (inWord) words.push(cur);
+		if (inWord) {
+			words.push(cur);
+		}
 		cur = "";
 		inWord = false;
 	};
 	const flushCommand = () => {
 		flushWord();
-		if (words.length) out.push(words);
+		if (words.length) {
+			out.push(words);
+		}
 		words = [];
 	};
 	const substitution = (open: string, close: string, from: number): number => {
 		const end = findClosing(input, from, open, close);
-		parseCommands(input.slice(from, end), out, depth + 1);
+		parseCommands(input.slice(from, end), out, depth + 1, guarded);
 		cur += "$(…)";
 		inWord = true;
 		return end;
@@ -133,7 +148,9 @@ function parseCommands(input: string, out: string[][], depth: number): void {
 		} else if (c === "`") {
 			i = substitution("`", "`", i + 1);
 		} else if (c === "#" && !inWord) {
-			while (i + 1 < input.length && input[i + 1] !== "\n") i++;
+			while (i + 1 < input.length && input[i + 1] !== "\n") {
+				i++;
+			}
 		} else if (c === "\n") {
 			flushCommand();
 			// Skip heredoc bodies: they are text, not commands.
@@ -142,7 +159,9 @@ function parseCommands(input: string, out: string[][], depth: number): void {
 					const eol = input.indexOf("\n", i);
 					const line = input.slice(i, eol === -1 ? input.length : eol);
 					i = eol === -1 ? input.length : eol + 1;
-					if ((heredoc.stripTabs ? line.replace(/^\t+/, "") : line) === heredoc.delimiter) break;
+					if ((heredoc.stripTabs ? line.replace(/^\t+/, "") : line) === heredoc.delimiter) {
+						break;
+					}
 				}
 				i--;
 			}
@@ -188,41 +207,64 @@ function stripRedirections(words: string[]): string[] {
 	return kept;
 }
 
-/** True for the read-only `devin` invocations that stay allowed. */
-function isReadOnlyDevin(args: string[]): boolean {
+/**
+ * True for the read-only invocations that stay allowed: a version/help probe or a listing that starts
+ * nothing. Every guarded CLI keeps its own read-only verbs here, because the point of the guard is to
+ * stop work being routed around the queue, not to stop people asking what is installed.
+ */
+function isReadOnlyInvocation(args: string[]): boolean {
 	if (args.some((a) => HELP_FLAGS.has(a))) {
 		return !args.some((a) => WORK_FLAGS.has(a));
 	}
 	const [sub, sub2] = args;
 	const onlyFlags = (rest: string[]) => rest.every((a) => a.startsWith("-"));
-	if (sub === "models") return sub2 === "list" && onlyFlags(args.slice(2));
-	if (sub === "list" || sub === "ls") return onlyFlags(args.slice(1));
-	if (sub === "version" || sub === "help") return true;
+	if (sub === "models") {
+		return sub2 === "list" && onlyFlags(args.slice(2));
+	}
+	if (sub === "auth") {
+		return sub2 === "status" && onlyFlags(args.slice(2));
+	}
+	if (sub === "list" || sub === "ls") {
+		return onlyFlags(args.slice(1));
+	}
+	if (sub === "version" || sub === "help") {
+		return true;
+	}
 	return false;
 }
 
-/** Returns the offending command text if `words` invokes a disallowed `devin`. */
-function checkCommand(rawWords: string[], depth: number): string | undefined {
-	if (depth > MAX_DEPTH) return rawWords.join(" ");
+/** Returns the offending command text if `words` invokes a guarded CLI in a way that is not read-only. */
+function checkCommand(rawWords: string[], depth: number, guarded: ReadonlySet<string>): string | undefined {
+	if (depth > MAX_DEPTH) {
+		return rawWords.join(" ");
+	}
 	const words = stripRedirections(rawWords);
 
 	let i = 0;
-	while (i < words.length && (ASSIGNMENT.test(words[i]) || RESERVED.has(words[i]))) i++;
-	if (i >= words.length) return undefined;
+	while (i < words.length && (ASSIGNMENT.test(words[i]) || RESERVED.has(words[i]))) {
+		i++;
+	}
+	if (i >= words.length) {
+		return undefined;
+	}
 
 	const base = basename(words[i]);
 
-	if (base === "devin") {
-		return isReadOnlyDevin(words.slice(i + 1)) ? undefined : words.slice(i).join(" ");
+	if (guarded.has(base)) {
+		return isReadOnlyInvocation(words.slice(i + 1)) ? undefined : words.slice(i).join(" ");
 	}
 
 	if (WRAPPERS.has(base)) {
-		// `command -v devin` only looks the binary up.
-		if (base === "command" && words.slice(i + 1).some((w) => w === "-v" || w === "-V")) return undefined;
+		// `command -v devin` only looks the binary up; it starts nothing.
+		if (base === "command" && words.slice(i + 1).some((w) => w === "-v" || w === "-V")) {
+			return undefined;
+		}
 		// Wrapper options take arguments (`timeout 10`, `sudo -u x`), so try every later word as a command start.
 		for (let j = i + 1; j < words.length; j++) {
-			const hit = checkCommand(words.slice(j), depth + 1);
-			if (hit) return hit;
+			const hit = checkCommand(words.slice(j), depth + 1, guarded);
+			if (hit) {
+				return hit;
+			}
 		}
 		return undefined;
 	}
@@ -230,20 +272,22 @@ function checkCommand(rawWords: string[], depth: number): string | undefined {
 	if (SHELLS.has(base)) {
 		const flag = words.findIndex((w, k) => k > i && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(w));
 		if (flag !== -1 && words[flag + 1] !== undefined) {
-			return findBlocked(words[flag + 1], depth + 1);
+			return findBlocked(words[flag + 1], depth + 1, guarded);
 		}
 		return undefined;
 	}
 
 	if (base === "eval") {
-		return findBlocked(words.slice(i + 1).join(" "), depth + 1);
+		return findBlocked(words.slice(i + 1).join(" "), depth + 1, guarded);
 	}
 
 	if (base === "find" || base === "fd") {
 		for (let j = i + 1; j < words.length; j++) {
 			if (EXEC_FLAGS.has(words[j])) {
-				const hit = checkCommand(words.slice(j + 1), depth + 1);
-				if (hit) return hit;
+				const hit = checkCommand(words.slice(j + 1), depth + 1, guarded);
+				if (hit) {
+					return hit;
+				}
 			}
 		}
 	}
@@ -251,26 +295,38 @@ function checkCommand(rawWords: string[], depth: number): string | undefined {
 	return undefined;
 }
 
-function findBlocked(command: string, depth: number): string | undefined {
+function findBlocked(command: string, depth: number, guarded: ReadonlySet<string>): string | undefined {
 	const commands: string[][] = [];
-	parseCommands(command, commands, depth);
+	parseCommands(command, commands, depth, [...guarded]);
 	for (const words of commands) {
-		const hit = checkCommand(words, depth);
-		if (hit) return hit;
+		const hit = checkCommand(words, depth, guarded);
+		if (hit) {
+			return hit;
+		}
 	}
 	return undefined;
 }
 
 /**
- * Returns the offending command if `command` runs the `devin` CLI in a way other than the
- * read-only subcommands (`models list`, `list`/`ls`, `version`, `help`, `--help`, `--version`).
+ * Returns the offending command if `command` runs one of `guarded` (the CLI names of drivers with
+ * `blocksOwnCli`) in any way other than the read-only subcommands (`models list`, `auth status`,
+ * `list`/`ls`, `version`, `help`, `--help`, `--version`).
  */
-export function findBlockedDevinCommand(command: string): string | undefined {
-	return findBlocked(command, 0);
+export function findBlockedCliCommand(command: string, guarded: readonly string[]): string | undefined {
+	if (guarded.length === 0) {
+		return undefined;
+	}
+	return findBlocked(command, 0, new Set(guarded));
 }
 
-export const DEVIN_BASH_BLOCK_REASON =
-	"Running the `devin` CLI from a shell is blocked in this session. Delegate with the `devin_delegate` tool " +
-	"(then `devin_status`, `devin_message`, `devin_cancel`, `devin_restart`) so the work is queued, tracked and " +
-	"reported back to you. Read-only commands such as `devin models list`, `devin ls`, `devin version` and " +
-	"`devin --help` are still allowed. If the user really wants a direct CLI run, they can lift the block with `/devin allow_bash`.";
+/** The block message names the binaries actually blocked, so it cannot promise a tool the agent has no driver for. */
+export function cliBlockReason(guarded: readonly string[]): string {
+	const names = guarded.map((g) => `\`${g}\``).join(" or ");
+	return (
+		`Running ${names} from a shell is blocked in this session. Delegate with the \`delegate_task\` tool ` +
+		"(then `delegate_status`, `delegate_message`, `delegate_cancel`, `delegate_restart`) so the work is queued, " +
+		"tracked and reported back to you. Read-only commands such as `--help`, `--version`, `models list` and " +
+		"`list` are still allowed. If the user really wants a direct CLI run, they can lift the block with " +
+		"`/delegate allow-bash`."
+	);
+}
