@@ -22,7 +22,9 @@ export interface HookInvocation {
 /**
  * The direct-run check (a library import must not start the server). `entryUrl` is the entry
  * module's URL (main.ts's `import.meta.url`); it is undefined in the SEA's CJS module, which is
- * how the SEA is told apart from a plain import: the binary is always run directly.
+ * how the SEA is told apart from a plain import: the binary is always run directly. The same
+ * read applies to a program that `require`s the CJS bundle: it starts the server in its own
+ * process - the bundle is a build intermediate, not a supported import target.
  */
 export function isDirectRun(entryUrl: string | undefined): boolean {
 	const invoked = process.argv[1];
@@ -41,15 +43,18 @@ export function isDirectRun(entryUrl: string | undefined): boolean {
 
 /**
  * The hook's default invocation: the bundled `bridge-hook.ts` (script mode) or the program's own
- * `--bridge-hook` (SEA mode, and the degenerate `node <sea binary>` run, where the hook file is
- * not on disk either). The re-exec target is the program itself - argv[1] resolved - because in
- * the degenerate run process.execPath is the `node` interpreter, not the binary.
+ * `--bridge-hook` (SEA mode, where the hook file is not on disk either). The re-exec target is
+ * `process.execPath`: in a real SEA that is the resolved binary path in every invocation form
+ * (absolute, relative, PATH lookup, symlink). `argv[1]` cannot be used - it is the raw
+ * invocation string, so under a PATH lookup it is just the bare name, and resolving it against
+ * the working directory names a path that does not exist (a hooks.json written for it kills the
+ * bridge). `node <binary>` is not a runnable form (the ELF does not parse), so the `node`
+ * interpreter in `execPath` is never a misread here.
  */
 export function defaultHookInvocation(): HookInvocation {
 	const hookFile = scriptHookFile();
 	if (hookFile !== null) return { node: process.execPath, hookFile, hookArgs: [] };
-	const self = process.argv[1] ? path.resolve(process.argv[1]) : process.execPath;
-	return { node: self, hookArgs: ["--bridge-hook"] };
+	return { node: process.execPath, hookArgs: ["--bridge-hook"] };
 }
 
 /** The shipped hook file: the one next to the sources. Null when it is not a real file (SEA). */

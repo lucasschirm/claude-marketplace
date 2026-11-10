@@ -29,7 +29,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { BRIDGE_DIR_NAME_RE } from "../src/bridge-server.ts";
-import { serverSpawnArgs } from "./bin-target.ts";
+import { serverSpawnArgs, BIN } from "./bin-target.ts";
 import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
@@ -597,6 +597,8 @@ interface LiveServer {
 	logFile: string;
 	lines: string[];
 	request: (method: string, params: Record<string, unknown>) => void;
+	/** Write one raw JSON-RPC line (a response to the server's own request). */
+	rawWrite: (line: string) => void;
 	stdinEnd: () => void;
 	kill: (signal: NodeJS.Signals) => void;
 	/** Resolves when the process is gone. If it never exits on its own, the test times out. */
@@ -608,7 +610,7 @@ interface LiveServer {
  * adds a --log-file naming this run, so every fake it spawns is identifiable in /proc: the fake
  * ignores --log-file, and so does its argv check.
  */
-function spawnServer(tmp: string, fixture: string, extraEnv: Record<string, string>): LiveServer {
+function spawnServer(tmp: string, fixture: string, extraEnv: Record<string, string>, spawnArgs?: [string, string[]]): LiveServer {
 	const marker = `agy-acp-lifecycle-${path.basename(tmp)}`;
 	const logFile = path.join(tmp, "agy-acp.log");
 	const wrapper = path.join(tmp, "fake-agy-command.sh");
@@ -621,7 +623,7 @@ function spawnServer(tmp: string, fixture: string, extraEnv: Record<string, stri
 	fs.writeFileSync(wrapper, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE)} "$@" ${extraFlags}\n`, {
 		mode: 0o755,
 	});
-	const [exe, argv] = serverSpawnArgs();
+	const [exe, argv] = spawnArgs ?? serverSpawnArgs();
 	const child = spawn(exe, argv, {
 		env: { ...process.env, AGY_ACP_COMMAND: wrapper, AGY_ACP_LOG: logFile, AGY_ACP_SHUTDOWN_TIMEOUT_MS: "6000", ...extraEnv },
 		stdio: ["pipe", "pipe", "pipe"],
@@ -649,6 +651,7 @@ function spawnServer(tmp: string, fixture: string, extraEnv: Record<string, stri
 		logFile,
 		lines,
 		request: (method, params) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params })}\n`),
+		rawWrite: (line) => child.stdin.write(`${line}\n`),
 		stdinEnd: () => child.stdin.end(),
 		kill: (signal) => child.kill(signal),
 		exited,
@@ -734,3 +737,69 @@ for (const end of ENDS_AWAY) {
 		}
 	});
 }
+
+/**
+ * The server process's own hooks.json, executed end to end by the fake agy: the layout the server
+ * itself wrote (its mode's default, not a test-provided one) is what the hook runs - in binary
+ * mode that is the binary re-executing itself with --bridge-hook. A dead hook command (wrong
+ * binary path) fails the tool call fail-closed, so a *completed* tool call proves the round trip
+ * (hook -> bridge socket -> policy -> hook stdout -> the fake's judge).
+ */
+test("the server's own hook (the hooks.json it wrote) runs end to end, gating a real tool call", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-lifecycle-hook-"));
+	// An XDG_RUNTIME_DIR of our own, so the bridge dirs of this run are the only ones we can see.
+	const extraEnv: Record<string, string> = {
+		XDG_RUNTIME_DIR: path.join(tmp, "xdg"),
+		FAKE_AGY_FIXTURE: "tool-allowed-skip-permissions",
+		FAKE_AGY_RUN_HOOKS: "1",
+	};
+	// Binary mode spawns the server by bare name through a controlled PATH: the default hook
+	// layout must name the real binary, not a path resolved from the bare name in the cwd.
+	let spawnArgs: [string, string[]] | undefined;
+	if (BIN) {
+		const bindir = path.join(tmp, "bindir");
+		fs.mkdirSync(bindir);
+		fs.symlinkSync(BIN, path.join(bindir, "agy-acp"));
+		extraEnv.PATH = `${bindir}${path.delimiter}${process.env.PATH ?? ""}`;
+		spawnArgs = ["agy-acp", []];
+	}
+	const s = spawnServer(tmp, "tool-allowed-skip-permissions", extraEnv, spawnArgs);
+	try {
+		s.request("initialize", { protocolVersion: 1, clientInfo: { name: "lifecycle-hook", version: "0" }, clientCapabilities: {} });
+		await responseOf(s, 1);
+		s.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const sid = String((await responseOf(s, 2)).sessionId);
+		s.request("session/prompt", promptOf(sid, recordedPrompt("tool-allowed-skip-permissions")));
+		let answeredAsk: boolean;
+		await waitFor("the tool call to complete through the server's own hook", 60000, () => {
+			const frame = s.lines.map((l) => {
+				try {
+					return JSON.parse(l) as Record<string, unknown>;
+				} catch {
+					return {};
+				}
+			});
+			for (const f of frame) {
+				// The gate asks the client; we answer allow-once, the way a client that wants the
+				// tool to run would. The hook has already spoken (the bridge asks after it).
+				if (f.method === "session/request_permission" && f.id !== undefined && !answeredAsk) {
+					answeredAsk = true;
+					s.rawWrite(JSON.stringify({ jsonrpc: "2.0", id: f.id, result: { outcome: { outcome: "selected", optionId: "allow_once" } } }));
+				}
+			}
+			return frameWith(s.lines, (f) => {
+				const u = (f.params as { update?: Record<string, unknown> }).update;
+				return f.method === "session/update" && u?.sessionUpdate === "tool_call_update" && u?.status === "completed";
+			});
+		});
+		const bridgeRoot = path.join(tmp, "xdg", "agy-acp");
+		assert.ok(bridgeDirs(bridgeRoot).length > 0, "the session's bridge dir is in the runtime dir while it runs");
+		s.stdinEnd();
+		const { code } = await s.exited;
+		assert.strictEqual(code, 0, "the server exits 0 after the hang-up");
+		await waitFor("the bridge dirs to be gone", 5000, () => bridgeDirs(bridgeRoot).length === 0);
+	} finally {
+		s.kill("SIGKILL");
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});

@@ -126,6 +126,8 @@ jobs:
         with:
           name: agy-acp-sea
           path: agy-acp/dist/agy-acp
+          # A 121 MiB artifact is rebuildable by any contributor; it needs no long shelf life.
+          retention-days: 7
 
   # Extension suites that run inside the Pi runtime. They use mock `gh`/Pi APIs
   # and `--offline`, so no model credentials are needed.

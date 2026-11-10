@@ -103,10 +103,13 @@ export function main(args: string[]): void {
 }
 
 const args = process.argv.slice(2);
-// `--bridge-hook` runs the PreToolUse hook (invoked that way by the bridge's hooks.json in SEA
-// mode, where the binary re-executes itself): it comes before the server and never starts one.
-if (args.includes("--bridge-hook")) {
+// `--bridge-hook` runs the PreToolUse hook (the bridge's hooks.json invokes the binary that way in
+// SEA mode): it comes before the server and never starts one. The isDirectRun guard keeps the
+// script-mode import safety (a host that imports main.ts is not hijacked into reading its stdin
+// and exiting because its argv carries the flag; in the SEA the tell is always direct-run).
+const direct = isDirectRun(import.meta.url);
+if (args.includes("--bridge-hook") && direct) {
 	runBridgeHook();
-} else if (isDirectRun(import.meta.url)) {
+} else if (direct) {
 	main(args);
 }

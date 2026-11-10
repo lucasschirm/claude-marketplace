@@ -15,7 +15,9 @@
 // which is the only timer agy itself enforces.
 //
 // `runBridgeHook()` is entered exactly once per process: as the whole program by `bridge-hook.ts`,
-// or by `main.ts` when the binary is invoked with `--bridge-hook`.
+// or by `main.ts` when the binary is invoked with `--bridge-hook` (there the whole server module
+// graph has already evaluated: a module-eval failure exits non-zero with empty stdout, which agy
+// reads as a fail-closed hook failure).
 
 import { connect } from "node:net";
 

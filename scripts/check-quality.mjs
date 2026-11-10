@@ -553,8 +553,9 @@ function countStdioWrites() {
 
 // agy-acp's stdout is the protocol channel, not a console: only the transport may frame it, and
 // main.ts may answer --version/--help before serving. console.log is never legitimate in server
-// sources - it is exactly how a stray debug line corrupts the stream. bridge-hook.ts is the one
-// other writer: it is a separate child process (spawned by agy as a PreToolUse hook), and its
+// sources - it is exactly how a stray debug line corrupts the stream. hook-run.ts is the one
+// other writer: it is a separate child process (spawned by agy as a PreToolUse hook, script or
+// binary), and its
 // stdout is the hook's decision channel - the one JSON line agy reads, by design. flush-stdout.ts is
 // the third: it writes no frame at all, only the zero-length write that means "everything buffered
 // is out", because the exit path ends in process.exit() - a file of its own so the grant covers that

@@ -74,7 +74,7 @@ export class BridgeServer {
 		const def = defaultHookInvocation();
 		const layout = createBridgeLayout({
 			node: this.opts.node ?? def.node,
-			hookFile: this.opts.hookFile ?? (this.opts.hookArgs ? undefined : def.hookFile), // an explicit hookArgs is a re-exec request
+			hookFile: this.opts.hookFile ?? (this.opts.hookArgs?.length ? undefined : def.hookFile), // a non-empty hookArgs is a re-exec request: no default hook file then
 			hookArgs: this.opts.hookArgs ?? def.hookArgs,
 			hookTimeoutSec: this.opts.hookTimeoutSec,
 		});

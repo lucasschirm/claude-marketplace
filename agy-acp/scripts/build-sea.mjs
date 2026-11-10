@@ -9,8 +9,9 @@
 // SEA ships no second file and no Node dependency.
 //
 // Requirements: Node >= 23.6 (it generates the blob and is the base of the binary) and the repo
-// root's devDependencies (esbuild, postject) installed. Linux x64 is the tested target; arm64 and
-// macOS work the same way but are not what CI covers.
+// root's devDependencies (esbuild, postject) installed. Linux is the CI target; arm64 Linux
+// works the same way, but macOS would need postject's --macho-segment-name NODE_SEA, which
+// this script does not pass.
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -32,7 +33,8 @@ function fail(message) {
 }
 
 const nodeVersion = process.versions.node;
-if (!/^(2[3-9]|[3-9]\d)\./.test(nodeVersion)) fail(`Node >= 23.6 is required to build the SEA (have ${nodeVersion})`);
+const [nodeMajor, nodeMinor] = nodeVersion.split(".").map(Number);
+if (nodeMajor < 23 || (nodeMajor === 23 && nodeMinor < 6)) fail(`Node >= 23.6 is required to build the SEA (have ${nodeVersion})`);
 
 /** A devDependency bin from this package or an ancestor (the root install), else a clear error. */
 function findBin(name) {
@@ -111,6 +113,15 @@ async function main() {
 
 	const version = spawnSync(BIN, ["--version"], { encoding: "utf8", timeout: 60_000 });
 	if (version.status !== 0) fail(`the built binary's --version failed: ${version.stderr}`);
+	// The re-exec path the design hinges on: the binary as a hook. A valid payload with no
+	// AGY_ACP_SOCK must come back as the hook's own fail-closed deny, on stdout, exit 0.
+	const hookProbe = spawnSync(BIN, ["--bridge-hook"], {
+		input: JSON.stringify({ toolCall: { name: "Bash", args: {} } }),
+		encoding: "utf8",
+		timeout: 60_000,
+	});
+	if (hookProbe.status !== 0 || !hookProbe.stdout.includes('"decision":"deny"') || !hookProbe.stdout.includes("AGY_ACP_SOCK is not set"))
+		fail(`the built binary's --bridge-hook failed: exit ${hookProbe.status}, stdout ${hookProbe.stdout}`);
 	const file = (() => {
 		const res = spawnSync("file", [BIN], { encoding: "utf8", timeout: 60_000 });
 		return res.status === 0 ? res.stdout.trim() : "file(1) not available";
