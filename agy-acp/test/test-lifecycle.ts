@@ -29,10 +29,10 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { BRIDGE_DIR_NAME_RE } from "../src/bridge-server.ts";
+import { serverSpawnArgs } from "./bin-target.ts";
 import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
-const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
 // Bridge dirs live in os.tmpdir(), and every agy-acp sweeps that root when it starts. This file
 // starts real ones, so without a private TMPDIR they would remove - and log removing - dirs that
@@ -621,7 +621,8 @@ function spawnServer(tmp: string, fixture: string, extraEnv: Record<string, stri
 	fs.writeFileSync(wrapper, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE)} "$@" ${extraFlags}\n`, {
 		mode: 0o755,
 	});
-	const child = spawn(process.execPath, [MAIN], {
+	const [exe, argv] = serverSpawnArgs();
+	const child = spawn(exe, argv, {
 		env: { ...process.env, AGY_ACP_COMMAND: wrapper, AGY_ACP_LOG: logFile, AGY_ACP_SHUTDOWN_TIMEOUT_MS: "6000", ...extraEnv },
 		stdio: ["pipe", "pipe", "pipe"],
 	});

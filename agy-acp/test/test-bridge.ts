@@ -12,15 +12,12 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 import { AGY_ACP_VERSION } from "../src/server.ts";
 import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs } from "../src/bridge-server.ts";
 import { cleanupStaleBridges } from "../src/bridge-cleanup.ts";
 import { PermissionGate } from "../src/permission-gate.ts";
 import { PLAN_DENY_REASON } from "../src/permission.ts";
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const HOOK = path.resolve(HERE, "..", "src", "bridge-hook.ts");
+import { hookSpawnArgs, layoutInvocation, HOOK as HOOK_FILE } from "./bin-target.ts";
 
 const readJson = (p: string): Record<string, unknown> => JSON.parse(fs.readFileSync(p, "utf8"));
 
@@ -82,7 +79,8 @@ const waitUntil = async (pred: () => boolean, ms: number, what: string): Promise
 /** Run the hook with a payload; its whole exit behaviour is one JSON line + exit 0. */
 function runHook(env: Record<string, string>, stdin: string, signalAfterMs?: number): Promise<{ code: number; stdout: string }> {
 	return new Promise((resolve) => {
-		const child = spawn(process.execPath, [HOOK], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
+		const [exe, argv] = hookSpawnArgs();
+		const child = spawn(exe, argv, { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
 		let stdout = "";
 		child.stdout.on("data", (d: Buffer) => {
 			stdout += d.toString("utf8");
@@ -100,7 +98,7 @@ function runHook(env: Record<string, string>, stdin: string, signalAfterMs?: num
 
 const PAYLOAD = JSON.stringify({ conversationId: "conv-1", stepIdx: 1, toolCall: { name: "run_command", args: { CommandLine: "ls" } } });
 test("the layout fits the unix socket path limit (shortening the name, or falling to the next runtime dir)", () => {
-	const mk = (runtimeDirs: string[]) => createBridgeLayout({ runtimeDirs, node: process.execPath, hookFile: HOOK, hookTimeoutSec: 30 });
+	const mk = (runtimeDirs: string[]) => createBridgeLayout({ runtimeDirs, ...layoutInvocation(), hookTimeoutSec: 30 });
 	for (const root of [os.tmpdir(), path.join(os.tmpdir(), "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k")]) {
 		const l = mk([root]);
 		assert.ok(
@@ -129,8 +127,7 @@ test("a fresh bridge: 0700 dir, the exact hooks.json shape, a 0600 socket, stop 
 	const server = new BridgeServer({
 		log: (l) => logs.push(l),
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
@@ -154,8 +151,14 @@ test("a fresh bridge: 0700 dir, the exact hooks.json shape, a 0600 socket, stop 
 		const hook = (pre[0].hooks as Array<Record<string, unknown>>)[0];
 		assert.strictEqual(hook.type, "command");
 		assert.strictEqual(hook.timeout, 60, "the documented timeout");
-		assert.ok(String(hook.command).startsWith(`exec '${process.execPath}'`), `the command execs node: ${String(hook.command)}`);
-		assert.ok(String(hook.command).endsWith(`'${HOOK}'`), "the command names the hook file (both paths shell-quoted)");
+		// The test hands the bridge the suite's invocation explicitly, so the assertion checks that
+		// (in binary mode it is the re-exec form: the binary plus --bridge-hook, no hook file).
+		const inv = layoutInvocation();
+		assert.ok(String(hook.command).startsWith(`exec '${inv.node}'`), `the command execs the suite's executable: ${String(hook.command)}`);
+		assert.ok(
+			String(hook.command).endsWith(`'${inv.hookFile ?? "--bridge-hook"}'`),
+			"the command names the hook (both paths shell-quoted)",
+		);
 		assert.strictEqual(`0${mode7(server.socketPath)}`, "0600", "the socket is 0600");
 	} finally {
 		await server.stop();
@@ -167,8 +170,7 @@ test("a round trip: token + conversation-id in, one JSON line out, then the conn
 	const server = new BridgeServer({
 		log: (l) => logs.push(l),
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
@@ -198,8 +200,7 @@ test("a wrong token or an empty conversation-id closes the connection with no re
 		const server = new BridgeServer({
 			log: (l) => logs.push(l),
 			token: "tok-1",
-			node: process.execPath,
-			hookFile: HOOK,
+			...layoutInvocation(),
 			hookTimeoutSec: 60,
 			maxHoldMs: 5000,
 			conversationId: () => "conv-1",
@@ -227,8 +228,7 @@ test("a subagent's own conversation id is accepted (same token; the call still g
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
@@ -257,8 +257,7 @@ test("an unauthenticated or early-dropped connection does not abort a legitimate
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
@@ -297,8 +296,7 @@ test("a null conversation id (before the probe) closes the connection with no re
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => null,
@@ -323,8 +321,7 @@ test("a failed partial start (the socket chmod) removes the dir and closes the l
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => null,
@@ -344,8 +341,7 @@ test("a malformed request line closes the connection with no reply", async () =>
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
@@ -377,8 +373,7 @@ test("a handler failure destroys the connection with no reply (the hook fails cl
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
@@ -406,8 +401,7 @@ test("maxHoldMs cuts a never-answering ask: the connection dies and onConnection
 	const server = new BridgeServer({
 		log: () => {},
 		token: "tok-1",
-		node: process.execPath,
-		hookFile: HOOK,
+		...layoutInvocation(),
 		hookTimeoutSec: 60,
 		maxHoldMs: 300,
 		conversationId: () => "conv-1",
@@ -575,7 +569,8 @@ test("the hook is fail-closed in every failure mode: one JSON deny line, exit 0"
 	assert.match(r.stdout, /"decision":"deny"/);
 });
 test("the hook source is the single-writer design (exactly one stdout write, exactly one exit call)", () => {
-	const src = fs.readFileSync(HOOK, "utf8");
+	// The wrapper (bridge-hook.ts) only hands over; the design the assertion guards lives in hook-run.ts.
+	const src = `${fs.readFileSync(HOOK_FILE, "utf8")}\n${fs.readFileSync(path.resolve(path.dirname(HOOK_FILE), "hook-run.ts"), "utf8")}`;
 	assert.strictEqual(src.split("process.stdout.write(").length - 1, 1, "exactly one process.stdout.write call");
 	assert.strictEqual(src.split("process.exit(").length - 1, 1, "exactly one process.exit call");
 });

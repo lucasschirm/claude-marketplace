@@ -7,6 +7,9 @@
 	"bin": {
 		"agy-acp": "src/main.ts"
 	},
+	"scripts": {
+		"build:sea": "node scripts/build-sea.mjs"
+	},
 	"engines": {
 		"node": ">=23.6"
 	}

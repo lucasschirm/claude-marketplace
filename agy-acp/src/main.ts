@@ -6,13 +6,13 @@
 // named by AGY_ACP_LOG. The client hangs up by closing stdin; we answer EOF with a clean exit.
 
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, AGY_ACP_VERSION, PROTOCOL_VERSION } from "./server.ts";
 import { cleanupStaleBridges } from "./bridge-cleanup.ts";
 import { createShutdown } from "./shutdown.ts";
 import { lifecycleConfigFromEnv } from "./config.ts";
 import { parseLaunchArgs } from "./launch.ts";
+import { isDirectRun } from "./invocation.ts";
+import { runBridgeHook } from "./hook-run.ts";
 export { AGY_ACP_VERSION, PROTOCOL_VERSION };
 
 const USAGE = `agy-acp ${AGY_ACP_VERSION} - an ACP server for Google's agy CLI
@@ -21,6 +21,7 @@ Usage:
   agy-acp              serve ACP over stdio (this is what an ACP client spawns)
   agy-acp --version    print the version
   agy-acp --help       print this help
+  agy-acp --bridge-hook  run the PreToolUse hook on stdin (the mode the bridge's hooks.json invokes)
 
 Selection (what the agy children run with; a client may change model and effort per session):
   --model <id>               the model to start on (agy models lists the ids)
@@ -101,16 +102,11 @@ export function main(args: string[]): void {
 	exit.installSignals(); // after the server exists: the cleanup disposes its sessions
 }
 
-const thisFile = fileURLToPath(import.meta.url);
-const invoked = process.argv[1];
-const isDirectRun = (() => {
-	if (!invoked) return false;
-	try {
-		return fs.realpathSync(invoked) === thisFile;
-	} catch {
-		// a vanished argv[1] can still be compared by path
-		return path.resolve(invoked) === thisFile;
-	}
-})();
-
-if (isDirectRun) main(process.argv.slice(2));
+const args = process.argv.slice(2);
+// `--bridge-hook` runs the PreToolUse hook (invoked that way by the bridge's hooks.json in SEA
+// mode, where the binary re-executes itself): it comes before the server and never starts one.
+if (args.includes("--bridge-hook")) {
+	runBridgeHook();
+} else if (isDirectRun(import.meta.url)) {
+	main(args);
+}

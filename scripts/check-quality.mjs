@@ -519,7 +519,7 @@ const INBOUND_PARSE_ALLOWLIST = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/agy/contract.ts",
 	"agy-acp/src/bridge-server.ts",
-	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
 	// The session store's decoder: `$XDG_STATE_HOME` is operator-writable, so its records are inbound
 	// input and are validated here rather than trusted because a file said so (issue #56).
 	"agy-acp/src/session-store/records.ts",
@@ -562,7 +562,7 @@ function countStdioWrites() {
 const AGY_STDOUT_ALLOWED = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/main.ts",
-	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
 	"agy-acp/src/flush-stdout.ts",
 ]);
 
@@ -851,7 +851,8 @@ const INVARIANTS = [
 	},
 	{
 		name: "agyStdoutFramesOnly",
-		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
+		description:
+			"in agy-acp/**, only the transport (jsonrpc.ts), main.ts (--version/--help), the hook's own writer (hook-run.ts) and the flush may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
 	},
 	{

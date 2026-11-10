@@ -310,7 +310,9 @@ has a typed accessor, and unknown event types or fields are kept as `raw` rather
 
 ## Requirements
 
-- Node.js >= 23.6 (runs the TypeScript sources directly; there is no build step)
+- Node.js >= 23.6 (runs the TypeScript sources directly; there is no build step — unless you want
+  the single executable, see "Building the single executable" below: the built binary needs no
+  Node at all)
 - POSIX: the driver signals the child's process group with `SIGINT`/`SIGTERM`/`SIGKILL`, which
   Windows `process.kill` does not map to (a `SIGINT` there terminates the process outright);
   the process-group lifetime model is a POSIX one
@@ -319,7 +321,10 @@ has a typed accessor, and unknown event types or fields are kept as `raw` rather
   and sets `strictRefusal: true` when `AGY_ACP_STRICT_VERSION=1` - the driver itself does
   not invoke it yet
 
-Zero npm runtime dependencies: Node built-ins only.
+Zero npm runtime dependencies: Node built-ins only. (Building the single executable uses
+`esbuild` and `postject`, which are dev-only tooling in the root `package.json` — the
+`agy-acp` package itself stays dependency-free, and the built binary needs nothing but the
+OS it was built for.)
 
 ## Running it from an ACP client
 
@@ -332,6 +337,10 @@ agy-acp --version                   # print the version
 agy-acp --help                      # usage
 AGY_ACP_LOG=/tmp/agy-acp.log agy-acp   # diagnostics to a file instead of stderr
 ```
+
+Or build the single executable (next section) and point the client at it: the binary is the
+server, and the permission hook is the same binary re-executed with `--bridge-hook` — no Node,
+no script files, no install.
 
 The knobs, all with the defaults above and all read from the environment (`agy-acp --help` prints
 them): `AGY_ACP_COMMAND` (the `agy` binary to launch), `AGY_ACP_CANCEL_ESCALATE_MS` (the
@@ -356,10 +365,65 @@ For Zed, an `agent_servers` entry along the lines of:
 }
 ```
 
+… or, with the single executable:
+
+```json
+{
+	"agent_servers": {
+		"Antigravity (agy-acp)": {
+			"command": "/path/to/agy-acp"
+		}
+	}
+}
+```
+
 Closing stdin is the hang-up: the server disposes its sessions and their children, then exits 0.
+
+## Building the single executable (Node SEA)
+
+`npm run build:sea` (from `agy-acp/`, or `node agy-acp/scripts/build-sea.mjs` from the repo
+root) produces `dist/agy-acp`: a standalone ELF executable — no install, no Node on the target
+machine. The build is three steps, all in `scripts/build-sea.mjs`:
+
+1. `esbuild` bundles `src/main.ts` to a single CommonJS file (`dist/main.cjs`); the SEA blob
+   must be CJS, and everything in this package is Node built-ins, so the bundle is the whole
+   program.
+2. `node --experimental-sea-config` patches a copy of the local Node runtime with the blob and
+   writes the executable (the config names the bundle as `output` and the Node version the
+   blob was built against).
+3. `postject` injects the blob into the binary in place, with Node's sentinel fuse
+   (`NODE_SEA_FUSE_…`) so the executable fails loudly rather than silently running as a plain
+   Node binary.
+
+The build records and prints the result — size, sha256, and the startup time to a first
+`initialize` response (best of 3) — which the CI job (`agy-acp-sea`) repeats and publishes as
+an artifact. On a Linux x86-64 host with Node 24 the binary is about 121 MiB (unstripped;
+`strip` roughly halves it, at the cost of the debug info) and answers `initialize` in roughly
+30 ms.
+
+The binary is both halves of the bridge in one file: as a plain process it is the ACP server;
+re-executed with `--bridge-hook` it is the permission hook (the same code path script-mode
+`bridge-hook.ts` runs, reached from `src/main.ts`). The hooks.json a SEA session writes names
+the binary's absolute path plus `--bridge-hook` — no hook *file* — so moving the executable does
+not orphan a stray script: existing sessions keep pointing at the old path until they are
+re-created, and new sessions pick up the new location automatically.
+
+Two honest caveats:
+
+- Node's SEA is still an experimental feature: the binary prints the `ExperimentalWarning: Single
+  executable application is an experimental feature` line to stderr on every start (the test
+  suites strip that one line so both modes see the same surface), and the feature contract can
+  still move in a Node release — the build records the Node version it was made against.
+- The binary is a snapshot of the Node runtime: build it on the platform it will run on (the
+  CI job builds on `ubuntu-latest`, Node 24). It is not a universal binary, and it is not
+  stripped.
 
 ## Development
 
 The package is wired into the repo's quality gates: `npm run qa` typechecks, lints and formats it,
 `scripts/check-quality.mjs` applies its invariants to `agy-acp/src/`, and `bash test/run.sh agy-acp`
-runs the unit tests under `agy-acp/test/`.
+runs the unit tests under `agy-acp/test/`. The suites are mode-agnostic through one seam
+(`test/bin-target.ts`): with `AGY_ACP_TEST_BIN=/path/to/dist/agy-acp` set, the same suite spawns
+the built executable instead of `node <script>` (the hook as a re-exec with `--bridge-hook`, the
+hooks.json layout with the flag instead of a hook file) — that is how CI proves the single
+executable, not just the sources.
