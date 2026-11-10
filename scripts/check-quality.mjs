@@ -519,7 +519,7 @@ const INBOUND_PARSE_ALLOWLIST = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/agy/contract.ts",
 	"agy-acp/src/bridge-server.ts",
-	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
 	// The session store's decoder: `$XDG_STATE_HOME` is operator-writable, so its records are inbound
 	// input and are validated here rather than trusted because a file said so (issue #56).
 	"agy-acp/src/session-store/records.ts",
@@ -553,8 +553,9 @@ function countStdioWrites() {
 
 // agy-acp's stdout is the protocol channel, not a console: only the transport may frame it, and
 // main.ts may answer --version/--help before serving. console.log is never legitimate in server
-// sources - it is exactly how a stray debug line corrupts the stream. bridge-hook.ts is the one
-// other writer: it is a separate child process (spawned by agy as a PreToolUse hook), and its
+// sources - it is exactly how a stray debug line corrupts the stream. hook-run.ts is the one
+// other writer: it is a separate child process (spawned by agy as a PreToolUse hook, script or
+// binary), and its
 // stdout is the hook's decision channel - the one JSON line agy reads, by design. flush-stdout.ts is
 // the third: it writes no frame at all, only the zero-length write that means "everything buffered
 // is out", because the exit path ends in process.exit() - a file of its own so the grant covers that
@@ -562,7 +563,7 @@ function countStdioWrites() {
 const AGY_STDOUT_ALLOWED = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/main.ts",
-	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
 	"agy-acp/src/flush-stdout.ts",
 ]);
 
@@ -851,7 +852,8 @@ const INVARIANTS = [
 	},
 	{
 		name: "agyStdoutFramesOnly",
-		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
+		description:
+			"in agy-acp/**, only the transport (jsonrpc.ts), main.ts (--version/--help), the hook's own writer (hook-run.ts) and the flush may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
 	},
 	{

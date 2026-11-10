@@ -1,22 +1,20 @@
 // The per-session permission-bridge directory and Unix socket the PreToolUse hook dials.
-//
 // The directory is created under $XDG_RUNTIME_DIR/agy-acp/ (0700, falling back to os.tmpdir())
 // with a random per-session name, holds `.agents/hooks.json` (one PreToolUse hook under an
-// unguessable per-session name) and a 0600 socket. The socket path must be <= 107 bytes
-// (sun_path), so the name is shortened until it fits. Nothing here ever writes user-level agy
-// configuration (~/.gemini): hooks.json lives in the per-session dir only.
+// unguessable name) and a 0600 socket; the socket path must be <= 107 bytes (sun_path), so the
+// name is shortened until it fits. Nothing here writes user-level agy configuration: hooks.json
+// lives in the per-session dir only, never in `~/.gemini`.
 // The hook request protocol is one JSON line in, one JSON line out:
 //   in:  { token, conversationId, stepIdx, toolCall: { name, args } }
 //   out: { decision: "allow" | "deny", reason? }
-// A bad token or conversation id closes the connection without a reply; the hook's fail-closed
-// behaviour (close -> deny) is what makes that a safe failure.
+// A bad token or conversation id closes the connection without a reply - the hook fails closed on that.
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createServer as createNetServer, type Server, type Socket } from "node:net";
-import { fileURLToPath } from "node:url";
+import { defaultHookInvocation } from "./invocation.ts";
 
 /** The Unix socket path limit (sun_path). */
 export const SOCKET_PATH_MAX_BYTES = 107;
@@ -40,9 +38,10 @@ export interface BridgeServerOptions {
 	log: (line: string) => void;
 	/** The per-session token the hook must present. */
 	token: string;
-	/** The node binary and hook file the command in hooks.json invokes (defaults: this package). */
+	/** The node binary, hook file and hook argv the command in hooks.json invokes (defaults: this package). */
 	node?: string;
 	hookFile?: string;
+	hookArgs?: string[];
 	/** The hook timeout (seconds) written into hooks.json - the top of the deadline ladder. */
 	hookTimeoutSec: number;
 	/** The server-side hold ceiling per connection: a net above the hook's own deadline. */
@@ -72,9 +71,11 @@ export class BridgeServer {
 	/** Creates the dir (0700), hooks.json and the listening socket (0600). Throws on failure: the
 	 * caller must not start agy then - an ungated session must never launch. */
 	async start(): Promise<void> {
+		const def = defaultHookInvocation();
 		const layout = createBridgeLayout({
-			node: this.opts.node ?? process.execPath,
-			hookFile: this.opts.hookFile ?? defaultHookFile(),
+			node: this.opts.node ?? def.node,
+			hookFile: this.opts.hookFile ?? (this.opts.hookArgs?.length ? undefined : def.hookFile), // a non-empty hookArgs is a re-exec request: no default hook file then
+			hookArgs: this.opts.hookArgs ?? def.hookArgs,
 			hookTimeoutSec: this.opts.hookTimeoutSec,
 		});
 		const chmod = this.opts.chmod ?? ((p: string, mode: number) => fs.promises.chmod(p, mode));
@@ -176,7 +177,6 @@ export class BridgeServer {
 				conn.destroy();
 				return;
 			}
-			// after auth: an unauthenticated close must not abort a legitimate pending ask
 			lost = { conversationId: req.conversationId, stepIdx: req.stepIdx };
 			void this.opts.handle(req).then(
 				(reply) => {
@@ -194,11 +194,6 @@ export class BridgeServer {
 			);
 		});
 	}
-}
-
-/** The shipped hook file: the one next to this source. */
-export function defaultHookFile(): string {
-	return fileURLToPath(new URL("./bridge-hook.ts", import.meta.url));
 }
 
 /** Tolerates the wire shape: one JSON object with the four known fields. */
@@ -229,7 +224,8 @@ export interface BridgeLayoutOptions {
 	/** The runtime dirs to try in order; the first with a fitting socket path wins. */
 	runtimeDirs?: string[];
 	node: string;
-	hookFile: string;
+	hookFile?: string;
+	hookArgs?: string[];
 	hookTimeoutSec: number;
 	/** Injection point for the per-session random (tests). */
 	hex?: (n: number) => string;
@@ -251,6 +247,10 @@ export function createBridgeLayout(opts: BridgeLayoutOptions): { dir: string; so
 			const dir = path.join(root, hookName);
 			const socketPath = path.join(dir, "socket");
 			if (Buffer.byteLength(socketPath, "utf8") > SOCKET_PATH_MAX_BYTES) continue;
+			const hookParts = [opts.node, ...(opts.hookArgs ?? []), opts.hookFile ?? ""]
+				.filter((p) => p !== "")
+				.map(shellQuote)
+				.join(" ");
 			const hooksJson = JSON.stringify(
 				{
 					[hookName]: {
@@ -260,9 +260,9 @@ export function createBridgeLayout(opts: BridgeLayoutOptions): { dir: string; so
 								hooks: [
 									{
 										type: "command",
-										// Shell-safe quoting: the node binary and hook file are our own paths, but a
-										// path with spaces must not split the agy `sh -c` invocation.
-										command: `exec ${shellQuote(opts.node)} ${shellQuote(opts.hookFile)}`,
+										// Shell-safe quoting: the parts are our own paths and flags, but a path with
+										// spaces must not split the agy `sh -c` invocation.
+										command: `exec ${hookParts}`,
 										timeout: opts.hookTimeoutSec,
 									},
 								],

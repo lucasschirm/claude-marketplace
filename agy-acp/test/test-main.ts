@@ -5,9 +5,8 @@ import * as fs from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { AGY_ACP_VERSION } from "../src/main.ts";
+import { serverSpawnArgs, stripSeaWarning } from "./bin-target.ts";
 import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
-
-const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 
 interface RunResult {
 	code: number | null;
@@ -15,10 +14,11 @@ interface RunResult {
 	stderr: string;
 }
 
-/** Spawn `node src/main.ts`, feed it `input` on stdin, close stdin, and wait for exit. */
+/** Spawn the server (script mode, or the AGY_ACP_TEST_BIN binary), feed it `input` on stdin, close stdin, and wait for exit. */
 function run(args: string[], input?: string, env: NodeJS.ProcessEnv = {}): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(process.execPath, [MAIN, ...args], {
+		const [exe, argv] = serverSpawnArgs(args);
+		const child = spawn(exe, argv, {
 			stdio: ["pipe", "pipe", "pipe"],
 			timeout: 15000,
 			env: { ...process.env, ...env },
@@ -125,7 +125,7 @@ test("AGY_ACP_LOG routes diagnostics to the file, keeping stdout protocol-only",
 		assert.strictEqual(res.code, 0);
 		const log = fs.readFileSync(logFile, "utf8");
 		assert.match(log, /unknown id 999/);
-		assert.strictEqual(res.stderr, "", "diagnostics went to the log file, not stderr");
+		assert.strictEqual(stripSeaWarning(res.stderr), "", "diagnostics went to the log file, not stderr");
 		assert.strictEqual(res.stdout, "", "and stdout still carries no protocol frames");
 	} finally {
 		fs.rmSync(logFile, { force: true });
