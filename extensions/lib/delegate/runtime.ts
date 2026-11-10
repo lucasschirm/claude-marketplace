@@ -94,7 +94,14 @@ export class DelegateRuntime {
 	 * the tools — the suite that checks "the tool said done" against "the agent said `max_tokens`" needs
 	 * to control what the agent says, and spawning a real one for it would not be that test.
 	 */
-	makeTransport: (cwd: string, plan: LaunchPlan) => DelegateTransport = (cwd, plan) => new DelegateTransport(cwd, plan);
+	makeTransport: (cwd: string, plan: LaunchPlan) => DelegateTransport = (cwd, plan) => {
+		const transport = new DelegateTransport(cwd, plan);
+		// The transcript log is the file this extension writes continuously, and a write stream that errors
+		// with nobody listening throws into the host process — the user's editor, not just this session. Route
+		// it to the diagnostics that already reach a human and the file log.
+		transport.logFailure = (message) => this.logWarn(message);
+		return transport;
+	};
 
 	setUi(ui?: ExtensionUIContext): void {
 		if (ui) {

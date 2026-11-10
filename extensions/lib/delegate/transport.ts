@@ -53,6 +53,11 @@ export class DelegateTransport {
 	private nextRpcId = 1;
 	private pendingRequests = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timer: NodeJS.Timeout | null }>();
 	private logStream: fs.WriteStream | null = null;
+	/**
+	 * Where to report a transcript-log failure that the log itself can no longer carry. Set by the runtime; a
+	 * transport with no listener simply drops the diagnostic, which is still better than throwing at it.
+	 */
+	logFailure?: (message: string) => void;
 	private rl: readline.Interface | null = null;
 	private onUpdateCallback?: (update: any) => void;
 	private onExitCallback?: (code: number | null, signal: string | null) => void;
@@ -79,6 +84,15 @@ export class DelegateTransport {
 		}
 		fs.mkdirSync(path.dirname(logFilePath), { recursive: true });
 		this.logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+		// A `WriteStream` is an `EventEmitter`, and an `EventEmitter` that emits `error` with no listener
+		// throws — out of the flush, out of the transport, and into whatever process was kind enough to host
+		// us, which here is the user's editor. A full disk, a revoked mount or a file rotated out from under
+		// the descriptor is not a reason to take the host down with one session's transcript: catch it, say so
+		// once through a channel that is not the broken file, and treat the log as dead from that line on.
+		this.logStream.on("error", (err: unknown) => {
+			this.logStream = null;
+			this.logFailure?.(`transcript log for ${logFilePath} stopped: ${err instanceof Error ? err.message : String(err)}`);
+		});
 	}
 
 	async start(): Promise<Record<string, unknown>> {
