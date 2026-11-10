@@ -81,7 +81,7 @@
     "agy-acp/src/agy/version.ts": 64,
     "agy-acp/src/bridge-cleanup.ts": 54,
     "agy-acp/src/bridge-hook.ts": 153,
-    "agy-acp/src/bridge-server.ts": 336,
+    "agy-acp/src/bridge-server.ts": 363,
     "agy-acp/src/byte-budget.ts": 40,
     "agy-acp/src/cancel.ts": 100,
     "agy-acp/src/config-options.ts": 279,
@@ -94,10 +94,10 @@
     "agy-acp/src/launch.ts": 150,
     "agy-acp/src/lib/child-process.ts": 40,
     "agy-acp/src/main.ts": 124,
-    "agy-acp/src/map-steps.ts": 89,
-    "agy-acp/src/pending-asks.ts": 113,
-    "agy-acp/src/permission-gate.ts": 308,
-    "agy-acp/src/permission.ts": 304,
+    "agy-acp/src/map-steps.ts": 96,
+    "agy-acp/src/pending-asks.ts": 114,
+    "agy-acp/src/permission-gate.ts": 386,
+    "agy-acp/src/permission.ts": 312,
     "agy-acp/src/prompt.ts": 67,
     "agy-acp/src/selection-methods.ts": 120,
     "agy-acp/src/server.ts": 247,
@@ -107,8 +107,9 @@
     "agy-acp/src/shutdown.ts": 120,
     "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 94,
+    "agy-acp/src/subagents.ts": 144,
     "agy-acp/src/turn.ts": 144,
-    "agy-acp/src/update-map.ts": 166
+    "agy-acp/src/update-map.ts": 167
   },
   "notes": [
     {
@@ -529,8 +530,27 @@
         "extensions/lib/delegate/runtime.ts: 540 lines > baseline 533 (files may only shrink)",
         "extensions/lib/delegate/transport.ts: 431 lines > baseline 417 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-10",
+      "reason": "Issue #59 adds subagent attribution, gating and progress across the permission gate, the bridge conversation boundary and their tests, which grows those files past their budgets.",
+      "changes": [
+        "agy-acp/src/bridge-server.ts: 363 lines > baseline 336 (files may only shrink)",
+        "agy-acp/src/map-steps.ts: 95 lines > baseline 89 (files may only shrink)",
+        "agy-acp/src/pending-asks.ts: 114 lines > baseline 113 (files may only shrink)",
+        "agy-acp/src/permission-gate.ts: 386 lines > baseline 308 (files may only shrink)",
+        "agy-acp/src/permission.ts: 312 lines > baseline 304 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-10",
+      "reason": "Issue #59's subagent documentation adds two comment lines to the step mapping; the feature's growth is recorded deliberately.",
+      "changes": [
+        "agy-acp/src/map-steps.ts: 96 lines > baseline 95 (files may only shrink)",
+        "agy-acp/src/update-map.ts: 167 lines > baseline 166 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "eb2dbd6",
+  "generatedFrom": "1afade7",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

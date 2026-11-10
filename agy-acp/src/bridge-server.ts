@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 import { createServer as createNetServer, type Server, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
+import { unknownSubagentReason } from "./permission.ts";
 
 /** The Unix socket path limit (sun_path). */
 export const SOCKET_PATH_MAX_BYTES = 107;
@@ -56,6 +57,11 @@ export interface BridgeServerOptions {
 	maxHoldMs: number;
 	/** The conversation id a request must carry (null before the probe). */
 	conversationId: () => string | null;
+	/**
+	 * Other conversations of this session: its subagents, as the gate knows them (issue #59). A
+	 * conversation that is neither the session's own nor accepted here is denied.
+	 */
+	acceptsConversation?: (conversationId: string) => boolean;
 	handle: (req: BridgeRequest) => Promise<BridgeReply>;
 	/** The hook went away (connection lost) before its request was answered. The pair identifies the
 	 * ask (the gate owns that identity - the socket layer never composes keys of its own). */
@@ -189,20 +195,15 @@ export class BridgeServer {
 				conn.destroy();
 				return;
 			}
-			// The token (per-session, 256-bit) is the real boundary; the conversation check below is
-			// defence in depth, and only against an EMPTY id - an unprobed session or a caller that does
-			// not know its own conversation. A subagent's internal tool call carries its own (sub)
-			// conversation id - same agy process, same token - and is served on purpose, so that check
-			// is not a mismatch test and must not become one.
+			// The token (per-session, 256-bit) is the real boundary. The conversation check below is
+			// defence in depth: the session's own id, or a subagent's, and nothing else - a subagent's
+			// hook carries its own conversation id, accepted only once this session knows that subagent.
 			if (req.token !== this.opts.token) {
 				this.opts.log(`bridge: token mismatch (step ${req.stepIdx}) - closing`);
 				conn.destroy();
 				return;
 			}
-			const expected = this.opts.conversationId();
-			if (expected === null || req.conversationId === "") {
-				this.opts.log(`bridge: unusable conversation id (${req.conversationId || "(none)"} vs ${expected ?? "(not probed)"}) - closing`);
-				conn.destroy();
+			if (!this.acceptConversation(conn, req)) {
 				return;
 			}
 			// after auth: an unauthenticated close must not abort a legitimate pending ask
@@ -222,6 +223,30 @@ export class BridgeServer {
 				},
 			);
 		});
+	}
+
+	/**
+	 * The conversation boundary, after the token: the session's own id, or one the gate accepts as a
+	 * subagent's. An unusable id closes the connection without a reply (the hook fails closed); an
+	 * authenticated hook from an unknown conversation is answered with a deny, so the model sees why.
+	 */
+	private acceptConversation(conn: Socket, req: BridgeRequest): boolean {
+		const expected = this.opts.conversationId();
+		if (expected === null || req.conversationId === "") {
+			this.opts.log(`bridge: unusable conversation id (${req.conversationId || "(none)"} vs ${expected ?? "(not probed)"}) - closing`);
+			conn.destroy();
+			return false;
+		}
+		if (req.conversationId !== expected && !(this.opts.acceptsConversation?.(req.conversationId) ?? false)) {
+			this.opts.log(`bridge: conversation ${req.conversationId} belongs to no subagent of this session - denying (step ${req.stepIdx})`);
+			try {
+				conn.end(`${JSON.stringify({ decision: "deny", reason: unknownSubagentReason(req.conversationId) })}\n`);
+			} catch {
+				conn.destroy();
+			}
+			return false;
+		}
+		return true;
 	}
 }
 

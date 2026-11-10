@@ -9,7 +9,8 @@
 //   - system_message             → a logged agent_message_chunk notice
 //   - per-turn usage delta       → usage_update (agy-acp extension)
 //
-// Subagent steps have no mapping of their own: their gating and attribution land in sub-issue 59.
+// Subagent steps have no mapping of their own in the stream: a subagent's steps are not in it, and
+// its gated tool calls ride as progress on the parent call (subagents.ts, issue #59).
 // The one exception is settling: a tool step's terminal state may arrive with the step's own
 // type (an invoke_subagent DONE comes in as step_type "subagent"), so a tracked toolCallId
 // settles regardless of the type it arrives under.

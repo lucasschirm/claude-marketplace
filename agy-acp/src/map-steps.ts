@@ -11,7 +11,8 @@
 //
 // Settling is tracking-based on purpose: a terminal step_update may carry the step's own type (an
 // invoke_subagent DONE arrives as step_type "subagent"), so any tracked id settles and untracked
-// ones (user_input) are ignored. Subagent *internal* steps stay unmapped (sub-issue 59). A state
+// ones (user_input) are ignored. A subagent's internal steps are not in this stream at all; their
+// activity is progress on the call that spawned them (see subagents.ts, issue #59). A state
 // outside the observed set (a newer agy state) keeps the tool tracked: failActiveTools settles it
 // at the turn end, so a client never shows a tool running forever.
 
@@ -54,6 +55,11 @@ export function mapStepToUpdates(host: StepMapHost, s: AgyStepUpdateEvent["step_
 		host.emit(agentMessageChunk(systemMessageText(s.text_delta)));
 		return;
 	}
+	// agy names the subagents a spawning call started on its terminal step (issue #59); the mapping
+	// is used by the gate for the rest of the turn (its asks and progress are parent-attributed).
+	if (s.subagent_info !== undefined && s.subagent_info.subagents.length > 0) {
+		host.gate.onSubagentInfo(s.step_index, s.subagent_info.subagents);
+	}
 	const id = toolCallIdOf(host.conversationId, s.step_index);
 	if (s.state === "ACTIVE") {
 		mapActiveTool(host, s, id);
@@ -62,6 +68,7 @@ export function mapStepToUpdates(host: StepMapHost, s: AgyStepUpdateEvent["step_
 	// Only a terminal state settles a tool call, and only the first one to arrive for this id.
 	if ((s.state === "DONE" || s.state === "ERROR") && host.activeTools.delete(id)) {
 		settleTerminalTool(host, s, id);
+		host.gate.onStreamSettled(id);
 	}
 }
 

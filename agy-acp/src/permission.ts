@@ -243,6 +243,14 @@ export function sessionEndedReason(): string {
 export function cancelledReason(): string {
 	return "denied by agy-acp: the turn was cancelled. Do not retry this call.";
 }
+/**
+ * A hook request from a conversation this session neither owns nor knows as a subagent (issue #59):
+ * another agy process sharing the runtime dir, or a hook that outlived the turn that spawned it.
+ */
+export function unknownSubagentReason(conversationId: string): string {
+	const id = conversationId.length > 64 ? `${conversationId.slice(0, 64)}…` : conversationId;
+	return `denied by agy-acp: the tool call came from conversation ${id}, which is not this session or a subagent it reported. Do not retry this call.`;
+}
 
 // ---------------------------------------------------------------- allow-always grants
 
