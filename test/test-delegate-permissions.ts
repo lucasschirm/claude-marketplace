@@ -67,6 +67,12 @@ test("optionValues reads Devin's { value } objects and bare strings, skipping ju
 	assert.deepStrictEqual(optionValues(undefined), []);
 });
 
+/** What the last-resort permission sentence has to carry: what is missing, and what to do about it. */
+const SAYS_UNLABELLED = /no description/;
+const SAYS_REJECT = /[Rr]eject/;
+const UNLABELLED_PLACEHOLDER = /unknown tool call/;
+const UNLABELLED_ID = /calls\/9f/;
+
 // --- parsePermissionRequest ---
 
 test("parsePermissionRequest extracts the command and options of a real request", () => {
@@ -80,8 +86,19 @@ test("parsePermissionRequest extracts the command and options of a real request"
 
 test("parsePermissionRequest falls back to the tool call title, then a placeholder", () => {
 	assert.strictEqual(parsePermissionRequest(1, { toolCall: { title: "Edit src/a.ts" } }).command, "Edit src/a.ts");
+	// A payload with nothing in it must still produce a sentence a decider can act on. An agent has been seen
+	// sending a request whose tool call carried only an id, and "(unknown tool call)" reads like a bug in the
+	// reader rather than like an agent that withheld the description — which is the difference between
+	// approving something and asking what it is.
 	const empty = parsePermissionRequest(2, undefined);
-	assert.strictEqual(empty.command, "(unknown tool call)");
+	assert.match(empty.command, SAYS_UNLABELLED);
+	assert.match(empty.command, SAYS_REJECT);
+	assert.ok(!UNLABELLED_PLACEHOLDER.test(empty.command), "the placeholder must not be a shrug");
+	assert.match(
+		parsePermissionRequest(3, { toolCall: { toolCallId: "calls/9f" } }).command,
+		UNLABELLED_ID,
+		"the id is the one thing on record",
+	);
 	assert.deepStrictEqual(empty.options, []);
 });
 

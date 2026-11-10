@@ -16,14 +16,14 @@
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
-    "biome.performance/useTopLevelRegex": 563,
+    "biome.performance/useTopLevelRegex": 566,
     "biome.performance/noAwaitInLoops": 91,
     "biome.performance/noNamespaceImport": 185,
     "biome.style/useBlockStatements": 879,
     "biome.suspicious/noShadow": 72,
     "biome.suspicious/noReturnAssign": 14,
-    "biome.complexity/noExcessiveLinesPerFunction": 9,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
+    "biome.complexity/noExcessiveLinesPerFunction": 9,
     "biome.suspicious/noExplicitAny": 162,
     "biome.suspicious/noConsole": 8
   },
@@ -38,20 +38,20 @@
     "extensions/lib/delegate/drivers/claude.ts": 279,
     "extensions/lib/delegate/drivers/devin.ts": 195,
     "extensions/lib/delegate/events.ts": 228,
-    "extensions/lib/delegate/permissions.ts": 222,
+    "extensions/lib/delegate/permissions.ts": 226,
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
     "extensions/lib/delegate/queue.ts": 453,
-    "extensions/lib/delegate/recovery.ts": 300,
+    "extensions/lib/delegate/recovery.ts": 318,
     "extensions/lib/delegate/registry.ts": 225,
-    "extensions/lib/delegate/runtime.ts": 513,
-    "extensions/lib/delegate/session.ts": 521,
+    "extensions/lib/delegate/runtime.ts": 533,
+    "extensions/lib/delegate/session.ts": 522,
     "extensions/lib/delegate/slots.ts": 81,
-    "extensions/lib/delegate/storage.ts": 107,
+    "extensions/lib/delegate/storage.ts": 122,
     "extensions/lib/delegate/tools-session.ts": 357,
     "extensions/lib/delegate/tools.ts": 289,
-    "extensions/lib/delegate/transcript.ts": 210,
+    "extensions/lib/delegate/transcript.ts": 226,
     "extensions/lib/delegate/transport.ts": 417,
     "extensions/lib/delegate/types.ts": 304,
     "extensions/lib/delegate/worktree.ts": 201,
@@ -502,8 +502,27 @@
       "changes": [
         "biome.performance/useTopLevelRegex: 561 -> 563"
       ]
+    },
+    {
+      "at": "2026-11-10",
+      "reason": "unlabelled permission requests now say so",
+      "changes": [
+        "extensions/lib/delegate/permissions.ts: 226 lines > baseline 222 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-10",
+      "reason": "third review round: chunk loss, id paths, titles",
+      "changes": [
+        "biome.performance/useTopLevelRegex: 563 -> 566",
+        "extensions/lib/delegate/recovery.ts: 318 lines > baseline 300 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 533 lines > baseline 513 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 522 lines > baseline 521 (files may only shrink)",
+        "extensions/lib/delegate/storage.ts: 122 lines > baseline 107 (files may only shrink)",
+        "extensions/lib/delegate/transcript.ts: 226 lines > baseline 210 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "d800a63",
+  "generatedFrom": "988b849",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

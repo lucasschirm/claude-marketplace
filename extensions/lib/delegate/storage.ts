@@ -14,6 +14,21 @@ export const STORAGE_ROOT = "delegate_task";
 /** Read-only since the rename. Sessions that predate it keep their files here. */
 export const LEGACY_STORAGE_ROOT = "devin_delegate";
 
+/**
+ * Whether an id may be used as one path segment under `~/.pi/agent/<root>/`.
+ *
+ * Session ids come off the wire: they are what the agent's server chose, and they name directories we
+ * create, read and delete. An id of `../../evil` would put a `meta.json` — or a `rm -rf`'d worktree record —
+ * outside the tree this extension owns, and a recovered state file is read with the same trust as a fresh
+ * one. Rejected: separators, anything a shell or a path would expand, dot segments, and control characters
+ * (which also make a status line lie about where it ends).
+ */
+export function isStorageSafeId(id: string): boolean {
+	return (
+		typeof id === "string" && id.length > 0 && id.length <= 200 && !/[\p{C}\\/]/u.test(id) && !id.includes("..") && !id.startsWith(".")
+	);
+}
+
 export function getStorageDir(piSessionId: string, root: string = STORAGE_ROOT): string {
 	return path.join(os.homedir(), ".pi", "agent", root, piSessionId);
 }

@@ -30,6 +30,9 @@ export const BOOT_BUDGET_MS = Number.parseInt(process.env.PI_EXT_BOOT_BUDGET_MS 
 export const DEFAULT_MAX_RUNS_PER_AGENT = 2;
 export const DEFAULT_MAX_RUNS_TOTAL = 3;
 
+/** How much streamed text accumulates before it becomes a transcript line. */
+const FLUSH_THRESHOLD_CHARS = 2000;
+
 export class DelegateRuntime {
 	readonly sessions = new Map<string, SessionMeta>();
 	readonly activeClients = new Map<string, DelegateTransport>();
@@ -430,6 +433,23 @@ export class DelegateRuntime {
 	// ---------------------------------------------------------------- transcript buffers
 
 	/** Flush the accumulated streamed chunks into the event log (assistant and thought, separately). */
+	/**
+	 * Accumulate one streamed chunk, flushing once the buffer is worth a line.
+	 *
+	 * The store happens **before** the threshold test. The other order — build the new value in a local, test
+	 * it, then flush what the *map* still holds — writes the older bytes and loses the chunk that tripped the
+	 * threshold: every 2 000 characters, mid-sentence, in whichever stream talked fastest. A progress log that
+	 * eats a word twice a kilobyte is not a progress log, and nothing downstream can tell that it happened.
+	 */
+	appendStreamChunk(meta: SessionMeta, stream: "assistant" | "thought", text: string): void {
+		const buffers = stream === "assistant" ? this.assistantBuffers : this.thoughtBuffers;
+		const buf = (buffers.get(meta.sessionId) ?? "") + text;
+		buffers.set(meta.sessionId, buf);
+		if (buf.length >= FLUSH_THRESHOLD_CHARS) {
+			this.flushBuffers(meta);
+		}
+	}
+
 	flushBuffers(meta: SessionMeta): void {
 		const client = this.activeClients.get(meta.sessionId);
 		const assistant = this.assistantBuffers.get(meta.sessionId);

@@ -131,7 +131,11 @@ export function parsePermissionRequest(requestId: number | string, rawParams: un
 		toolCall.title ??
 		(toolCall.rawInput !== undefined ? JSON.stringify(toolCall.rawInput) : undefined) ??
 		toolCall.kind ??
-		"(unknown tool call)";
+		// The last resort has to be a sentence a decider can act on, not a shrug. An agent has been seen asking
+		// with a tool call carrying only an id — no title, no rawInput, no kind — and a placeholder that reads
+		// like our bug rather than like the agent withholding the description is how unlabelled calls get
+		// approved by reflex. Name the id, name who said nothing, and say what to answer.
+		`(the ${toolCall.toolCallId ? `tool call ${toolCall.toolCallId}` : "agent"} came with no description — nothing to show you, and nothing that says what would run. Reject unless you know what this agent's unlabelled calls do.)`;
 	const rawOptions: RawPermissionOption[] = Array.isArray(params.options) ? params.options : [];
 	const options: PermissionOption[] = rawOptions
 		.filter((o) => typeof o?.optionId === "string")

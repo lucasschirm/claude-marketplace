@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import {
 	getEventsLogPath,
+	isStorageSafeId,
 	getMetaPath,
 	getSessionDir,
 	getStatePath,
@@ -64,4 +65,16 @@ test("readTextFileWithRetry returns the file, and still throws when it is really
 	// loop for that time with Atomics.wait, freezing the TUI on every retried file during session_start.
 	await assert.rejects(() => readTextFileWithRetry(path.join(dir, "missing.json")), /ENOENT/);
 	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("an id from the wire may not name a directory outside the tree this extension owns", () => {
+	// Session ids are chosen by the agent's server and used to build paths we create, read and later delete.
+	// A recovered record is trusted exactly as much as a live `session/new` answer, so both go through this.
+	assert.ok(isStorageSafeId("session:abc-123"));
+	assert.ok(isStorageSafeId("01J8ZZ9V3QK"));
+	for (const bad of ["", "..", "../evil", "../../elsewhere", "a/b", "a\\b", ".", ".hidden", "x\ny"]) {
+		assert.equal(isStorageSafeId(bad), false, `${JSON.stringify(bad)} must not be a path segment`);
+	}
+	// Long enough for any real id; short enough that a server cannot choose the length of our filename.
+	assert.ok(!isStorageSafeId("x".repeat(201)));
 });

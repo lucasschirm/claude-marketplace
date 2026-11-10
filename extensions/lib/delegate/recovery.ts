@@ -17,7 +17,15 @@
 import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
-import { firstExisting, getStatePath, LEGACY_STORAGE_ROOT, readTextFileWithRetry, sessionFileCandidates, STORAGE_ROOT } from "./storage.ts";
+import {
+	firstExisting,
+	getStatePath,
+	isStorageSafeId,
+	LEGACY_STORAGE_ROOT,
+	readTextFileWithRetry,
+	sessionFileCandidates,
+	STORAGE_ROOT,
+} from "./storage.ts";
 import type { PersistedState, QueuedTask, SessionMeta, SessionStatus } from "./types.ts";
 import { drainQueue } from "./queue.ts";
 
@@ -40,7 +48,11 @@ export function normalizeMeta(raw: unknown): SessionMeta | null {
 		return null;
 	}
 	const m = raw as Partial<SessionMeta> & { agent?: string };
-	if (typeof m.sessionId !== "string" || !m.sessionId) {
+	// The id names a directory. A state or meta file is read with the same trust as a fresh one after a crash,
+	// so the check that guards a live `session/new` answer has to guard the record on disk too — otherwise the
+	// one file an attacker-adjacent process can plant (`~/.pi/agent/delegate_task/<pi session>/state.json`)
+	// decides where the next read, write and cleanup go.
+	if (typeof m.sessionId !== "string" || !isStorageSafeId(m.sessionId)) {
 		return null;
 	}
 	if (typeof m.prompt !== "string" || !m.prompt) {
@@ -67,6 +79,12 @@ export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): Queu
 	}
 	const t = raw as Partial<QueuedTask>;
 	if (typeof t.prompt !== "string" || !t.prompt) {
+		return null;
+	}
+	// Same rule as a meta record: an id that cannot be a path segment is dropped, not sanitized. A queued task
+	// has no session id yet, but it carries the id of the session it was delegated from, and that one names a
+	// directory too once the transcript wants to say whose child this is.
+	if (t.parentSessionId !== undefined && (typeof t.parentSessionId !== "string" || !isStorageSafeId(t.parentSessionId))) {
 		return null;
 	}
 	const agent = typeof t.agent === "string" && t.agent ? t.agent : LEGACY_AGENT;

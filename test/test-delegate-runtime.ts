@@ -288,3 +288,26 @@ test("shutdown releases every piece of per-session state", () => {
 		restoreHome();
 	}
 });
+
+test("the chunk that crosses the flush threshold is the chunk that must survive", () => {
+	// The buffer used to be tested before it was stored, so the flushing branch wrote what the map still held
+	// and discarded the chunk that tripped the threshold — 2 000 characters apart, mid-sentence, in whichever
+	// stream talked fastest. Nothing downstream could tell: the transcript simply lacked words.
+	const stub = makeStub();
+	const rt = stub.rt;
+	try {
+		const meta = metaFor("s-flush");
+		const file = getEventsLogPath(rt.currentPiSessionId, meta.sessionId);
+		rt.appendStreamChunk(meta, "assistant", "a".repeat(1990));
+		rt.appendStreamChunk(meta, "assistant", "TAIL-OF-SENTENCE");
+		assert.match(fs.readFileSync(file, "utf-8"), /TAIL-OF-SENTENCE/, "the chunk that flushed was dropped");
+		// Flushed text must not be written again by the next flush, or the transcript repeats itself forever.
+		rt.appendStreamChunk(meta, "assistant", "next");
+		rt.flushBuffers(meta);
+		const logged = fs.readFileSync(file, "utf-8");
+		assert.strictEqual(logged.split("a".repeat(1990)).length - 1, 1, "the flushed text is written exactly once");
+		assert.match(logged, /next/);
+	} finally {
+		stub.restoreHome();
+	}
+});

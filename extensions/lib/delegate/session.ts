@@ -13,7 +13,7 @@
 
 import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
-import { getEventsLogPath } from "./storage.ts";
+import { getEventsLogPath, isStorageSafeId } from "./storage.ts";
 import { eventLogPath } from "./persist.ts";
 import { defaultMapUpdate, eventToLogEntries, stopReasonPhrase, normalizeStopReason } from "./events.ts";
 import { detectPullRequest } from "./pr-detect.ts";
@@ -113,30 +113,23 @@ function consume(
 	configOptions: Map<string, string[]>,
 ): void {
 	switch (event.kind) {
-		case "assistant.delta": {
-			// Streamed chunks are accumulated and flushed every ~2KB so `delegate_status` and the
-			// dashboard show real progress rather than nothing until the turn ends.
-			const buf = (rt.assistantBuffers.get(meta.sessionId) ?? "") + event.text;
-			if (buf.length >= 2000) {
-				rt.flushBuffers(meta);
-			} else {
-				rt.assistantBuffers.set(meta.sessionId, buf);
-			}
+		case "assistant.delta":
+			// Streamed chunks accumulate and flush every ~2KB so `delegate_status` and the dashboard show real
+			// progress instead of nothing until the turn ends. The buffer is stored before the threshold is
+			// tested: flushing reads what is in the map, so on the branch that crosses the threshold while the
+			// new text was still only in a local, the chunk that triggered the flush was the one chunk dropped —
+			// every 2KB, in the middle of a sentence, in whichever stream talked fastest.
+			rt.appendStreamChunk(meta, "assistant", event.text);
 			return;
-		}
 		case "assistant.completed":
 			rt.flushBuffers(meta);
 			client.appendAssistantMessage(event.text);
 			return;
 		case "thought.delta": {
-			const buf = (rt.thoughtBuffers.get(meta.sessionId) ?? "") + event.text;
-			if (buf.length >= 2000) {
-				rt.flushBuffers(meta);
-			} else {
-				rt.thoughtBuffers.set(meta.sessionId, buf);
-			}
+			rt.appendStreamChunk(meta, "thought", event.text);
 			return;
 		}
+
 		case "selection.updated": {
 			for (const [id, values] of Object.entries(event.options)) {
 				configOptions.set(id, values);
@@ -415,6 +408,14 @@ async function createSession(client: DelegateTransport, label: string, cwd: stri
 	const sessionId = res?.sessionId;
 	if (typeof sessionId !== "string" || !sessionId) {
 		throw new Error(`${label} answered session/new without a sessionId`);
+	}
+	// The id is the agent's, the directory is ours. It is used to build paths we write to and to name records
+	// that later code deletes, so an id like `../../elsewhere` is not a curiosity — it is the extension
+	// writing outside the tree it owns. Refusing here costs one session; accepting it costs the boundary.
+	if (!isStorageSafeId(sessionId)) {
+		throw new Error(
+			`${label} returned the session id ${JSON.stringify(sessionId)}, which cannot be a storage path segment; refusing to register it`,
+		);
 	}
 	const options: Record<string, string[]> = {};
 	for (const opt of Array.isArray(res?.configOptions) ? res.configOptions : []) {

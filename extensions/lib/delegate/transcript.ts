@@ -72,7 +72,12 @@ function describeEntry(obj: any, speakerLabel: string): string | undefined {
 		case "user_message":
 			return text ? `[user]: ${text}` : undefined;
 		case "tool_call": {
-			const label = obj.data?.title || obj.data?.status;
+			// A tool title is text the agent chose. Collapsing runs of whitespace and control characters keeps
+			// one record on one line, which is the whole contract of this format: a title containing `\n[user]: …`
+			// would otherwise arrive as a line of the transcript that nobody wrote, and the reader has no way to
+			// tell. Quoted like a permission command would be clearer still, but the line format is also the on-disk
+			// format of logs written before this existed, and those still have to read back.
+			const label = oneLine(obj.data?.title || obj.data?.status);
 			return label ? `[tool]: ${label}` : undefined;
 		}
 		case "usage_update":
@@ -198,6 +203,17 @@ export function readFullTranscript(rt: DelegateRuntime, meta: SessionMeta): stri
 			? `${head ? "" : "… earlier transcript trimmed …\n\n"}${body.slice(-FULL_OUTPUT_MAX_CHARS)}`
 			: body)
 	);
+}
+
+/**
+ * Agent-chosen text, flattened to one bounded line. Control characters go as well as newlines: a terminal
+ * interprets those, and a transcript line that carries its own cursor moves is a line that formats itself.
+ */
+function oneLine(value: unknown, max = 300): string {
+	const text = String(value ?? "")
+		.replace(/[\p{C}\s]+/gu, " ")
+		.trim();
+	return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 /** How much of a transcript is read into memory for `full: true` — and how much of it the caller sees. */
