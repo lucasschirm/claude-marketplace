@@ -114,11 +114,16 @@ async function main() {
 	const version = spawnSync(BIN, ["--version"], { encoding: "utf8", timeout: 60_000 });
 	if (version.status !== 0) fail(`the built binary's --version failed: ${version.stderr}`);
 	// The re-exec path the design hinges on: the binary as a hook. A valid payload with no
-	// AGY_ACP_SOCK must come back as the hook's own fail-closed deny, on stdout, exit 0.
+	// AGY_ACP_SOCK must come back as the hook's own fail-closed deny, on stdout, exit 0. The
+	// probe's env is scrubbed of the bridge trio so a build inside a gated agy-acp session
+	// tests the "not set" path, not a live (and mismatched) bridge.
+	const probeEnv = { ...process.env };
+	for (const k of Object.keys(probeEnv)) if (k.startsWith("AGY_ACP_")) delete probeEnv[k];
 	const hookProbe = spawnSync(BIN, ["--bridge-hook"], {
 		input: JSON.stringify({ toolCall: { name: "Bash", args: {} } }),
 		encoding: "utf8",
 		timeout: 60_000,
+		env: probeEnv,
 	});
 	if (hookProbe.status !== 0 || !hookProbe.stdout.includes('"decision":"deny"') || !hookProbe.stdout.includes("AGY_ACP_SOCK is not set"))
 		fail(`the built binary's --bridge-hook failed: exit ${hookProbe.status}, stdout ${hookProbe.stdout}`);

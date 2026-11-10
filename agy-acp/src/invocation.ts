@@ -49,7 +49,9 @@ export function isDirectRun(entryUrl: string | undefined): boolean {
  * invocation string, so under a PATH lookup it is just the bare name, and resolving it against
  * the working directory names a path that does not exist (a hooks.json written for it kills the
  * bridge). `node <binary>` is not a runnable form (the ELF does not parse), so the `node`
- * interpreter in `execPath` is never a misread here.
+ * interpreter in `execPath` is never a misread here. Running the CJS bundle directly
+ * (`node dist/main.cjs`) is likewise unsupported: its re-exec target would be the `node`
+ * interpreter, and `node --bridge-hook` dies fail-closed - a build intermediate, not an entry.
  */
 export function defaultHookInvocation(): HookInvocation {
 	const hookFile = scriptHookFile();
