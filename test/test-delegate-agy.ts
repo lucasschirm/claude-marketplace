@@ -23,6 +23,9 @@ import {
 import { devinLaunchPlan } from "../extensions/lib/delegate/drivers/devin.ts";
 import { resetCommandAvailabilityForTests } from "../extensions/lib/nonblocking.ts";
 import { TESTED_AGY_VERSIONS } from "../agy-acp/src/agy/version.ts";
+import { AGY_EFFORTS } from "../agy-acp/src/agy/models.ts";
+import { AGY_ACP_MODE_IDS } from "../agy-acp/src/permission.ts";
+import { CANONICAL_MODES } from "../extensions/lib/delegate/permissions.ts";
 
 // The matcher patterns live at module scope: biome's useTopLevelRegex rule counts a literal
 // recompiled per call, and every one of these runs inside a test body.
@@ -321,6 +324,39 @@ test("the version this driver assumes is the version agy-acp assumes", () => {
 	// The two trees ship separately, so the number is duplicated — and this is what stops the duplication
 	// from drifting into a version gate that quietly stopped gating.
 	assert.deepStrictEqual(TESTED_AGY_VERSIONS, [AGY_TESTED_VERSION]);
+});
+
+test("the effort levels this driver offers are the adapter's, exactly", () => {
+	// Duplicated because `extensions/` installs without `agy-acp/` beside it, and a copy nobody compares is
+	// a claim: a level the adapter gained would be refused at admission here forever, with no failing test
+	// to say why.
+	assert.deepStrictEqual([...(agyDriver.capabilities().thinkingLevels?.() ?? [])], [...AGY_EFFORTS]);
+});
+
+test("every mode this driver resolves to is a mode agy-acp advertises", async () => {
+	// The alias table's targets are the second half of the same duplication. A mode id the adapter renames
+	// would not fail until `session/set_mode` on a live delegation, which surfaces as a warning on a run
+	// that is already billed.
+	for (const canonical of [...CANONICAL_MODES, "auto", "manual"]) {
+		const r = agyDriver.resolveMode(canonical);
+		if (!r.ok) {
+			// Exactly one refusal is a feature rather than drift, and it is the operator's gate, not the table.
+			assert.strictEqual(canonical, "dangerous", `${canonical} refused: ${r.error}`);
+			assert.match(r.error, AGY_ACP_ALLOW_BYPASS_RE);
+			continue;
+		}
+		assert.ok(
+			AGY_ACP_MODE_IDS.includes(r.modeId),
+			`${canonical} maps to '${r.modeId}', which agy-acp does not advertise (${AGY_ACP_MODE_IDS.join(", ")})`,
+		);
+	}
+	// With the gate open the fourth id is reachable too, so the table is checked against all four.
+	await withEnv({ AGY_ACP_ALLOW_BYPASS: "1" }, () => {
+		const r = agyDriver.resolveMode("dangerous");
+		assert.ok(r.ok && AGY_ACP_MODE_IDS.includes(r.modeId), "bypass must be a real mode id");
+		return Promise.resolve();
+	});
+	assert.ok(AGY_ACP_MODE_IDS.includes(agyDriver.defaultMode()), "the default mode must be a real one");
 });
 
 test("the guarded CLI list covers the CLI and the adapter, and not the host's own CLI", () => {

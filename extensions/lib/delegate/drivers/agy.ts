@@ -31,8 +31,10 @@ import type { AgentDriver, Catalogue, DriverCapabilities, DriverHealth, LaunchPl
 /** The adapter binary. It is a package of its own (`agy-acp/package.json`, `bin: agy-acp`). */
 const ADAPTER = "agy-acp";
 
-/** agy's own `--effort` levels (`agy-acp/src/agy/models.ts: AGY_EFFORTS`). `off` and `minimal` are not
- *  among them, so asking for one is refused at admission rather than costing a spawn and a warning. */
+/** agy's own `--effort` levels (`agy-acp/src/agy/models.ts: AGY_EFFORTS`), mirrored because the trees ship
+ *  separately — and compared with the adapter's table by `test/test-delegate-agy.ts`, so a level agy gained
+ *  is a failing test here rather than a level this driver refuses forever. `off` and `minimal` are not among
+ *  them, so asking for one is refused at admission rather than costing a spawn and a warning. */
 const AGY_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
@@ -44,7 +46,8 @@ const AGY_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
  */
 export const AGY_TESTED_VERSION = "1.4.2";
 
-/** Canonical mode → the mode id `agy-acp` advertises (`config-options.ts: AGY_ACP_MODES`).
+/** Canonical mode → the mode id `agy-acp` advertises (`permission.ts: AGY_ACP_MODE_IDS`, asserted against
+ *  every entry here by `test/test-delegate-agy.ts` — a renamed id would fail `session/set_mode`).
  *
  * `agy` has no agent-judged tier, so `smart` maps to `default` — **stricter** than what was asked, which
  * is the only direction a mapping may go. `agy-acp` answers `current_mode_update` with the mode it is
@@ -69,7 +72,17 @@ const AGY_MODE_ALIASES: Record<string, string> = {
  * workspace are what a delegated coding task was asked to do, so they proceed; shell commands and
  * anything outside the workspace still ask, which is the half of `dangerous` an unattended run actually
  * needs to skip. A caller who wants prompts for every write asks for `ask`; one who has set the operator
- * knob asks for `dangerous`. */
+ * knob asks for `dangerous`.
+ *
+ * The cost of that default, said here rather than found in a profile: `agy-acp` starts every session in
+ * `default`, and the mode is part of what makes its child stale (`config-options.ts: relaunchKey`, pinned
+ * in `agy-acp/test/test-config.ts` as "a mode needs a new child: the flag cannot come off"), so a
+ * delegation that names no mode starts `agy` twice — the eager start, then the respawn that
+ * `session/set_mode accept-edits` obliges on the first prompt, with the flag this time. Behaviour is right
+ * from the first tool call either way, because the bridge enforces the mode and the flag only has to agree.
+ * A mode resolving to `default` (`ask`, `auto`, `smart`) pays one start. Nothing cheaper exists from this
+ * side: the adapter takes `--model` and `--effort` at launch and no mode, so the mode cannot be passed
+ * where it is chosen — closing this costs a flag in `agy-acp`, which is a different sub-issue. */
 export const AGY_DEFAULT_MODE = "accept-edits";
 
 /**

@@ -17,8 +17,8 @@
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.performance/useTopLevelRegex": 566,
-    "biome.performance/noAwaitInLoops": 91,
     "biome.performance/noNamespaceImport": 184,
+    "biome.performance/noAwaitInLoops": 91,
     "biome.style/useBlockStatements": 879,
     "biome.suspicious/noShadow": 72,
     "biome.suspicious/noReturnAssign": 14,
@@ -35,7 +35,7 @@
     "extensions/lib/delegate/compat.ts": 154,
     "extensions/lib/delegate/dashboard.ts": 202,
     "extensions/lib/delegate/diagnostics.ts": 69,
-    "extensions/lib/delegate/drivers/agy.ts": 294,
+    "extensions/lib/delegate/drivers/agy.ts": 307,
     "extensions/lib/delegate/drivers/claude.ts": 280,
     "extensions/lib/delegate/drivers/devin.ts": 195,
     "extensions/lib/delegate/events.ts": 245,
@@ -581,8 +581,15 @@
         "extensions/lib/delegate/drivers/agy.ts: 294 lines > baseline 285 (files may only shrink)",
         "extensions/lib/delegate/runtime.ts: 556 lines > baseline 540 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "review round 2: the default mode's extra start and the mirrored tables are now documented and asserted",
+      "changes": [
+        "extensions/lib/delegate/drivers/agy.ts: 307 lines > baseline 294 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "0ece26e",
+  "generatedFrom": "dd53a99",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

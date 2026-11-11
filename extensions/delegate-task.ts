@@ -1,4 +1,4 @@
-// delegate_task — delegate work to another agent (Devin, Claude) and get told when it finishes.
+// delegate_task — delegate work to another agent (Devin, Claude, Antigravity) and get told when it finishes.
 //
 // This file is the pi surface and nothing else: flags, lifecycle hooks, tools (plus the deprecated
 // `devin_*` aliases), the `/delegate` command, and the bash guard. The engine lives in `lib/delegate/`
