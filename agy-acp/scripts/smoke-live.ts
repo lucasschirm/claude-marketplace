@@ -917,8 +917,8 @@ class SmokeSession {
 			driver.on("exit", onExit);
 		});
 		this.currentTurn = resultPromise;
-		driver.send(text);
 		try {
+			driver.send(text);
 			return await resultPromise;
 		} finally {
 			this.currentTurn = null;
@@ -1335,23 +1335,40 @@ function stabiliseInventory(inv: Inventory): Inventory {
 }
 
 /**
- * The committed files' written form, which is also their biome-stable form (biome inlines an
- * array that fits the 140-column line and expands it when it does not; tab width is one
- * column): tab indent, objects open on their key's line.
+ * The committed files' written form, which is also their biome-stable form. Biome's hard rule
+ * is a line cutoff: a 140-column array line (key prefix included, tab width one column) always
+ * expands, a 139-column one stays inline, and below the cutoff it keeps whichever layout the
+ * author wrote - so a recorded file is biome-stable when every line it inlines is under 140
+ * columns (byte-identity with the previous file is not guaranteed for an array that fits both
+ * ways, and that is fine: `npm run format:check` accepts either).
  */
 function serialiseCommittedForm(value: unknown, indent: number): string {
 	const pad = "\t".repeat(indent);
 	const inner = "\t".repeat(indent + 1);
+	const inner2 = "\t".repeat(indent + 2);
 	if (Array.isArray(value)) {
 		if (value.length === 0) return "[]";
 		const inline = `[${value.map((v) => serialiseCommittedForm(v, indent + 1)).join(", ")}]`;
-		if (pad.length + inline.length <= 140) return inline;
+		// biome's hard cutoff: a 140-column line always expands, a 139-column one stays inline;
+		// below the cutoff biome keeps whichever layout the author wrote, so either is stable
+		if (pad.length + inline.length < 140) return inline;
 		return `[\n${value.map((v) => `${inner}${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}]`;
 	}
 	if (typeof value === "object" && value !== null) {
 		const entries = Object.entries(value as Record<string, unknown>);
 		if (entries.length === 0) return "{}";
-		return `{\n${entries.map(([k, v]) => `${inner}"${k}": ${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}}`;
+		const lines = entries.map(([k, v]) => {
+			const keyPart = `${inner}"${k}": `;
+			// an array value decides inline vs expanded on its own full line (the key counts),
+			// the way biome does; every other value serialises on one line already
+			if (Array.isArray(v) && v.length > 0) {
+				const inline = `[${v.map((x) => serialiseCommittedForm(x, indent + 2)).join(", ")}]`;
+				if (keyPart.length + inline.length < 140) return `${keyPart}${inline}`;
+				return `${keyPart}[\n${v.map((x) => `${inner2}${serialiseCommittedForm(x, indent + 2)}`).join(",\n")}\n${inner}]`;
+			}
+			return `${keyPart}${serialiseCommittedForm(v, indent + 1)}`;
+		});
+		return `{\n${lines.join(",\n")}\n${pad}}`;
 	}
 	return JSON.stringify(value);
 }
@@ -1426,7 +1443,9 @@ function diffPath(a: NormalisedPath | undefined, b: NormalisedPath | undefined, 
 		pushPath(out.added, event, p);
 		return;
 	}
-	if ([...a.types].join(",") !== [...b.types].join(",")) {
+	// the committed set is the previous run's; the type sets are compared sorted, so a
+	// marker-order-only difference is not a type change
+	if ([...a.types].sort().join(",") !== [...b.types].sort().join(",")) {
 		out.typeChanges.push({ event, path: p, committed: [...a.types].sort(), live: [...b.types].sort() });
 	}
 	diffLiterals(a, b, event, p, out);
@@ -1462,7 +1481,11 @@ interface FixtureMeta {
 /** The meta the committed fixtures carry, for one recorded process (paths normalised). */
 function buildMeta(driver: SmokeAgy, sourceRun: string, version: string, privateTmp: string, scratch: string, home: string): FixtureMeta {
 	const info = driver.exitInfo ?? { code: null, signal: null, stderrTail: "" };
-	const timeline = driver.timeline.map((e) => normalize(`${(e.atMs / 1000).toFixed(2)} ${e.text}`, privateTmp, scratch, home));
+	const timeline = driver.timeline.map((e) => {
+		// the committed metas write the args:/cwd: lines bare (no timestamp), the rest timed
+		const timed = e.text.startsWith("args:") || e.text.startsWith("cwd:") ? "" : `${(e.atMs / 1000).toFixed(2)} `;
+		return normalize(`${timed}${e.text}`, privateTmp, scratch, home);
+	});
 	const argsLine = `agy ${driver.argv.length > 0 ? driver.argv.join(" ") : ""}`;
 	return {
 		sourceRun,
@@ -1549,8 +1572,7 @@ function recordFixtures(
 		.map((f) => path.join(FIXTURES_DIR, f))
 		.sort();
 	const after = unionInventories(allFiles);
-	// tab-indented, the committed file's written form
-	// the committed file's written form (tab indent, inline-when-it-fits arrays)
+	// the committed fixtures' written form (tab indent, arrays inline when they fit)
 	fs.writeFileSync(path.join(FIXTURES_DIR, "field-inventory.json"), `${serialiseCommittedForm(after, 0)}\n`);
 	return { diff: diffInventory(committedBefore, after), written };
 }
@@ -1602,11 +1624,12 @@ function runRecordStep(
 	privateTmp: string,
 	scratch: string,
 	home: string,
-): { diff: InventoryDiff; written: string[] } | null {
+): { diff: InventoryDiff; written: string[] } | { refused: true } | null {
 	if (!record) return null;
 	if (!allOk) {
+		// the refusal must be visible in the report too, not just on the console
 		say("\n[--record] refusing to record a failed run: the committed fixtures keep the last green run");
-		return null;
+		return { refused: true };
 	}
 	say("\n[--record] writing the live fixtures into test/fixtures/stream/");
 	const result = recordFixtures(fixtures, version, privateTmp, scratch, home);
@@ -1651,47 +1674,46 @@ interface ArgState {
 function parseCliArgs(argv: string[]): CliArgs {
 	const state: ArgState = { record: false, agyBin: "agy" };
 	for (let i = 0; i < argv.length; i++) {
-		const done = parseOneArg(i, argv, state);
-		if (done !== null) {
-			return { record: state.record, agyBin: state.agyBin, exitCode: done.code, message: done.message };
+		const a = argv[i];
+		if (a === undefined) continue;
+		if (a === "--record") {
+			state.record = true;
+			continue;
 		}
+		if (a === "--help" || a === "-h") {
+			return {
+				record: state.record,
+				agyBin: state.agyBin,
+				exitCode: 0,
+				message:
+					"usage: smoke-live.ts [--record] [--agy <path>]\n\n  --record  also write the live fixtures into agy-acp/test/fixtures/stream/ and update the field inventory",
+			};
+		}
+		if (a === "--agy") {
+			// consume the path token too, or it would be re-parsed as its own argument
+			i += 1;
+			const next = argv[i];
+			if (next === undefined) {
+				return { record: state.record, agyBin: state.agyBin, exitCode: 2, message: "--agy needs a path" };
+			}
+			state.agyBin = next;
+			continue;
+		}
+		if (a.startsWith("--agy=")) {
+			state.agyBin = a.slice("--agy=".length);
+			continue;
+		}
+		return { record: state.record, agyBin: state.agyBin, exitCode: 2, message: `unknown argument: ${a}` };
 	}
 	return { record: state.record, agyBin: state.agyBin, exitCode: null, message: "" };
-}
-
-function parseOneArg(i: number, argv: string[], state: ArgState): { code: number; message: string } | null {
-	const a = argv[i];
-	if (a === undefined) return null;
-	if (a === "--record") {
-		state.record = true;
-		return null;
-	}
-	if (a === "--help" || a === "-h") {
-		return {
-			code: 0,
-			message:
-				"usage: smoke-live.ts [--record] [--agy <path>]\n\n  --record  also write the live fixtures into agy-acp/test/fixtures/stream/ and update the field inventory",
-		};
-	}
-	if (a === "--agy") {
-		const next = argv[i + 1];
-		if (next === undefined) return { code: 2, message: "--agy needs a path" };
-		state.agyBin = next;
-		return null;
-	}
-	if (a.startsWith("--agy=")) {
-		state.agyBin = a.slice("--agy=".length);
-		return null;
-	}
-	return { code: 2, message: `unknown argument: ${a}` };
 }
 
 /**
  * A scenario body's session must be disposed even when the body throws: the child is a real
  * `agy` (launched with --dangerously-skip-permissions), and a live child's stdio keeps the
  * event loop alive, so an undisposed session would wedge the run after the FAIL is printed.
- * Idempotent (the gate's dispose is flag-guarded, the driver's memoised), so the bodies' own
- * dispose calls stay.
+ * Idempotent (the gate's dispose is flag-guarded, the driver's memoised), so a thrown body
+ * still disposes exactly once.
  */
 function withDispose<T>(session: SmokeSession, fn: () => Promise<T>): Promise<T> {
 	return (async () => {
@@ -1709,7 +1731,6 @@ function withDispose<T>(session: SmokeSession, fn: () => Promise<T>): Promise<T>
 
 interface Preflight {
 	status: Awaited<ReturnType<typeof checkAgyVersion>>;
-	modelNote: string;
 }
 
 /**
@@ -1726,7 +1747,7 @@ async function preflight(agyBin: string): Promise<Preflight | string> {
 		if (!models.some((m) => m.modelId === MODEL)) {
 			return `refusing before any turn: agy models has no ${MODEL}`;
 		}
-		return { status, modelNote: "" };
+		return { status };
 	} catch (err) {
 		return `refusing before any turn: agy models failed: ${(err as Error).message}`;
 	}
@@ -1740,6 +1761,10 @@ function allocateReportDir(date: string): string {
 	}
 	return reportDir;
 }
+
+// The run's temp roots, tracked so a fatal throw anywhere after their creation can remove
+// them: a half-run that leaves a tree in /tmp is exactly the noise the run exists to avoid.
+const tempRoots: string[] = [];
 
 async function main(): Promise<number> {
 	const startedAt = Date.now();
@@ -1766,6 +1791,7 @@ async function main(): Promise<number> {
 	delete process.env.XDG_RUNTIME_DIR;
 	const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-smoke-work-"));
 	await fs.promises.chmod(scratch, 0o700);
+	tempRoots.push(privateTmp, scratch);
 	const home = os.homedir();
 
 	// Preflight, before any model turn (see above): the version warning is not a refusal. The
@@ -1784,7 +1810,7 @@ async function main(): Promise<number> {
 		await fs.promises.rm(scratch, { recursive: true, force: true });
 		return 2;
 	}
-	const { status: versionStatus, modelNote } = pre;
+	const { status: versionStatus } = pre;
 
 	const recorder = installRecorderHook(scratch);
 	const budget = new TurnBudget();
@@ -2052,6 +2078,10 @@ async function main(): Promise<number> {
 	});
 
 	// 7: cancel sleep - the production cancel ladder, the tool command must die with the group.
+	// Scope note: the post-run /proc scan only sees processes whose cwd is under the run's roots;
+	// on agy 1.5.5 the tool command runs in agy's own project dir, outside the scan, so the
+	// guarantee there is the ladder's process-group sweep (kill -SIGINT/-SIGTERM/-KILL), which
+	// the "no leftover" check corroborates for the processes the scan can see.
 	await runScenario("cancel-sleep", async () => {
 		const session = new SmokeSession({
 			name: "cs",
@@ -2294,14 +2324,13 @@ async function main(): Promise<number> {
 	fs.writeFileSync(path.join(reportDir, "field-inventory.live.json"), `${JSON.stringify(liveInventory, null, "    ")}\n`);
 	fs.writeFileSync(path.join(reportDir, "field-inventory.diff.json"), `${JSON.stringify(inventoryDiff, null, "    ")}\n`);
 
-	let recordResult: { diff: InventoryDiff; written: string[] } | null = null;
+	let recordResult: { diff: InventoryDiff; written: string[] } | { refused: true } | null = null;
 	recordResult = runRecordStep(record, allOk, recordedFixtures, versionStatus.version, privateTmp, scratch, home);
 
 	writeReport({
 		reportDir,
 		version: versionStatus.version,
 		versionWarning: versionStatus.warning,
-		modelListNote: modelNote,
 		scenarios,
 		postChecks,
 		budget,
@@ -2311,7 +2340,8 @@ async function main(): Promise<number> {
 		hookPayloadCount: hookPayloads.length,
 	});
 
-	// cleanup of the run's own roots (the fixtures and the report are already written)
+	// cleanup of the run's own roots (the fixtures and the report are already written); the
+	// fatal handler removes them again if any throw landed before this point (see tempRoots)
 	await fs.promises.rm(privateTmp, { recursive: true, force: true });
 	await fs.promises.rm(scratch, { recursive: true, force: true });
 
@@ -2325,13 +2355,12 @@ interface ReportData {
 	reportDir: string;
 	version: string;
 	versionWarning: string | null;
-	modelListNote: string;
 	scenarios: ScenarioResult[];
 	postChecks: Check[];
 	budget: TurnBudget;
 	startedAt: number;
 	inventoryDiff: InventoryDiff;
-	recordResult: { diff: InventoryDiff; written: string[] } | null;
+	recordResult: { diff: InventoryDiff; written: string[] } | { refused: true } | null;
 	hookPayloadCount: number;
 }
 
@@ -2343,9 +2372,6 @@ function writeReport(data: ReportData): void {
 	lines.push(`- agy: ${data.version} (tested: ${TESTED_AGY_VERSIONS.join(", ")})`);
 	if (data.versionWarning) {
 		lines.push(`- version warning: ${data.versionWarning}`);
-	}
-	if (data.modelListNote !== "") {
-		lines.push(`- model list: ${data.modelListNote}`);
 	}
 	lines.push(`- model: ${MODEL}`);
 	lines.push(`- model turns: ${data.budget.used} / ${TURNS_MAX}`);
@@ -2391,14 +2417,18 @@ function writeReport(data: ReportData): void {
 	for (const t of data.inventoryDiff.literalAdded.slice(0, 40)) {
 		lines.push(`- literal added: ${t.event}.${t.path}: "${t.value}"`);
 	}
-	if (data.recordResult !== null) {
+	if (data.recordResult !== null && data.recordResult !== undefined) {
 		lines.push("");
 		lines.push(`## --record`);
 		lines.push("");
-		lines.push(`- written: ${data.recordResult.written.join(", ") || "(nothing mapped)"}`);
-		lines.push(
-			`- recomputed inventory vs previous: added ${Object.values(data.recordResult.diff.added).flat().length}, removed ${Object.values(data.recordResult.diff.removed).flat().length}`,
-		);
+		if ("refused" in data.recordResult) {
+			lines.push("- REFUSED: the run failed, so the committed fixtures keep the last green run");
+		} else {
+			lines.push(`- written: ${data.recordResult.written.join(", ") || "(nothing mapped)"}`);
+			lines.push(
+				`- recomputed inventory vs previous: added ${Object.values(data.recordResult.diff.added).flat().length}, removed ${Object.values(data.recordResult.diff.removed).flat().length}`,
+			);
+		}
 	}
 	lines.push("");
 	lines.push(`## Artifacts`);
@@ -2439,5 +2469,12 @@ main()
 	})
 	.catch((err: Error) => {
 		say(`fatal: ${err.stack ?? err.message}`);
+		for (const r of tempRoots) {
+			try {
+				fs.rmSync(r, { recursive: true, force: true });
+			} catch {
+				// best effort; the fatal line above is what matters
+			}
+		}
 		process.exitCode = 1;
 	});
