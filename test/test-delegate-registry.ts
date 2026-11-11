@@ -136,7 +136,7 @@ test("/delegate agents reports where each driver's limits are enforced", () => {
 test("only a driver that opts in blocks its own CLI, and a driver may guard an adapter too", () => {
 	// `claude` is absent on purpose (it is the operator's own CLI); `agy` guards the adapter as well, because
 	// `agy-acp` starts the same work behind a name a guard watching `agy` would never match.
-	assert.deepEqual(guardedClis(), ["devin", "agy", "agy-acp"]);
+	assert.deepEqual(guardedClis(), ["devin", "agy-acp", "agy"]);
 });
 
 test("a driver without an in-band selection channel is not an error", () => {

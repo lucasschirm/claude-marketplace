@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { admit, agentDescription, describeAgents, findAgent, guardedClis, modelDescription } from "../extensions/lib/delegate/registry.ts";
+import { driverCli } from "../extensions/lib/delegate/process.ts";
 import {
 	AGY_DEFAULT_MODE,
 	AGY_TESTED_VERSION,
@@ -26,7 +27,7 @@ import { TESTED_AGY_VERSIONS } from "../agy-acp/src/agy/version.ts";
 // The matcher patterns live at module scope: biome's useTopLevelRegex rule counts a literal
 // recompiled per call, and every one of these runs inside a test body.
 const NO_RESUME_RE = /no-resume/;
-const BLOCKS_AGY_AGY_ACP_CLI_RE = /blocks-agy\+agy-acp-cli/;
+const BLOCKS_ACP_AGY_CLI_RE = /blocks-agy-acp\+agy-cli/;
 const AGY_ACP_ALLOW_BYPASS_RE = /AGY_ACP_ALLOW_BYPASS/;
 const ACCEPT_EDITS_RE = /accept-edits/;
 const AGY_ACP_RE = /agy-acp/;
@@ -97,7 +98,16 @@ test("agy is a registered agent, and the tool text says so", () => {
 	assert.ok(line, `/delegate agents lists it: ${describeAgents().join(" | ")}`);
 	// The capability line is what a human reads before choosing, so the two limits that matter most are here.
 	assert.match(line, NO_RESUME_RE);
-	assert.match(line, BLOCKS_AGY_AGY_ACP_CLI_RE);
+	assert.match(line, BLOCKS_ACP_AGY_CLI_RE);
+});
+
+test("`auto` is a mode the tool advertises, so agy answers it instead of refusing it", () => {
+	// Devin and Claude both accept `auto`; a driver that does not know it makes one agent reject a mode
+	// string the tool description offers. agy has no agent-judged tier, so it lands on `default` — the
+	// stricter direction, which is the only one a mode mapping may go.
+	assert.strictEqual(ok(admit({ agent: "agy", prompt: "x", mode: "auto" })).selection.mode, "auto");
+	assert.deepStrictEqual(agyDriver.resolveMode("auto"), { ok: true, modeId: "default" });
+	assert.deepStrictEqual(agyDriver.resolveMode("smart"), { ok: true, modeId: "default" });
 });
 
 test("the default mode is the one agy always offers, not the tool's historical one", () => {
@@ -319,6 +329,19 @@ test("the guarded CLI list covers the CLI and the adapter, and not the host's ow
 	assert.ok(guarded.includes("agy-acp"), "nor the adapter that would run it");
 	assert.ok(guarded.includes("devin"));
 	assert.ok(!guarded.includes("claude"), "claude is the operator's CLI, and pi may be driving it");
+});
+
+test("the pid-recycle guard is given the binary the spawned process actually is", () => {
+	// The same `cli` field feeds two guards, and they want different names: the bash guard wants every name
+	// the work answers to (`agy` + `agy-acp`), while the pid guard substring-matches `/proc/<pid>/cmdline`
+	// before killing a pid recorded some time ago, and wants the one the process *is*. `agy` there is three
+	// characters wide — this workspace's own path contains it three times, so a recycled pid running
+	// anything under it would have been SIGKILLed as an `agy` process.
+	assert.strictEqual(driverCli("agy"), "agy-acp");
+	assert.deepStrictEqual(
+		guardedClis().filter((c) => c.startsWith("agy")),
+		["agy-acp", "agy"],
+	);
 });
 
 test("the capability claims that a wire feature would have to earn", () => {

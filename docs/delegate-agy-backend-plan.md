@@ -62,12 +62,12 @@ no old name can reach the new agent. This is the "decide and document which" the
 | selection channel | launch flags, **no** `applySelection` | Both channels end in the same argv (the child is spawned lazily at the first prompt), but the flag route refuses a bad id before any turn runs, while `session/set_config_option` answers `-32602` after the session exists. A refusal that costs nothing beats a warning that costs a session. |
 | models | `values: []`, `onUnknown: "warn"`, `default: "default"` | The list is `agy models`, which is account-specific and needs credentials. `agy-acp` publishes it per session and refuses an id agy does not know, listing the ones it does; hardcoding a catalogue here would be a lie about someone else's install (the Claude driver's reasoning, and stronger here because we own the server). |
 | thinking | `true`, levels `low, medium, high, xhigh, max` | `agy --help`'s `--effort`. `off`/`minimal` are refused at admission rather than costing a spawn. |
-| modes | `dangerous→bypass`, `smart→default`, `accept-edits→accept-edits`, `plan→plan`, `ask→default`, `manual→default`; default mode **`accept-edits`** | The four modes `agy-acp` advertises. `bypass` is operator-gated (`AGY_ACP_ALLOW_BYPASS=1`): the driver reads that knob and **refuses** `dangerous` when it is off, naming the knob — the rule the Claude driver applies to `bypassPermissions` under root. The driver never sets the knob itself: an unattended delegate must not shop its way out of every prompt, and `agy-acp`'s own comment says that gate is the operator's, not a client's. Because the tool's historical default is therefore usually refused, this driver's default is `accept-edits`: a delegated run edits its own workspace and asks before running commands. `smart` maps to `default` because agy has no agent-judged tier — the mapping is **stricter** than asked, and `session/set_mode` answers `current_mode_update`, so the session record carries the wire mode it is really in. The default is advertised in `/delegate agents`, which now prints each driver's own, and in `delegate_task`'s parameter text. |
+| modes | `dangerous→bypass`, `auto→default`, `smart→default`, `accept-edits→accept-edits`, `plan→plan`, `ask→default`, `manual→default`; default mode **`accept-edits`** | The four modes `agy-acp` advertises. `bypass` is operator-gated (`AGY_ACP_ALLOW_BYPASS=1`): the driver reads that knob and **refuses** `dangerous` when it is off, naming the knob — the rule the Claude driver applies to `bypassPermissions` under root. The driver never sets the knob itself: an unattended delegate must not shop its way out of every prompt, and `agy-acp`'s own comment says that gate is the operator's, not a client's. Because the tool's historical default is therefore usually refused, this driver's default is `accept-edits`: a delegated run edits its own workspace and asks before running commands. `smart` — with it `auto`, the alias the tool advertises and the other two drivers accept, which this driver refused until round 1 of its review — map to `default` because agy has no agent-judged tier; the mapping is **stricter** than asked, and `session/set_mode` answers `current_mode_update`, so the session record carries the wire mode it is really in. The default is advertised in `/delegate agents`, which now prints each driver's own, and in `delegate_task`'s parameter text. |
 | permissions | exact ids only: `allow→allow_once`, `allow_session→allow_always`, `reject→reject_once` | `agy-acp` offers exactly those three (`PERMISSION_OPTION_IDS`), and its `allow_always` is an **in-memory, per-session** grant keyed by tool + full command or resolved path — never written to disk, never project-wide. That is what `allow_session` promises, so unlike Claude there is nothing to degrade. Any other id, and any unknown id, answers `cancelled` (= deny). |
 | `mapUpdate` | default table + heartbeat | `agy-acp` is spec-conformant on chunks, tool calls, usage and mode; the one update the default table would drop is its `heartbeat`. |
 | resume | **false** | The engine's reattach is "spawn, then prompt the recorded id", and `agy-acp`'s registry refuses an id it did not create in this process. `session/resume` (#56) is the way in and lives on `dev`; until a driver loader exists, `delegate_message` on a dead `agy` session refuses with `delegate_restart`, which is honest. `capabilities.resume` stays false rather than promising a continuation nothing restores. |
 | `backfill` | absent | `agy-acp` keeps its own store, but reading another program's private on-disk format during recovery is the one thing the epic's security rules refuse. Recovery reports `interrupted` instead of guessing. |
-| bash guard | `blocksOwnCli: true`, `cli: "agy"`, `extraClis: ["agy-acp"]`, read-only verbs per binary | `agy` is the CLI an agent would use to do the work outside the queue; `agy-acp` is the server that would run it there. `--help`/`--version` and the listings stay allowed (see §7). |
+| bash guard | `blocksOwnCli: true`, `cli: "agy-acp"` (the spawned process), `extraClis: ["agy"]`, read-only verbs per binary | Two guards read `cli` and want different names: the pid-recycle guard substring-matches `/proc/<pid>/cmdline` before killing a pid recorded a while ago, so `cli` is what the process *is* (`agy` is three letters a recycled pid's path can contain — this workspace's own directory does, three times), while the bash guard wants every name the work answers to, so the CLI goes in `extraClis` and both are blocked. `--help`/`--version` and the listings stay allowed (see §7). |
 | preflight | `agy-acp` on `PATH`, then `agy --version` against the tested version | Cached 60 s like Claude's auth probe. The messages name the two distinct causes: the adapter missing ("install it, or point the driver at it"), and agy missing, unreporting or untested (naming the tested version and `AGY_ACP_COMMAND`). No `agy auth status` probe: `agy-acp`'s `session/new` refuses unsigned-in work with a message the turn itself reports, and a second probe of the same account would be a second thing to keep honest. |
 | `env` | `{}` — the driver sets nothing | `agy-acp`'s knobs (`AGY_ACP_MODEL`, `AGY_ACP_EFFORT`, `AGY_ACP_ALLOW_BYPASS`, `AGY_ACP_HEARTBEAT_MS`, `AGY_ACP_LOG`) are operator-level, which is why they are env; a delegate that set them would reconfigure someone's adapter per request. The one deliberate exception is reading `AGY_ACP_ALLOW_BYPASS`, because admission has to be honest about a mode the adapter withholds. |
 
@@ -111,6 +111,9 @@ the cheap version of the rule and it got both directions wrong. `READ_ONLY_VERBS
 table and `isReadOnlyInvocation(binary, args)` asks about the binary it matched. `agy-acp` deliberately
 has no verbs: `--help`/`--version` are allowed by the base set, and everything else about it starts a server.
 
+**`--flag=value` is the same flag.** The work-flag test matched whole tokens, so `agy --help -p x` was
+blocked and `agy --help -p=x` was allowed — one command decided by a character. Both shapes are pinned.
+
 **The headless work flags were missing.** `WORK_FLAGS` had `--print` and `--resume` but not `-p`, `-c`,
 `-r`, `--conversation`, `--input-format`, `--output-format`, `--dangerously-skip-permissions` or a bare
 `--` (agy's end-of-options) — which is the whole shape of running a CLI unattended. `agy --help -p "..."`
@@ -142,9 +145,17 @@ The tested version is declared in the driver and a test asserts it equals `agy-a
 pendingPermissions,turnMs,seq}` while a turn runs, because agy goes silent when its hook blocks. Every
 frame already refreshes `meta.lastMessageTime`, so a beat keeps the stall clock quiet; what was missing
 is that the beat is *named*: `defaultMapUpdate` maps it to a canonical `liveness` event, which writes
-no transcript line (a beat every 15 s over a long turn is not history), and the stall verdict becomes a
-function — `isStalledNow({status, pendingPermissions, lastActivityMs, stallMs})` — so "waiting on a
-permission answer is not a stall" is a tested assertion instead of a comment inside a `setInterval`.
+no transcript line (a beat every 15 s over a long turn is not history), and the stall verdict becomes a function — `isStalledNow({status, pendingPermissions, lastActivityMs,
+stallMs})` — which `DelegateRuntime.stallTick`, the body of the watchdog timer, asks instead of
+re-implementing. Round 1 of the review caught the first version of this: the function existed, the timer
+kept its own copy of the clauses, and the tests certified the copy. One verdict now has one caller, so
+"waiting on a permission answer is not a stall" is an assertion about the code that ships.
+
+The beat's payload (`state`, `pendingPermissions`, `turnMs`, `seq`) travels on the event and is not read by
+the engine, stated rather than implied: the engine's own outstanding-ask count is the authority on whether a
+session is waiting, and putting the agent's number in charge of the watchdog that judges the agent would be
+backwards. What the beat is for is that an adapter which is silent by design still produces frames — and any
+frame is activity.
 
 ## 10. Acceptance mapping
 

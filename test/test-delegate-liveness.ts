@@ -62,6 +62,9 @@ test("an unknown update kind still says which kind it was", () => {
 
 // --- the verdict ---
 
+// Matcher patterns at module scope (biome's useTopLevelRegex counts a literal recompiled per call).
+const APPEARS_STALLED_RE = /appears stalled/;
+
 const HOUR = 60 * 60_000;
 const STALL = 10 * 60_000;
 
@@ -126,4 +129,65 @@ test("a stalled session that starts beating again is running again", () => {
 	assert.ok(stub.rt.stallTimers.has("s1"), "the watchdog restarted with it");
 	stub.rt.stopStallWatchdog("s1");
 	stub.restoreHome();
+});
+
+// --- the verdict as the shipped watchdog computes it ---
+//
+// `stallTick` is the body of the timer `startStallWatchdog` installs, and it asks `isStalledNow` rather
+// than deciding inline. These tests are the reason that wiring matters: the acceptance criterion is about
+// the timer that runs in a user's session, and a copy of its clauses in a helper would certify only the copy.
+
+/** A pending ask in the shape the runtime holds, with a timer nobody waits on. */
+function pendingAsk(): never {
+	const request = { requestId: 1, command: "rm -rf build", options: [], requestedAt: 0, timer: setTimeout(() => {}, 60_000) };
+	request.timer.unref();
+	return request as never;
+}
+
+test("the watchdog does not report a session waiting on a permission answer as stalled", () => {
+	const { rt, sent, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("ag-tick-ask", { status: "running", startedAt: 0, lastMessageTime: Date.now() - HOUR });
+		rt.pendingPermissions.set("ag-tick-ask", [pendingAsk()]);
+		assert.strictEqual(rt.stallTick(meta, STALL), false, "blocked is not broken");
+		assert.strictEqual(meta.status, "running");
+		assert.deepStrictEqual(sent, [], "and nobody is told about a session that is behaving");
+
+		// The same silence with nothing outstanding is the case the watchdog exists for.
+		rt.pendingPermissions.delete("ag-tick-ask");
+		assert.strictEqual(rt.stallTick(meta, STALL), true);
+		assert.strictEqual(meta.status, "stalled");
+		assert.match(sent.join("\n"), APPEARS_STALLED_RE, "a human is told, once");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a beat that arrives keeps the shipped watchdog quiet, and a gap longer than the limit does not", () => {
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("ag-tick-beat", { status: "running", startedAt: 0, lastMessageTime: Date.now() - STALL - 1000 });
+		assert.strictEqual(rt.stallTick(meta, STALL), true);
+		// Activity resumed: status back to running, clock reset — which is what `attach` does on any frame,
+		// including a heartbeat.
+		meta.status = "running";
+		meta.lastMessageTime = Date.now();
+		assert.strictEqual(rt.stallTick(meta, STALL), false);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a tick on a session that stopped running disarms its own timer", () => {
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("ag-tick-disarm", { status: "running", lastMessageTime: Date.now() });
+		rt.startStallWatchdog(meta);
+		assert.ok(rt.stallTimers.has("ag-tick-disarm"), "the watchdog is armed while the turn runs");
+		meta.status = "idle";
+		assert.strictEqual(rt.stallTick(meta, STALL), false);
+		assert.ok(!rt.stallTimers.has("ag-tick-disarm"), "and a turn that ended takes its timer with it");
+	} finally {
+		restoreHome();
+	}
 });

@@ -19,6 +19,7 @@ import { logError as fileLogError, logWarn as fileLogWarn } from "../extension-l
 import { commandExists, createTaskScope, WriteQueue } from "../nonblocking.ts";
 import { findAgent } from "./registry.ts";
 import { driverCli, isPidAlive, killProcessGroup } from "./process.ts";
+import { isStalledNow } from "./liveness.ts";
 import { AgentSlots } from "./slots.ts";
 import { appendEvent, persistMeta, persistState as persistStateFile } from "./persist.ts";
 import type { AgentDriver, DriverHealth, LaunchPlan, QueuedTask, SessionMeta } from "./types.ts";
@@ -336,27 +337,42 @@ export class DelegateRuntime {
 	startStallWatchdog(meta: SessionMeta): void {
 		this.clearStallTimer(meta.sessionId);
 		const stallMs = this.getStallTimeoutMs();
-		const timer = setInterval(() => {
-			if (meta.status !== "running") {
-				this.clearStallTimer(meta.sessionId);
-				return;
-			}
-			// Waiting on the agent, not stalled: the permission timeout settles it.
-			if (this.pendingPermissions.get(meta.sessionId)?.length) {
-				return;
-			}
-			const last = meta.lastMessageTime || meta.startedAt || 0;
-			if (Date.now() - last > stallMs) {
-				meta.status = "stalled";
-				this.persistSessionMeta(meta, true);
-				this.updateStatusUI();
-				this.sendAgentMessage(
-					`The session ${meta.sessionId} appears stalled (no ACP activity for ${Math.round(stallMs / 60000)} minutes). Verify with "delegate_status"; if it is stuck, use "delegate_cancel" then "delegate_restart" to recover.`,
-				);
-			}
-		}, 60000);
+		const timer = setInterval(() => this.stallTick(meta, stallMs), 60000);
 		timer.unref();
 		this.stallTimers.set(meta.sessionId, timer);
+	}
+
+	/**
+	 * One pass of the watchdog — the body of the timer above, and the only place the verdict is computed.
+	 *
+	 * The clauses belong to `isStalledNow` (`liveness.ts`) and the timer calls through here so that the
+	 * acceptance rule ("a session waiting on a permission answer is not stalled") is asserted against the
+	 * code that ships rather than against a copy of its clauses. Returns whether this pass marked the
+	 * session stalled, so a test asserts the transition instead of sleeping through one.
+	 */
+	stallTick(meta: SessionMeta, stallMs = this.getStallTimeoutMs()): boolean {
+		if (meta.status !== "running") {
+			// Idle, finished, already stalled: nothing to age out, and the timer has no further work.
+			this.clearStallTimer(meta.sessionId);
+			return false;
+		}
+		if (
+			!isStalledNow({
+				status: meta.status,
+				pendingPermissions: this.pendingPermissions.get(meta.sessionId)?.length ?? 0,
+				lastActivityMs: meta.lastMessageTime || meta.startedAt || 0,
+				stallMs,
+			})
+		) {
+			return false;
+		}
+		meta.status = "stalled";
+		this.persistSessionMeta(meta, true);
+		this.updateStatusUI();
+		this.sendAgentMessage(
+			`The session ${meta.sessionId} appears stalled (no ACP activity for ${Math.round(stallMs / 60000)} minutes). Verify with "delegate_status"; if it is stuck, use "delegate_cancel" then "delegate_restart" to recover.`,
+		);
+		return true;
 	}
 
 	// ---------------------------------------------------------------- pending permissions

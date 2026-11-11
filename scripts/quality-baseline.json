@@ -31,11 +31,11 @@
     "extensions/compaction-fail-recovery.ts": 734,
     "extensions/delegate-task.ts": 299,
     "extensions/lib/ci-verdict.ts": 142,
-    "extensions/lib/delegate/bash-guard.ts": 355,
+    "extensions/lib/delegate/bash-guard.ts": 366,
     "extensions/lib/delegate/compat.ts": 154,
     "extensions/lib/delegate/dashboard.ts": 202,
     "extensions/lib/delegate/diagnostics.ts": 69,
-    "extensions/lib/delegate/drivers/agy.ts": 285,
+    "extensions/lib/delegate/drivers/agy.ts": 294,
     "extensions/lib/delegate/drivers/claude.ts": 280,
     "extensions/lib/delegate/drivers/devin.ts": 195,
     "extensions/lib/delegate/events.ts": 245,
@@ -48,7 +48,7 @@
     "extensions/lib/delegate/queue.ts": 453,
     "extensions/lib/delegate/recovery.ts": 318,
     "extensions/lib/delegate/registry.ts": 238,
-    "extensions/lib/delegate/runtime.ts": 540,
+    "extensions/lib/delegate/runtime.ts": 556,
     "extensions/lib/delegate/session.ts": 522,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 122,
@@ -572,8 +572,17 @@
       "changes": [
         "extensions/lib/delegate/transcript.ts: 230 lines > baseline 226 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "review round 1: watchdog calls the stall verdict, --flag=value work flags, precise pid-guard cli",
+      "changes": [
+        "extensions/lib/delegate/bash-guard.ts: 366 lines > baseline 355 (files may only shrink)",
+        "extensions/lib/delegate/drivers/agy.ts: 294 lines > baseline 285 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 556 lines > baseline 540 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "95300b0",
+  "generatedFrom": "0ece26e",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

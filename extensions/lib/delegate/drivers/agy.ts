@@ -51,6 +51,10 @@ export const AGY_TESTED_VERSION = "1.4.2";
  * really in, so the session record never claims a mode the bridge is not enforcing. */
 const AGY_MODE_ALIASES: Record<string, string> = {
 	dangerous: "bypass",
+	// `auto` is the alias the other two drivers accept for their agent-judged tier, and agy has no such
+	// tier — so it lands on `default`, the same **stricter** direction as `smart` above. Refusing it would
+	// make one agent reject a mode string the tool advertises and the others honour.
+	auto: "default",
 	smart: "default",
 	"accept-edits": "accept-edits",
 	plan: "plan",
@@ -228,8 +232,13 @@ export const agyDriver: AgentDriver = {
 			// run it outside the queue behind a different name. `--help`, `--version` and `models` stay
 			// allowed — see bash-guard.ts, and note that `agy` is not the host's own CLI the way `claude` is.
 			blocksOwnCli: true,
-			cli: "agy",
-			extraClis: [ADAPTER],
+			// Two guards read this field and want different names. The pid-recycle guard substring-matches
+			// `/proc/<pid>/cmdline` before killing a pid recorded a while ago, so `cli` is what the process
+			// *is* (`agy-acp`): `agy` is three letters a recycled pid's path can contain — this workspace's
+			// own directory does, three times. The bash guard wants every name the work answers to, so the
+			// CLI an agent would reach for goes in `extraClis`, and both are blocked.
+			cli: ADAPTER,
+			extraClis: ["agy"],
 		};
 	},
 

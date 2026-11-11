@@ -43,10 +43,21 @@ const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
 // stream formats runs a whole session to completion, and `--conversation` continues one, neither of
 // which a queue entry, a slot or a status line will ever mention.
 const WORK_FLAGS = new Set(
-	"-p -p= --print --prompt-file -c --continue -r --resume --conversation --input-format --output-format --add-dir --dangerously-skip-permissions --".split(
+	"-p --print --prompt-file -c --continue -r --resume --conversation --input-format --output-format --add-dir --dangerously-skip-permissions --".split(
 		" ",
 	),
 );
+
+/** A work flag in either shape a shell accepts. Matching only the bare token let `agy --help -p=x` through
+ *  while `agy --help -p x` was blocked: one invocation, decided by a character, which is not a distinction
+ *  a guard gets to make. */
+function isWorkFlag(arg: string): boolean {
+	if (WORK_FLAGS.has(arg)) {
+		return true;
+	}
+	const eq = arg.indexOf("=");
+	return eq > 0 && arg.startsWith("-") && WORK_FLAGS.has(arg.slice(0, eq));
+}
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const REDIRECT_WORD = /^(?:\d*|&)(?:>>?|<<<?|<|>&|<&|>\|)/;
 const REDIRECT_ONLY = /^(?:\d*|&)(?:>>?|<<<?|<|>&|<&|>\|)$/;
@@ -247,7 +258,7 @@ export function readOnlyVerbsFor(binary: string): readonly (readonly string[])[]
  */
 function isReadOnlyInvocation(binary: string, args: string[]): boolean {
 	if (args.some((a) => HELP_FLAGS.has(a))) {
-		return !args.some((a) => WORK_FLAGS.has(a));
+		return !args.some(isWorkFlag);
 	}
 	const onlyFlags = (rest: string[]) => rest.every((a) => a.startsWith("-"));
 	return readOnlyVerbsFor(binary).some(

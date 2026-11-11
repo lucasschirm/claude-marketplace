@@ -7,7 +7,7 @@ import { guardedClis } from "../extensions/lib/delegate/registry.ts";
 // The guard takes the names to watch from the driver registry, so the test names them too. A test that
 // hardcoded the list would pass when a driver flipped the capability off — which is why the last test in
 // this file asserts the two lists agree instead of trusting this one.
-const GUARDED = ["devin", "agy", "agy-acp"];
+const GUARDED = ["devin", "agy-acp", "agy"];
 
 const blocked = [
 	"devin",
@@ -80,6 +80,8 @@ const blocked = [
 	// A help flag does not launder an invocation of the CLI that would otherwise start work.
 	"agy --version --conversation 01abc",
 	"agy --help -p x",
+	// The `--flag=value` shape is the same invocation: a guard that matched only bare
+
 	// The listing verbs belong to one binary each: `devin models` is a usage error, not a listing.
 	"devin models",
 	"agy models delete",
@@ -173,7 +175,7 @@ test("the guarded list is the registry's, and Claude is deliberately not on it",
 	// `claude` is the operator's own CLI: blocking it would break the host to protect a queue
 	// (see the note in drivers/devin.ts). If this assertion starts failing, that decision was changed
 	// and the note has to change with it.
-	assert.deepEqual(guardedClis(), ["devin", "agy", "agy-acp"]);
+	assert.deepEqual(guardedClis(), ["devin", "agy-acp", "agy"]);
 	assert.strictEqual(findBlockedCliCommand("claude -p 'fix it'", guardedClis()), undefined);
 	// A second agent's CLI is guarded when its driver says so, by name and not by assumption.
 	assert.ok(findBlockedCliCommand("otheragent -p x", ["otheragent"]));
