@@ -187,6 +187,22 @@ export function defaultMapUpdate(frame: AcpUpdateFrame): DelegateEvent[] {
 		}
 		case "available_commands_update":
 			return [{ kind: "ignored", reason: "available_commands_update" }];
+		case "heartbeat": {
+			// An adapter's beat (`agy-acp`, see drivers/agy.ts): the payload is `_meta.heartbeat`, and the
+			// distinction it carries is the one a watchdog acts on — waiting on a human is not a stall. It is
+			// mapped rather than ignored so the state exists in the engine, and it writes no transcript line
+			// (see `eventToLogEntries`): a beat every 15 s over a long turn is not history.
+			const beat = ((u._meta ?? {}) as Record<string, unknown>).heartbeat as Record<string, unknown> | undefined;
+			return [
+				{
+					kind: "liveness",
+					state: str(beat?.state),
+					pendingPermissions: num(beat?.pendingPermissions),
+					turnMs: num(beat?.turnMs),
+					seq: num(beat?.seq),
+				},
+			];
+		}
 		default:
 			return [{ kind: "ignored", reason: kind || "unnamed sessionUpdate" }];
 	}
@@ -202,7 +218,8 @@ function num(v: unknown): number | undefined {
 
 /**
  * One canonical event → the transcript line(s) that record it. Returns nothing for events that are
- * counters or caches rather than history (`selection.updated`, `ignored` of a known kind).
+ * counters, caches or beats rather than history (`selection.updated`, `liveness`, `ignored` of a known
+ * kind).
  *
  * `assistant.delta` and `thought.delta` are deliberately absent: the engine buffers chunks and writes
  * one line per flush, which is what keeps a 600-chunk turn from producing 600 lines and 600 fs writes.

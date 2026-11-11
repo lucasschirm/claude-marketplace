@@ -363,6 +363,15 @@ client is dropped from `activeClients` on exit even between turns; the slot is r
 `agy` is deliberately in the table even if we ship only two drivers: it is the only agent whose server
 we own, so it is the conformance test that proves the interface is not secretly Devin-shaped.
 
+**It shipped, and four cells of this table were wrong about it** — see
+[delegate-agy-backend-plan.md](delegate-agy-backend-plan.md) for the driver and its tests:
+`launchPlan` passes `--model`/`--effort` (the adapter also reads `AGY_ACP_MODEL`/`AGY_ACP_EFFORT`, which
+the delegate deliberately does not set); the model and effort are applied by that spawn and **not** by
+`session/set_config_option`, which refuses them after `session/new`; `blocksOwnCli` is **true**, over
+`agy` *and* `agy-acp`, because a CLI the queue cannot see is a session with no slot, no transcript and
+no permission path; and `reattach` is **none** (`loadSession: false` today), so a dead process reports
+interrupted rather than promising a `--conversation` replay the adapter has not got.
+
 ---
 
 ## 8. Registry, and what "plug and play" actually means

@@ -3,9 +3,10 @@
  * them and steer the agent to the `delegate_*` tools instead.
  *
  * Which binaries are guarded is data, not a regex in this file: it is the `cli` of every driver whose
- * `capabilities().blocksOwnCli` is true. Today that is Devin only, deliberately — the guard exists so
- * delegation cannot be routed around the queue, and `claude` is the operator's own CLI (pi itself may
- * be driving it), so blocking it would break the host to protect a queue. See `drivers/devin.ts`.
+ * `capabilities().blocksOwnCli` is true, plus that driver's `extraClis`. Today that is Devin (`devin`)
+ * and Antigravity (`agy` and the `agy-acp` adapter that starts the same work); `claude` is deliberately
+ * absent — it is the operator's own CLI (pi itself may be driving it), so blocking it would break the
+ * host to protect a queue. See `drivers/devin.ts` before adding a name.
  *
  * Static analysis of a command string cannot be complete. It covers direct calls, pipelines and
  * lists, `$(...)`/backtick substitutions, `bash -c`/`eval` strings, wrapper commands (`sudo`,
@@ -37,8 +38,26 @@ const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
 const RESERVED = new Set(["!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "fi", "done"]);
 const EXEC_FLAGS = new Set(["-exec", "-execdir", "-ok", "-okdir", "-x", "-X", "--exec", "--exec-batch"]);
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
-// Flags that make a guarded CLI do real work even when a help flag is also present.
-const WORK_FLAGS = new Set(["-p", "--print", "--prompt-file", "-c", "--continue", "-r", "--resume", "--"]);
+// Flags that make a guarded CLI do real work even when a help flag is also present. The headless shapes
+// are here because that is how an agent would route around the queue in one line: `agy -p` with the
+// stream formats runs a whole session to completion, and `--conversation` continues one, neither of
+// which a queue entry, a slot or a status line will ever mention.
+const WORK_FLAGS = new Set(
+	"-p --print --prompt-file -c --continue -r --resume --conversation --input-format --output-format --add-dir --dangerously-skip-permissions --".split(
+		" ",
+	),
+);
+
+/** A work flag in either shape a shell accepts. Matching only the bare token let `agy --help -p=x` through
+ *  while `agy --help -p x` was blocked: one invocation, decided by a character, which is not a distinction
+ *  a guard gets to make. */
+function isWorkFlag(arg: string): boolean {
+	if (WORK_FLAGS.has(arg)) {
+		return true;
+	}
+	const eq = arg.indexOf("=");
+	return eq > 0 && arg.startsWith("-") && WORK_FLAGS.has(arg.slice(0, eq));
+}
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const REDIRECT_WORD = /^(?:\d*|&)(?:>>?|<<<?|<|>&|<&|>\|)/;
 const REDIRECT_ONLY = /^(?:\d*|&)(?:>>?|<<<?|<|>&|<&|>\|)$/;
@@ -208,29 +227,43 @@ function stripRedirections(words: string[]): string[] {
 }
 
 /**
- * True for the read-only invocations that stay allowed: a version/help probe or a listing that starts
- * nothing. Every guarded CLI keeps its own read-only verbs here, because the point of the guard is to
- * stop work being routed around the queue, not to stop people asking what is installed.
+ * The read-only verbs, per guarded binary: the invocations that ask a question instead of starting work.
+ *
+ * Which subcommand means "just asking" is a fact about one CLI, not a fact about all of them: `agy models`
+ * is the listing (the same probe `agy-acp` runs once per process), while Devin's is `models list` and a
+ * bare `devin models` is a usage error this guard has always blocked. One shared list would have to either
+ * allow the first or excuse the second, and "one agent's read-only verb widens another's" is the mistake
+ * the data-driven shape of this file exists to avoid.
+ *
+ * A binary with no entry has no read-only verb beyond `--help`/`--version`, so a new driver fails closed.
+ * `test-delegate-cli-guard.ts` asks for a deliberate entry for every guarded name.
  */
-function isReadOnlyInvocation(args: string[]): boolean {
+const READ_ONLY_VERBS: Record<string, readonly (readonly string[])[]> = {
+	devin: [["models", "list"], ["auth", "status"], ["list"], ["ls"], ["version"], ["help"]],
+	agy: [["models"], ["auth", "status"]],
+	// The adapter takes no verbs: `agy-acp --version` is the whole read-only surface, and every other
+	// invocation starts a server that runs agent work no queue entry mentions.
+	"agy-acp": [],
+};
+
+/** One binary's declared exceptions — exported so a test can insist the table was thought about. */
+export function readOnlyVerbsFor(binary: string): readonly (readonly string[])[] {
+	return READ_ONLY_VERBS[binary] ?? [];
+}
+
+/**
+ * True for the read-only invocations that stay allowed: a version/help probe or a listing that starts
+ * nothing. The point of the guard is to stop work being routed around the queue, not to stop people asking
+ * what is installed.
+ */
+function isReadOnlyInvocation(binary: string, args: string[]): boolean {
 	if (args.some((a) => HELP_FLAGS.has(a))) {
-		return !args.some((a) => WORK_FLAGS.has(a));
+		return !args.some(isWorkFlag);
 	}
-	const [sub, sub2] = args;
 	const onlyFlags = (rest: string[]) => rest.every((a) => a.startsWith("-"));
-	if (sub === "models") {
-		return sub2 === "list" && onlyFlags(args.slice(2));
-	}
-	if (sub === "auth") {
-		return sub2 === "status" && onlyFlags(args.slice(2));
-	}
-	if (sub === "list" || sub === "ls") {
-		return onlyFlags(args.slice(1));
-	}
-	if (sub === "version" || sub === "help") {
-		return true;
-	}
-	return false;
+	return readOnlyVerbsFor(binary).some(
+		(verb) => verb.length <= args.length && verb.every((word, i) => args[i] === word) && onlyFlags(args.slice(verb.length)),
+	);
 }
 
 /** Returns the offending command text if `words` invokes a guarded CLI in a way that is not read-only. */
@@ -251,7 +284,7 @@ function checkCommand(rawWords: string[], depth: number, guarded: ReadonlySet<st
 	const base = basename(words[i]);
 
 	if (guarded.has(base)) {
-		return isReadOnlyInvocation(words.slice(i + 1)) ? undefined : words.slice(i).join(" ");
+		return isReadOnlyInvocation(base, words.slice(i + 1)) ? undefined : words.slice(i).join(" ");
 	}
 
 	if (WRAPPERS.has(base)) {
@@ -309,8 +342,8 @@ function findBlocked(command: string, depth: number, guarded: ReadonlySet<string
 
 /**
  * Returns the offending command if `command` runs one of `guarded` (the CLI names of drivers with
- * `blocksOwnCli`) in any way other than the read-only subcommands (`models list`, `auth status`,
- * `list`/`ls`, `version`, `help`, `--help`, `--version`).
+ * `blocksOwnCli`) in any way other than that binary's read-only subcommands: `--help`/`--version` for every
+ * one of them, plus the verbs declared in `READ_ONLY_VERBS`.
  */
 export function findBlockedCliCommand(command: string, guarded: readonly string[]): string | undefined {
 	if (guarded.length === 0) {
@@ -325,8 +358,8 @@ export function cliBlockReason(guarded: readonly string[]): string {
 	return (
 		`Running ${names} from a shell is blocked in this session. Delegate with the \`delegate_task\` tool ` +
 		"(then `delegate_status`, `delegate_message`, `delegate_cancel`, `delegate_restart`) so the work is queued, " +
-		"tracked and reported back to you. Read-only commands such as `--help`, `--version`, `models list` and " +
-		"`list` are still allowed. If the user really wants a direct CLI run, they can lift the block with " +
+		"tracked and reported back to you. Read-only commands such as `--help`, `--version`, `models`, " +
+		"`models list` and `list` are still allowed. If the user really wants a direct CLI run, they can lift the block with " +
 		"`/delegate allow-bash`."
 	);
 }

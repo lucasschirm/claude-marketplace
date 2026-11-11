@@ -77,10 +77,18 @@ export interface DriverCapabilities {
 	/** Who isolates the checkout: the host (Orca/git worktree, before the session starts) or the agent. */
 	worktree: "host" | "agent" | "none";
 	/** Block the agent's own CLI through bash so delegation cannot bypass the queue. Deliberately true
-	 *  only for Devin — see the note in drivers/devin.ts before setting it for anything else. */
+	 *  only for an agent that is not the host's own CLI — see the note in drivers/devin.ts before setting
+	 *  it for anything else. */
 	blocksOwnCli: boolean;
-	/** The agent's CLI name, when `blocksOwnCli` is true. */
+	/** The binary this agent's process *is* (`devin`, `agy-acp`): what the pid-recycle guard looks for in
+	 *  `/proc/<pid>/cmdline` before killing a pid it recorded a while ago, and the first name the bash guard
+	 *  watches when `blocksOwnCli` is true. Name the spawned binary, not a relative of it: that test is a
+	 *  substring, so `agy` would pass for a process that is merely something else whose name contains it. */
 	cli?: string;
+	/** Additional names `blocksOwnCli` guards besides `cli`, because one agent's work can be startable
+	 *  under more than one binary: `agy-acp` is the process, `agy` is the CLI an agent reaches for instead.
+	 *  Read-only invocations stay allowed for each name, per binary (see bash-guard.ts). */
+	extraClis?: string[];
 }
 
 /** A value set the agent will actually accept. Catalogues drive validation AND tool text. */
@@ -135,6 +143,11 @@ export type DelegateEvent =
 	| { kind: "usage.updated"; used?: number; size?: number; tokens: UsageTotals }
 	| { kind: "selection.updated"; options: Record<string, string[]> }
 	| { kind: "mode.changed"; modeId: string }
+	/** What the agent says it is doing while it says nothing. `agy-acp` beats during a turn because agy
+	 *  goes silent when a hook blocks, carrying the state a watchdog acts on. Liveness, not content: any
+	 *  frame already restarts the stall clock, so what this kind adds is a held fact about *why* a session
+	 *  is quiet — and a beat every 15 s must never reach the transcript as text. */
+	| { kind: "liveness"; state?: string; pendingPermissions?: number; turnMs?: number; seq?: number }
 	| { kind: "ignored"; reason: string };
 
 /** Normalized `session/prompt` outcome. `unknown` is an honest answer, not a bug: an agent may send a

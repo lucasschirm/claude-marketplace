@@ -1,6 +1,6 @@
 ---
 name: delegate-to-agents
-description: Use when handing research, planning, code review, debugging, or coding work to a background agent through the delegate_task, delegate_status, delegate_message, delegate_permission, delegate_cancel and delegate_restart tools. Covers picking the agent (`devin`, `claude`), its model and thinking level per task class, writing the delegation prompt, running tasks in parallel in isolated worktrees, and verifying what comes back.
+description: Use when handing research, planning, code review, debugging, or coding work to a background agent through the delegate_task, delegate_status, delegate_message, delegate_permission, delegate_cancel and delegate_restart tools. Covers picking the agent (`devin`, `claude`, `agy`), its model and thinking level per task class, writing the delegation prompt, running tasks in parallel in isolated worktrees, and verifying what comes back.
 ---
 
 # Delegate a task to another agent
@@ -9,7 +9,7 @@ description: Use when handing research, planning, code review, debugging, or cod
 
 The `delegate_*` tools run another agent's session in the background over its Agent Client Protocol (ACP) server. `delegate_task` returns immediately; the result arrives later as a follow-up message.
 
-**Core principle: name the `agent`, the `model`, and the reason. Both defaults are deliberately modest.** `agent` defaults to `devin` (for one release — say it explicitly anyway), Devin's default model is `swe-2-high` (right only for simple coding) and Claude's is `sonnet`, so omitting `model` quietly under-powers research, review and complex work.
+**Core principle: name the `agent`, the `model`, and the reason. The defaults are deliberately modest.** `agent` defaults to `devin` (for one release — say it explicitly anyway), Devin's default model is `swe-2-high` (right only for simple coding) and Claude's is `sonnet`, so omitting `model` quietly under-powers research, review and complex work. `agy` (Antigravity, driven through the `agy-acp` adapter) defaults to whatever its own CLI is configured to use, because its model list is account-specific.
 
 ## Tools
 
@@ -27,7 +27,7 @@ The `delegate_*` tools run another agent's session in the background over its Ag
 
 The `devin_*` tool names and `/devin` still work for one minor version and always mean `agent: "devin"`; each call says it is renamed. Write new work with the `delegate_*` names.
 
-Do not run an agent's own CLI through bash. The guarded agents (currently Devin) are blocked there and the call fails with a message pointing back to these tools; only read-only commands are allowed (`devin models list`, `devin ls`, `devin version`, `devin --help`). If a direct CLI run is truly needed, ask the user to run `/delegate allow-bash on`.
+Do not run an agent's own CLI through bash. The guarded agents (Devin, and Antigravity as both `agy` and `agy-acp`) are blocked there and the call fails with a message pointing back to these tools; only read-only commands are allowed, and they belong to each CLI: `devin models list`, `devin ls`, `devin version` for one, `agy models`, `agy auth status`, `agy --version` for the other. If a direct CLI run is truly needed, ask the user to run `/delegate allow-bash on`.
 
 ## Choosing an agent
 
@@ -37,6 +37,7 @@ Do not run an agent's own CLI through bash. The guarded agents (currently Devin)
 | :--- | :--- |
 | `devin` (default) | Default for coding, review and research runs. Models are picked per task class (table below). |
 | `claude` | You want Claude rather than Devin: a second opinion from a different model family, or work where Claude's own tooling and habits fit better. Defaults to `sonnet`, with effort through `thinking`. Its catalogue is the machine's — the adapter lists whatever that install allows — so pass `model` only when you know this one carries the value. |
+| `agy` | You want Antigravity (Google's `agy`) rather than either of them. Needs the `agy-acp` adapter on `PATH` and a signed-in `agy`; `agy models` lists that account's ids, so pass `model` only when you know the id. Effort is `thinking` (`low`…`max`); it defaults to `accept-edits`, and `dangerous` needs the operator's `AGY_ACP_ALLOW_BYPASS=1`. It cannot be followed up after its process exits — use `delegate_restart`. |
 
 A second agent is a real second opinion, not a retry: when you ask for a review of work the first agent did, delegate to the *other* one. Capacity is limited per agent **and** in total, so a busy Devin does not block a Claude run.
 
@@ -66,6 +67,7 @@ Pick the model by what a *successful run must do*, not by prompt length.
 
 - **Devin has no thinking control.** Its reasoning effort is baked into the model id (`swe-2-high` vs `swe-2-max`), so `thinking` on a Devin task is *refused*, not ignored. To get more thinking from Devin, change `model`.
 - **Claude has one.** Use `high` for review and debugging where the extra reasoning changes the findings, and leave it unset for mechanical work.
+- **Antigravity has one too**, its `--effort`: `low`, `medium`, `high`, `xhigh`, `max`. `off` and `minimal` are refused rather than rounded up, because a level the CLI has never accepted would fail the run instead of the request.
 
 An unknown level is refused. Ask for it only when the task's quality depends on reasoning depth; otherwise the model id and the prompt are the levers.
 
@@ -75,7 +77,7 @@ An unknown level is refused. Ask for it only when the task's quality depends on 
 
 In every other mode the agent asks before running tools it may not run on its own, and its turn **blocks until you answer**. You get a message naming the session and the command; answer it with `delegate_permission`. `accept-edits` asks before every shell command. An unanswered request is rejected automatically after the permission timeout (5 minutes by default); the agent continues without that command and tells you it did. A blocked session holds one of the slots, so answer promptly or the queue stalls behind it. Unknown modes are refused, and each agent maps the canonical names (`dangerous`, `auto`, `accept-edits`, `plan`, `ask`) into its own vocabulary.
 
-Treat `dangerous` as a decision, not a default: pair it with `create_worktree: true` for anything that writes, and for read-only work say "do not modify any files" in the prompt. On Claude, `bypassPermissions` is unavailable when running as root outside a sandbox, and an `allow_session` answer has no session-scoped option to map to, so it approves one call and says so.
+Treat `dangerous` as a decision, not a default: pair it with `create_worktree: true` for anything that writes, and for read-only work say "do not modify any files" in the prompt. On Claude, `bypassPermissions` is unavailable when running as root outside a sandbox, and an `allow_session` answer has no session-scoped option to map to, so it approves one call and says so. On `agy` the default is `accept-edits`, not `dangerous`: `agy-acp` withholds its `bypass` mode until the operator sets `AGY_ACP_ALLOW_BYPASS=1`, and asking for `dangerous` without it is refused before a slot is taken — the driver never sets that knob for you.
 
 ## Workflow
 
@@ -132,6 +134,7 @@ For research and planning, state the question, the scope of the search, and the 
 
 - Omitting `model` and getting `swe-2-high` for a research or review task.
 - Passing `thinking` to a Devin run: it is refused. Devin's effort is the model id.
+- Asking an `agy` run for `dangerous` and reading the refusal as a bug. Bypass is the operator's gate (`AGY_ACP_ALLOW_BYPASS=1`); use `accept-edits` and answer the requests that arrive.
 - Asking a second agent to review an agent's work without saying which agent ran, or what it claimed.
 - Polling `delegate_status` in a loop instead of waiting for the completion message.
 - Delegating a mixed task ("review and fix") in one call.

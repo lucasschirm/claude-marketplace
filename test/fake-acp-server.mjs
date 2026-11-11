@@ -167,7 +167,10 @@ rl.on("line", (line) => {
 				agentCapabilities: {},
 				// FAKE_AGENT_NAME lets this one script stand in for a second driver: the cross-agent test
 				// runs it behind a `claude-agent-acp` shim. The name is what the extension echoes back.
-				agentInfo: { name: process.env.FAKE_AGENT_NAME || "fake-devin", version: "0.0.0" },
+				// `argv` is reported so a test can assert what a driver's launch plan actually looked like once
+				// the OS exec'd it: "the model is a spawn flag" is a claim about argv, and the only proof is the
+				// child's own `process.argv`.
+				agentInfo: { name: process.env.FAKE_AGENT_NAME || "fake-devin", version: "0.0.0", argv: process.argv.slice(2) },
 			},
 		});
 	} else if (m === "session/new") {

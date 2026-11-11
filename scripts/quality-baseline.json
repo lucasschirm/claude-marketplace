@@ -11,14 +11,14 @@
     "inboundBufferCap": 0,
     "envAccessLocation": 2,
     "stdoutExitDrain": 0,
-    "emptyCatch": 42,
+    "emptyCatch": 41,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.performance/useTopLevelRegex": 566,
+    "biome.performance/noNamespaceImport": 184,
     "biome.performance/noAwaitInLoops": 91,
-    "biome.performance/noNamespaceImport": 185,
     "biome.style/useBlockStatements": 879,
     "biome.suspicious/noShadow": 72,
     "biome.suspicious/noReturnAssign": 14,
@@ -31,29 +31,32 @@
     "extensions/compaction-fail-recovery.ts": 734,
     "extensions/delegate-task.ts": 299,
     "extensions/lib/ci-verdict.ts": 142,
-    "extensions/lib/delegate/bash-guard.ts": 333,
+    "extensions/lib/delegate/bash-guard.ts": 366,
     "extensions/lib/delegate/compat.ts": 154,
     "extensions/lib/delegate/dashboard.ts": 202,
     "extensions/lib/delegate/diagnostics.ts": 69,
-    "extensions/lib/delegate/drivers/claude.ts": 279,
+    "extensions/lib/delegate/drivers/agy.ts": 307,
+    "extensions/lib/delegate/drivers/claude.ts": 280,
     "extensions/lib/delegate/drivers/devin.ts": 195,
-    "extensions/lib/delegate/events.ts": 228,
-    "extensions/lib/delegate/permissions.ts": 226,
+    "extensions/lib/delegate/events.ts": 245,
+    "extensions/lib/delegate/framing.ts": 114,
+    "extensions/lib/delegate/liveness.ts": 51,
+    "extensions/lib/delegate/permissions.ts": 251,
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
     "extensions/lib/delegate/queue.ts": 453,
     "extensions/lib/delegate/recovery.ts": 318,
-    "extensions/lib/delegate/registry.ts": 225,
-    "extensions/lib/delegate/runtime.ts": 540,
+    "extensions/lib/delegate/registry.ts": 238,
+    "extensions/lib/delegate/runtime.ts": 556,
     "extensions/lib/delegate/session.ts": 522,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 122,
     "extensions/lib/delegate/tools-session.ts": 357,
     "extensions/lib/delegate/tools.ts": 289,
-    "extensions/lib/delegate/transcript.ts": 226,
-    "extensions/lib/delegate/transport.ts": 431,
-    "extensions/lib/delegate/types.ts": 304,
+    "extensions/lib/delegate/transcript.ts": 230,
+    "extensions/lib/delegate/transport.ts": 447,
+    "extensions/lib/delegate/types.ts": 317,
     "extensions/lib/delegate/worktree.ts": 201,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
@@ -81,7 +84,7 @@
     "agy-acp/src/agy/version.ts": 64,
     "agy-acp/src/bridge-cleanup.ts": 54,
     "agy-acp/src/bridge-hook.ts": 153,
-    "agy-acp/src/bridge-server.ts": 363,
+    "agy-acp/src/bridge-server.ts": 361,
     "agy-acp/src/byte-budget.ts": 40,
     "agy-acp/src/cancel.ts": 100,
     "agy-acp/src/config-options.ts": 279,
@@ -549,8 +552,44 @@
         "agy-acp/src/map-steps.ts: 96 lines > baseline 95 (files may only shrink)",
         "agy-acp/src/update-map.ts: 167 lines > baseline 166 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "agy delegate driver: a third backend, exact-id permissions and per-binary CLI verbs grew these files",
+      "changes": [
+        "extensions/lib/delegate/bash-guard.ts: 355 lines > baseline 333 (files may only shrink)",
+        "extensions/lib/delegate/drivers/claude.ts: 280 lines > baseline 279 (files may only shrink)",
+        "extensions/lib/delegate/events.ts: 245 lines > baseline 228 (files may only shrink)",
+        "extensions/lib/delegate/permissions.ts: 251 lines > baseline 226 (files may only shrink)",
+        "extensions/lib/delegate/registry.ts: 238 lines > baseline 225 (files may only shrink)",
+        "extensions/lib/delegate/transport.ts: 447 lines > baseline 431 (files may only shrink)",
+        "extensions/lib/delegate/types.ts: 317 lines > baseline 304 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "agy backend: framing decoder, exact-id permissions and per-binary guard grew these files",
+      "changes": [
+        "extensions/lib/delegate/transcript.ts: 230 lines > baseline 226 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "review round 1: watchdog calls the stall verdict, --flag=value work flags, precise pid-guard cli",
+      "changes": [
+        "extensions/lib/delegate/bash-guard.ts: 366 lines > baseline 355 (files may only shrink)",
+        "extensions/lib/delegate/drivers/agy.ts: 294 lines > baseline 285 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 556 lines > baseline 540 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "review round 2: the default mode's extra start and the mirrored tables are now documented and asserted",
+      "changes": [
+        "extensions/lib/delegate/drivers/agy.ts: 307 lines > baseline 294 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "1afade7",
+  "generatedFrom": "dd53a99",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

@@ -118,9 +118,25 @@ test("pickPermissionOption never widens beyond the session (no always-allow, no 
 	];
 	assert.strictEqual(pickPermissionOption(wide, "allow"), undefined);
 	assert.strictEqual(pickPermissionOption(wide, "allow_session"), undefined);
-	// Matching by kind when Devin renames the ids.
-	assert.strictEqual(pickPermissionOption([{ optionId: "ok-1", name: "Allow", kind: "allow_once" }], "allow"), "ok-1");
-	assert.strictEqual(pickPermissionOption([{ optionId: "no-1", name: "No", kind: "reject_once" }], "reject"), "no-1");
+});
+
+test("only an exact option id is an answer; `kind` is a label and is never matched", () => {
+	// This replaces a fallback that matched by `kind` "when Devin renames the ids". The payload that real
+	// devin acp sent in the incident the fake reproduces carries `optionId: "allow_session"` under
+	// `kind: "allow_always"`, which settles it: `kind` cannot distinguish a one-time approval from a
+	// durable rule, so a picker that reads it can approve the second while meaning the first. An agent that
+	// renames its ids now gets `cancelled` — which every agent reads as a rejection — rather than a guess.
+	const renamed = [
+		{ optionId: "ok-1", name: "Allow", kind: "allow_once" },
+		{ optionId: "no-1", name: "No", kind: "reject_once" },
+	];
+	assert.strictEqual(pickPermissionOption(renamed, "allow"), undefined);
+	assert.strictEqual(pickPermissionOption(renamed, "allow_session"), undefined);
+	assert.strictEqual(pickPermissionOption(renamed, "reject"), undefined);
+	// A trust prompt describing itself as a one-time approval is the hostile shape this closes.
+	assert.strictEqual(pickPermissionOption([{ optionId: "trust_folder", name: "Trust", kind: "allow_once" }], "allow"), undefined);
+	// And `cancelled` is what the caller gets, not a silently widened approval.
+	assert.deepStrictEqual(permissionOutcome(pickPermissionOption(renamed, "allow")), { outcome: { outcome: "cancelled" } });
 });
 
 test("permissionOutcome builds the ACP result, cancelled when no option matched", () => {

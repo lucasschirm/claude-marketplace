@@ -10,6 +10,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DelegateTransport } from "../extensions/lib/delegate/transport.ts";
+import { waitFor } from "./helpers/poll.ts";
+import { agyLaunchPlan } from "../extensions/lib/delegate/drivers/agy.ts";
+import { devinLaunchPlan } from "../extensions/lib/delegate/drivers/devin.ts";
 import { isPidAlive } from "../extensions/lib/delegate/process.ts";
 import type { LaunchPlan } from "../extensions/lib/delegate/types.ts";
 
@@ -85,6 +88,29 @@ test("the launch plan's env wins over an inherited value of the same key", async
 	assert.equal((info.agentInfo as any).name, "from-the-plan");
 	assert.equal(t.launchEnv("FAKE_AGENT_NAME"), "from-the-plan");
 	delete process.env.FAKE_AGENT_NAME;
+	t.dispose();
+});
+
+test("a launch plan's argv reaches the child, because that is where a driver's selection lives", async () => {
+	// "The model is a spawn flag" (`drivers/devin.ts`) and "the selection travels as flags" (agy) are both
+	// claims about argv, and the only witness is the child's own `process.argv` — which the fake reports.
+	// A spawn that dropped the args would leave every driver test green.
+	const t = makeTransport({ ...plan(), args: [SERVER, "--model", "gemini-3-pro", "--effort", "max"] });
+	const info = await t.start();
+	assert.deepEqual((info.agentInfo as any).argv, ["--model", "gemini-3-pro", "--effort", "max"]);
+	t.dispose();
+});
+
+test("the two backends' argv for one selection: same transport, different flags", async () => {
+	// The acceptance item is "spawn argv per backend". Same command line, two drivers: the queue, the
+	// watchdog and this transport are shared; only argv differs, and this is the line where that shows.
+	const agy = agyLaunchPlan({ model: "gemini-3-pro", thinking: "high", mode: "ask" }, process.cwd());
+	const devin = devinLaunchPlan({ model: "swe-2-max", thinking: undefined, mode: "dangerous" }, process.cwd());
+	assert.notDeepEqual(agy.args, devin.args);
+
+	const t = makeTransport({ ...agy, command: process.execPath, args: [SERVER, ...agy.args] });
+	const info = await t.start();
+	assert.deepEqual((info.agentInfo as any).argv, ["--model", "gemini-3-pro", "--effort", "high"]);
 	t.dispose();
 });
 
@@ -190,8 +216,12 @@ test("the wire log records the traffic, because 'what did the agent actually sen
 	t.setLogFilePath(logFile);
 	await t.start();
 	await t.request("session/new", { cwd: process.cwd(), mcpServers: [] }, 5000);
-	await new Promise((r) => setTimeout(r, 120));
-	const log = fs.readFileSync(logFile, "utf-8");
+	// Polled, not slept: the wire log is a write stream, and a fixed pause is a race that the rest of the
+	// suite wins or loses depending on how loaded the machine is.
+	const log = await waitFor(() => {
+		const text = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf-8") : "";
+		return text.includes("config_option_update") ? text : null;
+	});
 	assert.match(log, /"type":"stdout"/);
 	assert.match(log, /config_option_update/);
 	t.dispose();
@@ -209,17 +239,3 @@ test("a spawn of a command that does not exist fails the start, not the next too
 	await assert.rejects(() => t.start(), /ghost acp|ENOENT|not running/);
 	t.dispose();
 });
-
-async function waitFor<T>(read: () => T | null | undefined, timeoutMs = 5000): Promise<T> {
-	const deadline = Date.now() + timeoutMs;
-	for (;;) {
-		const value = read();
-		if (value !== null && value !== undefined) {
-			return value;
-		}
-		if (Date.now() > deadline) {
-			throw new Error("timed out waiting for condition");
-		}
-		await new Promise((r) => setTimeout(r, 25));
-	}
-}

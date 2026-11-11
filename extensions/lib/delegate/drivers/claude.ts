@@ -19,7 +19,7 @@
 import { commandExists } from "../../nonblocking.ts";
 import { runJson } from "../../exec.ts";
 import { defaultMapUpdate } from "../events.ts";
-import { makeModeResolver, modeCatalogue, type PermissionDecision, type PermissionOption } from "../permissions.ts";
+import { makeModeResolver, modeCatalogue, permissionOptionId, type PermissionDecision, type PermissionOption } from "../permissions.ts";
 import type { AgentDriver, Catalogue, DriverCapabilities, DriverHealth, LaunchPlan, Selection, SelectionContext } from "../types.ts";
 
 /** The adapter's own config-option ids (`session-config-ids.d.ts`, `session-model.d.ts`, `acp-agent.d.ts`). */
@@ -129,19 +129,20 @@ export function resetClaudeHealthCache(): void {
 }
 
 /**
- * One approval or one rejection, never a durable rule.
+ * One approval or one rejection, never a durable rule, and never by `kind`.
  *
  * Claude offers `allow_once`, `allow_always`, `reject_once`, `reject_always`, and the set is built per
- * tool. `allow_always` is a permanent widening, which the delegate policy forbids for every agent, so
- * `allow_session` has nowhere honest to go: it degrades to one approval and the tool says so.
+ * tool. `allow_always` is a permanent widening (a `Bash(...)` rule written into settings.json), which the
+ * delegate policy forbids for every agent, so `allow_session` has nowhere honest to go: it degrades to one
+ * approval and the tool says so. The ids here are the only ones matched, for the reason in
+ * `pickPermissionOption`: an option's `kind` is a label the adapter chose, and picking by it can land on
+ * exactly the option this function exists to refuse.
  */
 export function pickClaudePermissionOption(options: PermissionOption[], decision: PermissionDecision): string | undefined {
-	const byId = (id: string) => options.find((o) => o.optionId === id)?.optionId;
-	const byKind = (kind: string) => options.find((o) => o.kind === kind)?.optionId;
 	if (decision === "reject") {
-		return byId("reject_once") ?? byKind("reject_once");
+		return permissionOptionId(options, "reject_once");
 	}
-	return byId("allow_once") ?? byKind("allow_once");
+	return permissionOptionId(options, "allow_once");
 }
 
 export const claudeDriver: AgentDriver = {

@@ -15,6 +15,7 @@ import type { AgentDriver, Selection, ThinkingLevel } from "./types.ts";
 import { THINKING_LEVELS } from "./types.ts";
 import { devinDriver } from "./drivers/devin.ts";
 import { claudeDriver } from "./drivers/claude.ts";
+import { agyDriver } from "./drivers/agy.ts";
 
 /** The agent used when the caller does not name one. One release of this default, then reconsider. */
 export const DEFAULT_AGENT = "devin";
@@ -22,6 +23,7 @@ export const DEFAULT_AGENT = "devin";
 const DRIVERS: Record<string, AgentDriver> = {
 	devin: devinDriver,
 	claude: claudeDriver,
+	agy: agyDriver,
 };
 
 /**
@@ -75,7 +77,8 @@ export function agentDescription(): string {
 /** The mode sentence, over the union of driver vocabularies and each driver's default. */
 export function modeDescription(): string {
 	return (
-		`Permission mode: ${CANONICAL_MODES.join(", ")} (default: dangerous). ` +
+		`Permission mode: ${CANONICAL_MODES.join(", ")} (default: dangerous, except where an agent's own ` +
+		"default differs because a wider mode is not offerable there — `/delegate agents` lists each default). " +
 		"dangerous approves every tool call the agent would otherwise ask about; smart approves what the agent judges safe; " +
 		"accept-edits, plan and ask restrict it further. In every mode but dangerous the agent may ask permission and its turn " +
 		"blocks until you answer with delegate_permission. Each driver maps these names to its own wire ids, and a mode the " +
@@ -130,7 +133,7 @@ export function describeAgents(): string[] {
 			caps.resume ? "resume" : "no-resume",
 			caps.permissions ? "asks-permission" : "never-asks",
 			caps.plans ? "plans" : "no-plans",
-			caps.blocksOwnCli ? `blocks-${caps.cli}-cli` : "cli-unguarded",
+			caps.blocksOwnCli ? `blocks-${guardedOf(caps)}-cli` : "cli-unguarded",
 			`worktree=${caps.worktree}`,
 		];
 		return `${d.id} (${d.source}, ${d.title}) — model default '${d.models().default}', modes default '${d.defaultMode()}'; ${flags.join(", ")}`;
@@ -215,10 +218,20 @@ export function admit(params: { agent?: string; model?: string; thinking?: strin
 	return { ok: true, driver, selection, warnings };
 }
 
-/** The CLI names whose use through bash must be blocked, so delegation cannot bypass the queue. */
+/** Every binary one driver's `blocksOwnCli` covers: its own CLI plus any adapter that starts the same work. */
+function guardedOf(caps: ReturnType<AgentDriver["capabilities"]>): string {
+	return [caps.cli, ...(caps.extraClis ?? [])].filter((name): name is string => Boolean(name)).join("+");
+}
+
+/**
+ * The CLI names whose use through bash must be blocked, so delegation cannot bypass the queue.
+ *
+ * Flattened over every driver, so a driver that guards an adapter as well as a CLI (agy) contributes
+ * both. A name a driver does not declare is not blocked by anything — the list is the whole policy.
+ */
 export function guardedClis(): string[] {
 	return listDrivers()
 		.filter((d) => d.capabilities().blocksOwnCli)
-		.map((d) => d.capabilities().cli)
+		.flatMap((d) => [d.capabilities().cli, ...(d.capabilities().extraClis ?? [])])
 		.filter((cli): cli is string => Boolean(cli));
 }
