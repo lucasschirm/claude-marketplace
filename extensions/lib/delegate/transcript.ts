@@ -84,6 +84,10 @@ function describeEntry(obj: any, speakerLabel: string): string | undefined {
 			return `[usage]: ${obj.data?.tokens?.total ?? "?"} tokens`;
 		case "error":
 			return `[error]: ${JSON.stringify(obj.data ?? {})}`;
+		// A frame the reader could not decode leaves a hole here, and a hole nobody can see is how a session
+		// looks like it stopped mid-sentence for no reason: the fault is as reportable as the text missing.
+		case "framing_problem":
+			return `[framing]: ${oneLine(obj.data?.reason) || "a frame could not be read"}`;
 		default:
 			return undefined;
 	}

@@ -13,11 +13,14 @@
 //
 // `session/prompt` is answered when the whole agent turn ends — minutes to hours — so it is sent with
 // `timeoutMs = 0` and never with a wall-clock deadline (see docs/devin-delegate-reliability-plan.md).
+//
+// Framing lives in `framing.ts` and splits on "\n" only; `readline` is not used, because it also splits
+// on U+2028/U+2029 and would tear a frame that carries either inside a string.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as readline from "node:readline";
+import { FrameDecoder, MAX_FRAME_BYTES } from "./framing.ts";
 import type { LaunchPlan } from "./types.ts";
 
 /** JSON-RPC ids: ours are numbers, an agent's own requests typically use string UUIDs. */
@@ -54,11 +57,13 @@ export class DelegateTransport {
 	private pendingRequests = new Map<number, { resolve: (val: any) => void; reject: (err: any) => void; timer: NodeJS.Timeout | null }>();
 	private logStream: fs.WriteStream | null = null;
 	/**
-	 * Where to report a transcript-log failure that the log itself can no longer carry. Set by the runtime; a
-	 * transport with no listener simply drops the diagnostic, which is still better than throwing at it.
+	 * Where to report a failure the transcript cannot carry: a log stream that died, or a frame the decoder
+	 * had to drop (after that, the transcript is silently incomplete, and only a diagnostic tells anyone).
+	 * Set by the runtime; a transport with no listener simply drops the diagnostic, which is still better
+	 * than throwing at it.
 	 */
 	logFailure?: (message: string) => void;
-	private rl: readline.Interface | null = null;
+	private framer: FrameDecoder | null = null;
 	private onUpdateCallback?: (update: any) => void;
 	private onExitCallback?: (code: number | null, signal: string | null) => void;
 	private onRequestCallback?: (req: AcpIncomingRequest) => boolean;
@@ -126,27 +131,27 @@ export class DelegateTransport {
 		}
 
 		// stdio is piped at spawn, so stdout is there; a `!` would turn a spawn that did not pipe into a
-		// TypeError raised inside readline, rather than a failure start() can report to its caller.
+		// TypeError raised inside the reader, rather than a failure start() can report to its caller.
 		if (!this.child.stdout) {
 			throw new Error(`${this.plan.label} has no stdout - its protocol stream cannot be read`);
 		}
-		this.rl = readline.createInterface({
-			input: this.child.stdout,
-			crlfDelay: Infinity,
+		// An unhandled `error` event on a stream throws out of the event loop and takes the host (the user's
+		// editor) down with it, so the protocol stream swallows them the way stdin already does: the exit
+		// handler settles the session, which is the honest report of a pipe that broke.
+		this.child.stdout.on("error", () => {});
+		this.framer = new FrameDecoder(MAX_FRAME_BYTES, {
+			onLine: (line) => this.handleFrame(line),
+			// The reason goes to the transcript and to the diagnostics, never to stdout: "the agent sent
+			// nothing" and "we could not read what it sent" are different answers to a stalled session.
+			onProblem: (reason) => {
+				this.logEvent("framing_problem", { reason });
+				this.logFailure?.(`${this.plan.label}: ${reason}`);
+			},
 		});
-
-		this.rl.on("line", (line) => {
-			if (!line.trim()) {
-				return;
-			}
-			this.logEvent("stdout", line);
-			try {
-				const msg = JSON.parse(line) as AcpMessage;
-				this.handleMessage(msg);
-			} catch {
-				// Non-json output
-			}
-		});
+		this.child.stdout.on("data", (chunk: Buffer) => this.framer?.push(chunk));
+		// The last frame of a stream may have lost its terminator. `end` fires before `close`, so the tail is
+		// handed over before the exit report is delivered.
+		this.child.stdout.on("end", () => this.framer?.flush());
 
 		this.child.stderr?.on("data", (chunk: Buffer) => {
 			this.logEvent("stderr", chunk.toString());
@@ -295,6 +300,20 @@ export class DelegateTransport {
 		this.child.stdin.write(`${JSON.stringify(msg)}\n`);
 	}
 
+	/** One complete frame from the decoder: log it, parse it, act on it. */
+	private handleFrame(line: string): void {
+		if (!line.trim()) {
+			return;
+		}
+		this.logEvent("stdout", line);
+		try {
+			this.handleMessage(JSON.parse(line) as AcpMessage);
+		} catch {
+			// Not JSON: a CLI's banner, a deprecation notice, a stray progress line. Logged above as stdout,
+			// which is where a reader looks for it; the protocol ignores it.
+		}
+	}
+
 	private handleMessage(msg: AcpMessage): void {
 		if (msg.method && msg.id !== undefined) {
 			const req: AcpIncomingRequest = { id: msg.id, method: msg.method, params: msg.params };
@@ -409,10 +428,7 @@ export class DelegateTransport {
 		this.onUpdateCallback = undefined;
 		this.onExitCallback = undefined;
 		this.onRequestCallback = undefined;
-		try {
-			this.rl?.close();
-		} catch {}
-		this.rl = null;
+		this.framer = null;
 		if (this.child) {
 			this.child.stderr?.removeAllListeners();
 			this.child.stdin?.removeAllListeners();

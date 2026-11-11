@@ -83,6 +83,51 @@ export function metaFor(sessionId: string, overrides: Partial<SessionMeta> = {})
 	};
 }
 
+/**
+ * A fake transport with the wiring `attach()` installs, so a test can hand the engine an update frame.
+ *
+ * It implements the slice of `DelegateTransport` the session layer touches and records what the engine
+ * wrote, which is what makes "a heartbeat refreshed the clock and wrote no transcript line" a test instead
+ * of a reading of `attach`.
+ */
+export function fakeTransport() {
+	const written: Array<{ type: string; data: unknown }> = [];
+	const handlers: { update?: (frame: any) => void; exit?: (code: number | null) => void; request?: (req: any) => boolean } = {};
+	return {
+		written,
+		pid: 4242,
+		setOnUpdate(cb: (frame: any) => void) {
+			handlers.update = cb;
+		},
+		setOnExit(cb: (code: number | null) => void) {
+			handlers.exit = cb;
+		},
+		setOnRequest(cb: (req: any) => boolean) {
+			handlers.request = cb;
+		},
+		logEvent(type: string, data: unknown) {
+			written.push({ type, data });
+		},
+		appendAssistantMessage(text: string) {
+			written.push({ type: "assistant_message", data: { text } });
+		},
+		appendThoughtMessage() {},
+		appendUserMessage() {},
+		request: async () => ({}),
+		dispose() {},
+		/** Deliver a `session/update` the way the wire would. */
+		emitUpdate(frame: any) {
+			handlers.update?.(frame);
+		},
+		emitExit(code: number | null) {
+			handlers.exit?.(code);
+		},
+		emitRequest(req: any) {
+			return handlers.request?.(req) ?? false;
+		},
+	};
+}
+
 /** A fake transport: records what the engine answered, so permission tests need no child process. */
 export function fakeClient() {
 	const responses: Array<{ id: number | string; result: unknown }> = [];

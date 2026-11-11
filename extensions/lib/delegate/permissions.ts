@@ -181,24 +181,49 @@ export const PERMISSION_DECISIONS = ["allow", "allow_session", "reject"] as cons
 export type PermissionDecision = (typeof PERMISSION_DECISIONS)[number];
 
 /**
- * The option that carries out `decision`, or undefined when the agent offered none (the answer is then
- * "cancelled", which an agent treats as a rejection).
+ * The option ids the shared policy will answer with, in the ACP spec's spelling.
  *
- * It never picks an option that widens permissions beyond this approval: `allow_always`, a
- * project/global "always allow", or "switch to bypass" are all skipped, for every agent. A driver may
- * override it (Claude has no session-scoped tier, so `allow_session` degrades to one approval) but the
- * override must not reach for a widening option either.
+ * They are the whole vocabulary of `pickPermissionOption`: an option whose `optionId` is not one of these
+ * is never chosen on the caller's behalf by the default, whatever its `kind` claims. A driver may answer
+ * with a fourth id it can describe — `agy-acp`'s `allow_always` is an in-memory, per-session grant, which
+ * is what `allow_session` asks for — and that claim is the driver's to make and to test, not the
+ * default's to guess.
+ */
+export const PERMISSION_OPTION_IDS = { allowOnce: "allow_once", allowSession: "allow_session", rejectOnce: "reject_once" } as const;
+
+/**
+ * The one option the agent actually offers under an exact id, or undefined when it offers none.
+ *
+ * `kind` is not consulted, and that is the point. `kind` is a label the agent picks for its own UI, and the
+ * payload the 2026-10-22 incident was reproduced from carries `optionId: "allow_session"` under
+ * `kind: "allow_always"` — so a matcher that reads `kind` cannot tell a one-time approval from a durable
+ * rule, a project-wide trust prompt, or a foreign "trust this workspace" option that happens to describe
+ * itself as `allow_once`. Choosing by id and answering `cancelled` when the id is absent fails closed: the
+ * agent treats a cancelled request as a rejection, which is what the caller who sees nothing deserves.
+ */
+export function permissionOptionId(options: PermissionOption[], wanted: string): string | undefined {
+	return options.find((o) => o.optionId === wanted)?.optionId;
+}
+
+/**
+ * The option that carries out `decision`, or undefined when the agent offered no option with that id (the
+ * answer is then "cancelled", which an agent treats as a rejection).
+ *
+ * It never picks an option that widens permissions beyond this approval: `allow_always`, a project/global
+ * "always allow", or "switch to bypass" are all skipped, for every agent. A driver may override it —
+ * Claude has no session-scoped tier so `allow_session` degrades to one approval, and `agy-acp`'s
+ * `allow_always` is an in-memory per-session grant that *is* the session tier — but an override maps one
+ * exact id onto another and never searches by `kind`.
  */
 export function pickPermissionOption(options: PermissionOption[], decision: PermissionDecision): string | undefined {
-	const byId = (id: string) => options.find((o) => o.optionId === id)?.optionId;
-	const byKind = (kind: string) => options.find((o) => o.kind === kind)?.optionId;
 	if (decision === "reject") {
-		return byId("reject_once") ?? byKind("reject_once") ?? byKind("reject_always");
+		return permissionOptionId(options, PERMISSION_OPTION_IDS.rejectOnce);
 	}
 	if (decision === "allow_session") {
-		return byId("allow_session") ?? byId("allow_once") ?? byKind("allow_once");
+		// Narrowing is allowed (a session rule the agent cannot make becomes one approval); widening is not.
+		return permissionOptionId(options, PERMISSION_OPTION_IDS.allowSession) ?? permissionOptionId(options, PERMISSION_OPTION_IDS.allowOnce);
 	}
-	return byId("allow_once") ?? byKind("allow_once");
+	return permissionOptionId(options, PERMISSION_OPTION_IDS.allowOnce);
 }
 
 /** The ACP result for a `session/request_permission` request. */

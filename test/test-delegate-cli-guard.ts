@@ -1,13 +1,13 @@
 // Run with: node --test test/test-delegate-cli-guard.ts
 import { test } from "node:test";
 import assert from "node:assert";
-import { cliBlockReason, findBlockedCliCommand } from "../extensions/lib/delegate/bash-guard.ts";
+import { cliBlockReason, findBlockedCliCommand, readOnlyVerbsFor } from "../extensions/lib/delegate/bash-guard.ts";
 import { guardedClis } from "../extensions/lib/delegate/registry.ts";
 
-// The guard takes the names to watch from the driver registry, so the test names them too. `devin` is
-// the driver with `blocksOwnCli`; a test that hardcoded the list would pass when a driver flipped the
-// capability off.
-const GUARDED = ["devin"];
+// The guard takes the names to watch from the driver registry, so the test names them too. A test that
+// hardcoded the list would pass when a driver flipped the capability off — which is why the last test in
+// this file asserts the two lists agree instead of trusting this one.
+const GUARDED = ["devin", "agy", "agy-acp"];
 
 const blocked = [
 	"devin",
@@ -62,9 +62,42 @@ const blocked = [
 	"cat <<EOF | bash\nnot reached\nEOF\ndevin -p x",
 	"echo a\ndevin -p x",
 	"devin.exe -p x",
+	// Antigravity: the CLI an agent would use to do the work, and the adapter that would run it outside the
+	// queue behind a name a guard watching `agy` would not match.
+	"agy",
+	"agy -p 'fix the tests'",
+	"agy -p=",
+	"agy --input-format stream-json --output-format stream-json -p=",
+	"agy --conversation 01abc --input-format stream-json",
+	"agy --dangerously-skip-permissions -p x",
+	"agy --model gemini-3-pro -p x",
+	"agy-acp",
+	"agy-acp --model gemini-3-pro",
+	"agy-acp --allow-bypass",
+	"sudo agy -p x",
+	"bash -c 'agy -p x'",
+	"echo $(agy -p x)",
+	// A help flag does not launder an invocation of the CLI that would otherwise start work.
+	"agy --version --conversation 01abc",
+	"agy --help -p x",
+	// The listing verbs belong to one binary each: `devin models` is a usage error, not a listing.
+	"devin models",
+	"agy models delete",
 ];
 
 const allowed = [
+	"agy models",
+	"agy models --json",
+	"agy models | grep -i pro",
+	"agy --version",
+	"agy --help",
+	"agy-acp --version",
+	"agy-acp --help",
+	// `agy-acp` answers `--help`/`--version` before it serves anything (main.ts checks both before the
+	// server is built), so a selection flag alongside them still prints and exits.
+	"agy-acp --help --model gemini-3-pro",
+	"which agy",
+	"cd repo && agy models",
 	"devin models list",
 	"devin models list | grep Free",
 	"devin models list --json",
@@ -140,10 +173,28 @@ test("the guarded list is the registry's, and Claude is deliberately not on it",
 	// `claude` is the operator's own CLI: blocking it would break the host to protect a queue
 	// (see the note in drivers/devin.ts). If this assertion starts failing, that decision was changed
 	// and the note has to change with it.
-	assert.deepEqual(guardedClis(), ["devin"]);
+	assert.deepEqual(guardedClis(), ["devin", "agy", "agy-acp"]);
 	assert.strictEqual(findBlockedCliCommand("claude -p 'fix it'", guardedClis()), undefined);
 	// A second agent's CLI is guarded when its driver says so, by name and not by assumption.
 	assert.ok(findBlockedCliCommand("otheragent -p x", ["otheragent"]));
+});
+
+test("every guarded binary has a deliberate read-only surface, and this test's list is the registry's", () => {
+	// The two lists in this file are hardcoded copies of the registry's, for the sake of readable cases.
+	// This assertion is what keeps them from drifting apart silently when a driver changes.
+	assert.deepEqual(GUARDED, guardedClis());
+	for (const name of guardedClis()) {
+		// A name with no verbs is a decision (`agy-acp` has none); a name absent from the table is an
+		// oversight, and the difference is worth writing down once here rather than discovering in use.
+		const verbs = readOnlyVerbsFor(name);
+		assert.ok(
+			Object.hasOwn({ devin: 1, agy: 1, "agy-acp": 1 }, name),
+			`${name} is guarded but has no entry in READ_ONLY_VERBS - decide its read-only surface, do not inherit one`,
+		);
+		for (const verb of verbs) {
+			assert.strictEqual(findBlockedCliCommand(`${name} ${verb.join(" ")}`, [name]), undefined, `${name} ${verb.join(" ")}`);
+		}
+	}
 });
 
 test("the block reason names the binaries actually blocked", () => {
