@@ -30,3 +30,15 @@ recorded scenario, replays the recorded stdout with scaled timing, honours SIGIN
 around input: it pauses at a turn boundary until a user line arrives (a mid-turn user line is
 queued as the next turn), and a startup-failure scenario (no `init` in the record) emits its error
 `result` without any input.
+
+## Refreshing the fixtures (a new `agy` version)
+
+The fixtures are recorded artifacts of one `agy` version, and a new version refreshes them: the
+live smoke test's `--record` run (`node agy-acp/scripts/smoke-live.ts --record`, see "Recording
+fixtures" in the `agy-acp/` README) writes the run's scenarios into `stream/` under their committed
+names, leaves the other fixtures untouched, and recomputes `field-inventory.json` from the whole
+directory. Because every field in that inventory needs a typed accessor in `test/test-contract.ts`
+and every fixture replays end-to-end through the real driver in `test/test-process.ts`, a refresh
+that changed the stream contract fails the `agy-acp` suite until the contract type and its accessors
+land in the same commit — which is the point: the refresh is the drift watch's output, and the suite
+is its check.

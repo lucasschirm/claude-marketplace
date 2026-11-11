@@ -427,3 +427,98 @@ runs the unit tests under `agy-acp/test/`. The suites are mode-agnostic through 
 the built executable instead of `node <script>` (the hook as a re-exec with `--bridge-hook`, the
 hooks.json layout with the flag instead of a hook file) — that is how CI proves the single
 executable, not just the sources.
+
+## Live smoke test (opt-in, never in CI)
+
+`node agy-acp/scripts/smoke-live.ts` (from the repo root; `npm run smoke:live` from `agy-acp/`,
+`--agy <path>` for a non-PATH binary, `--record` below) runs ten fixed scenarios against the
+**real** `agy` with `gemini-3.8-flash-low`, under a hard cap of 15 model turns: simple, multi-turn
+(three turns in one process), tool allow, tool deny, plan-mode deny, `allow_always` (two identical
+commands, one ask), cancel of a running `sleep 30` via the production `cancelAgy` ladder, a simulated
+crash followed by a `--conversation` respawn, an unknown model id (agy's own refusal, before any
+turn), and a client disconnect mid-turn against the real server (`node agy-acp/src/main.ts`,
+the client's stdin closed while a tool is running).
+
+It drives the real package code, not a copy of it: the production permission gate (a real bridge
+dir, hooks.json, socket and `bridge-hook.ts`) under a driver that mirrors `AgyProcess` (the
+probe, the close-stdin/grace/SIGTERM/term/SIGKILL dispose ladder, the budgeted stderr tail) and
+additionally taps the **raw stdout lines** — the exact lines a recorded fixture is made of, which
+is what makes a `--record` refresh accurate. A recorder hook in the scratch workspace appends
+every `PreToolUse` stdin payload to a log (capped) so the report carries the hook's own input.
+
+Before it spends a model turn it checks `agy --version` (a version the fixtures were not recorded
+against is a **warning** in the report, not a refusal — the run's job is to notice the drift, and a
+refusal would notice it too late) and that `agy models` lists the model (that one *is* a refusal,
+before any turn at all). After the scenarios it confirms that no processes the run started are
+left (a pid liveness check plus a `/proc` scan for stray tool commands) and that the user
+configuration is unchanged (a sha256 of every `~/.gemini/**/settings.json` and `hooks.json`, taken
+before and after the run).
+
+A run writes `agy-acp/reports/smoke-<date>/` (a dated, append-only directory; a second run the same
+day takes `smoke-<date>-2`): `report.md` (per-scenario checks, the post-run checks, the field-inventory
+diff summary), `smoke-report.json` (the machine-readable twin), `fixtures/` (each scenario's raw
+stdout lines plus meta — source run, agy version, args, input lines, exit code/signal, stderr,
+timeline — with the scratch and home paths normalised to `<SMOKE>`/`<HOME>` the way the committed
+fixtures are), `fixtures/hook-payloads.jsonl` (the recorded hook stdin payloads),
+`field-inventory.live.json` and `field-inventory.diff.json`. The run **refuses to start when `CI`
+is set** (it spends model quota and needs a logged-in `agy`, both of which are a human's decision),
+and `test/run.sh` never names it.
+
+## Recording fixtures (`--record`)
+
+`node agy-acp/scripts/smoke-live.ts --record` writes the run's fixtures into `test/fixtures/stream/`
+under their committed names (the mapping is a table in the script: `simple` → `simple-textblock`,
+`multi-turn` → `simple-multiturn-textblocks`, `tool-allow` →
+`tool-allowed-skip-permissions`, `tool-deny` → `tool-hook-denied`, `plan-deny` →
+`plan-mode-denied`, `allow-always` → `allow-always-grant`, `cancel-sleep` → `interrupted-sigint`,
+`resume-after-restart` → `resumed-conversation`, `bad-model` → `bad-model-id` —
+`simple-textblock`, `plan-mode-denied` and `allow-always-grant` are new fixtures, since
+no committed fixture covers them) — the other committed fixtures (crash, shutdown, permission,
+bridge) are untouched — and recomputes `test/fixtures/stream/field-inventory.json` from the whole
+directory (the same file `npm run qa`'s contract tests check the types against). The run's report
+records which names were written and the inventory diff between the committed and the recomputed
+file, so a record is always diffable against what it replaced.
+
+## Drift watch
+
+The stream contract is versioned by observation, not by pinning: `TESTED_AGY_VERSIONS`
+(`src/agy/version.ts`) is the set the committed fixtures were recorded against, and the
+`checkAgyVersion` warning is the mechanism that notices a newer `agy` at launch. When an `agy`
+version ships, the procedure is:
+
+1. **Run the drift watch**: `node agy-acp/scripts/smoke-live.ts` against the new `agy`. The
+   report's `field-inventory.diff.json` (summarised in `report.md`) is the verdict: added and
+   removed paths, type changes, and added/removed string literals per event type. The inventory is
+   the shape contract (every field in it has a typed accessor in `src/agy/contract.ts`); a non-empty
+   diff is the contract moving.
+2. **Check the changelog**: `agy changelog` (or the release notes) against the known-breakage list
+   below. A change to the stream schema, the hook semantics or the permission semantics must be
+   examined even when the inventory diff is empty — the inventory sees shape, not meaning.
+3. **Land the fix**: a new field or a changed one goes into `src/agy/contract.ts` with its test in
+   the same commit (the contract test asserts the fixture's shape against the type, so the two
+   cannot drift apart), and a `--record` run updates the committed fixtures and the inventory.
+4. **Bump the tested set**: add the version to `TESTED_AGY_VERSIONS` in the same commit as the
+   contract change, so the warning stops the moment the fix lands — and append the entry to the
+   table below.
+
+Known breakage (seeded; append an entry for every drift observed, newest last):
+
+| agy | what changed | where it landed |
+| --- | --- | --- |
+| 1.4.3 | `PostToolUse` hooks no longer run after a failed tool: a `PreToolUse` denial short-circuits the hook chain, and a `PostToolUse` in the same `hooks.json` does not fire for a denied tool (the denial is final; the hook's stdin payload for a denial is the one to record). | `src/permission-gate.ts` (a denial is a denial, no second hook); the `tool-deny` fixture |
+| 1.4.6 | Subagent grants: a `PreToolUse` fired for a subagent's internal tool call now carries the **subagent's** `conversation_id` in the hook's stdin (the per-session token still serves it, so the gate serves the subagent's call under the parent's session); the grant tables are keyed per conversation, so a subagent grant no longer leaks to the parent. | `src/permission-gate.ts` (the subagent case) |
+| 1.4.7 | `lastUserInput` in the hook's stdin payload: a `PreToolUse` now also carries the text of the user prompt that led to the tool call. The gate does not use it (a decision on prompt text is a policy the client owns); it is recorded in the fixture meta so a hook author can see the turn that triggered the call. | the `hooks.json` layout is unchanged; the `tool-allow` fixture meta |
+
+## Bumping the version
+
+`agy-acp`'s version (`agy-acp/package.json`) moves on the drift-watch procedure above, in one
+commit: the contract type, the fixtures (a `--record` run), the inventory, the `TESTED_AGY_VERSIONS`
+entry and the `package.json` version together, so `git log` answers "what did 0.2.0 buy me?" in
+one diff. Semver by what the user sees: a **minor** when a new `agy` version is supported with no
+change to the ACP surface, a **patch** when nothing outside `agy-acp` moved, a **major** when the
+ACP surface (a method, an error, a capability) changes. The bot that bumps **plugin** versions
+(`.github/workflows/plugin-version-bump.yml`) is a different mechanism (it filters to `plugins/**`
+and can never bump `agy-acp`); `agy-acp`'s version is a human's, in the same PR as the change it
+names. The dated report the run that proved the new version works goes in the PR description (the
+reports directory itself is git-ignored: it is run output, and the `--record` fixtures are its
+committed form).
