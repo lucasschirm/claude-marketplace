@@ -103,10 +103,11 @@ function pidAlive(pid: number): boolean {
 }
 
 /**
- * Live pids whose cwd is inside `root` and whose cmdline carries one of `markers` - the two
- * shapes an orphan of this run takes (a tool command runs in the session's cwd, so a stray of
- * this run lives under it; a polling loop elsewhere that merely mentions the marker does not).
- * A /proc scan, and empty where /proc is not (the pid checks carry the verdict then).
+ * Live pids whose cwd is inside `root` - a stray of this run lives under its own roots (a tool
+ * command runs in the session's cwd; a leftover `agy` in the private root), and a polling loop
+ * elsewhere that merely mentions a marker does not. The cmdline marker match decides the label's
+ * detail, not the flag. A /proc scan, and empty where /proc is not (the pid checks carry the
+ * verdict then).
  */
 function strayProcesses(markers: string[], root: string): string[] {
 	if (!fs.existsSync("/proc")) return [];
@@ -192,9 +193,17 @@ function diffChecksums(before: Map<string, string>, after: Map<string, string>):
 	return out;
 }
 
-/** Scratch paths become <SMOKE>, the home becomes <HOME>, the way the recorded fixtures do. */
-function normalize(s: string, scratch: string, home: string): string {
-	return s.split(scratch).join("<SMOKE>").split(home).join("<HOME>");
+/**
+ * The run's private root and the session scratch become `<SPIKE>`, the home becomes `<HOME>`,
+ * the way the committed fixtures are written (the bridge dir lives under the private root, so
+ * both roots collapse to the same placeholder).
+ */
+function normalize(s: string, privateTmp: string, scratch: string, home: string): string {
+	let out = s;
+	if (privateTmp !== "") out = out.split(privateTmp).join("<SPIKE>");
+	if (scratch !== "") out = out.split(scratch).join("<SPIKE>");
+	if (home !== "") out = out.split(home).join("<HOME>");
+	return out;
 }
 
 // ---------------------------------------------------------------- the turn budget
@@ -282,7 +291,7 @@ function installRecorderHook(scratch: string): HookRecorder {
 }
 
 /** The recorded hook payloads, normalised the way the fixtures do. */
-function readHookPayloads(recorder: HookRecorder, scratch: string, home: string): string[] {
+function readHookPayloads(recorder: HookRecorder, privateTmp: string, scratch: string, home: string): string[] {
 	let raw = "";
 	try {
 		raw = fs.readFileSync(recorder.payloadFile, "utf8");
@@ -292,7 +301,7 @@ function readHookPayloads(recorder: HookRecorder, scratch: string, home: string)
 	return raw
 		.split("\n")
 		.filter((l) => l.trim() !== "")
-		.map((l) => normalize(l, scratch, home));
+		.map((l) => normalize(l, privateTmp, scratch, home));
 }
 
 // ---------------------------------------------------------------- the driver
@@ -715,6 +724,9 @@ class SmokeSession {
 	readonly processes: SmokeAgy[] = [];
 	readonly asks: RecordedAsk[] = [];
 	readonly updates: AcpSessionUpdate[] = [];
+	/** The gate's own log lines (the authoritative record of its denials - agy's surfacing of the
+	 * reason to the model is agy's business, the gate's decision is not). */
+	readonly gateLogLines: string[] = [];
 	readonly toolSteps: ToolStep[] = [];
 	driver: SmokeAgy | null = null;
 	conversationId = "";
@@ -740,8 +752,12 @@ class SmokeSession {
 		this.budget = options.budget;
 		this.decide = options.decide;
 		this.token = newPermissionToken();
+		const gateLog = (line: string): void => {
+			this.gateLogLines.push(line);
+			options.log(line);
+		};
 		this.gate = new PermissionGate({
-			log: options.log,
+			log: gateLog,
 			notify: (update) => this.updates.push(update),
 			request: (_method, params, _timeoutMs) => this.onAsk(params),
 			cwd: options.cwd,
@@ -753,6 +769,9 @@ class SmokeSession {
 			currentTurn: () => this.currentTurn,
 			turnCount: () => this.turnCount,
 		});
+		// the production session's own wiring (session.ts): a non-default mode is set on the gate
+		// before the first turn - without this the plan-deny scenario would ask instead of denying
+		if (this.mode !== "default") this.gate.setMode(this.mode);
 	}
 
 	async start(): Promise<void> {
@@ -1287,19 +1306,54 @@ function mergeOneFile(inv: Inventory, file: string): void {
 	}
 }
 
-/** Sorted, deduplicated and canonical (a single type marker stays a bare string, as committed). */
+/**
+ * Canonical, in the committed files' written form: events, paths and markers in first-seen order
+ * (the committed files are not sorted), deduplicated; a lone "array" marker stays a bare string
+ * (the committed scheme's one bare string); a "string" type marker the literals already imply is
+ * dropped (the committed scheme's curation); every other marker is an array element.
+ */
 function stabiliseInventory(inv: Inventory): Inventory {
 	const out: Inventory = {};
-	for (const event of Object.keys(inv).sort()) {
+	for (const event of Object.keys(inv)) {
 		const table: Record<string, InventoryEntry> = {};
 		const source = inv[event] ?? {};
-		for (const p of Object.keys(source).sort()) {
+		for (const p of Object.keys(source)) {
 			const v = source[p];
-			table[p] = v !== undefined ? (Array.isArray(v) ? [...new Set(v)].sort() : v) : "string";
+			if (v === undefined) {
+				table[p] = "string";
+				continue;
+			}
+			let markers = [...new Set(Array.isArray(v) ? v : [v])];
+			if (markers.includes("string") && markers.some((m) => m.startsWith("string:"))) {
+				markers = markers.filter((m) => m !== "string");
+			}
+			table[p] = markers.length === 1 && markers[0] === "array" ? "array" : markers;
 		}
 		out[event] = table;
 	}
 	return out;
+}
+
+/**
+ * The committed files' written form, which is also their biome-stable form (biome inlines an
+ * array that fits the 140-column line and expands it when it does not; tab width is one
+ * column): tab indent, objects open on their key's line.
+ */
+function serialiseCommittedForm(value: unknown, indent: number): string {
+	const pad = "\t".repeat(indent);
+	const inner = "\t".repeat(indent + 1);
+	if (Array.isArray(value)) {
+		if (value.length === 0) return "[]";
+		const inline = `[${value.map((v) => serialiseCommittedForm(v, indent + 1)).join(", ")}]`;
+		if (pad.length + inline.length <= 140) return inline;
+		return `[\n${value.map((v) => `${inner}${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}]`;
+	}
+	if (typeof value === "object" && value !== null) {
+		const entries = Object.entries(value as Record<string, unknown>);
+		if (entries.length === 0) return "{}";
+		return `{\n${entries.map(([k, v]) => `${inner}"${k}": ${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}}`;
+	}
+	return JSON.stringify(value);
 }
 
 interface NormalisedPath {
@@ -1406,9 +1460,9 @@ interface FixtureMeta {
 }
 
 /** The meta the committed fixtures carry, for one recorded process (paths normalised). */
-function buildMeta(driver: SmokeAgy, sourceRun: string, version: string, scratch: string, home: string): FixtureMeta {
+function buildMeta(driver: SmokeAgy, sourceRun: string, version: string, privateTmp: string, scratch: string, home: string): FixtureMeta {
 	const info = driver.exitInfo ?? { code: null, signal: null, stderrTail: "" };
-	const timeline = driver.timeline.map((e) => `${(e.atMs / 1000).toFixed(2)} ${e.text}`);
+	const timeline = driver.timeline.map((e) => normalize(`${(e.atMs / 1000).toFixed(2)} ${e.text}`, privateTmp, scratch, home));
 	const argsLine = `agy ${driver.argv.length > 0 ? driver.argv.join(" ") : ""}`;
 	return {
 		sourceRun,
@@ -1416,11 +1470,11 @@ function buildMeta(driver: SmokeAgy, sourceRun: string, version: string, scratch
 		// fake-agy's checkRecordedArgs drops the leading "agy" token; driverOptsFor skips it
 		// (and the unhandled --input-format/--output-format), so the recorded line must lead with
 		// exactly that token for the two to see the same argv.
-		args: normalize(argsLine, scratch, home),
-		inputLines: driver.inputLines.map((l) => normalize(l, scratch, home)),
+		args: normalize(argsLine, privateTmp, scratch, home),
+		inputLines: driver.inputLines.map((l) => normalize(l, privateTmp, scratch, home)),
 		exitCode: String(info.code),
 		signal: String(info.signal),
-		stderr: normalize(info.stderrTail, scratch, home),
+		stderr: normalize(info.stderrTail, privateTmp, scratch, home),
 		timeline,
 	};
 }
@@ -1433,10 +1487,20 @@ interface RecordedFixture {
 	driver: SmokeAgy;
 }
 
-function writeFixtureFile(dir: string, name: string, driver: SmokeAgy, meta: FixtureMeta): void {
+function writeFixtureFile(
+	dir: string,
+	name: string,
+	driver: SmokeAgy,
+	meta: FixtureMeta,
+	privateTmp: string,
+	scratch: string,
+	home: string,
+): void {
 	fs.mkdirSync(dir, { recursive: true });
-	fs.writeFileSync(path.join(dir, `${name}.stdout.ndjson`), driver.rawLines.join("\n") + (driver.rawLines.length > 0 ? "\n" : ""));
-	fs.writeFileSync(path.join(dir, `${name}.meta.json`), `${JSON.stringify(meta, null, "    ")}\n`);
+	const lines = driver.rawLines.map((l) => normalize(l, privateTmp, scratch, home));
+	fs.writeFileSync(path.join(dir, `${name}.stdout.ndjson`), lines.join("\n") + (lines.length > 0 ? "\n" : ""));
+	// the committed fixtures' written form (tab indent, arrays inline when they fit)
+	fs.writeFileSync(path.join(dir, `${name}.meta.json`), `${serialiseCommittedForm(meta, 0)}\n`);
 }
 
 /** The --record name mapping: the live scenario -> the committed fixture it refreshes
@@ -1466,6 +1530,7 @@ function readInventoryFile(): Inventory {
 function recordFixtures(
 	fixtures: RecordedFixture[],
 	version: string,
+	privateTmp: string,
 	scratch: string,
 	home: string,
 ): { diff: InventoryDiff; written: string[] } {
@@ -1474,8 +1539,8 @@ function recordFixtures(
 	for (const f of fixtures) {
 		const name = RECORD_NAME_MAP[f.fixtureName];
 		if (!name) continue;
-		const meta = buildMeta(f.driver, `smoke-${f.fixtureName}`, version, scratch, home);
-		writeFixtureFile(FIXTURES_DIR, name, f.driver, meta);
+		const meta = buildMeta(f.driver, `smoke-${f.fixtureName}`, version, privateTmp, scratch, home);
+		writeFixtureFile(FIXTURES_DIR, name, f.driver, meta, privateTmp, scratch, home);
 		written.push(name);
 	}
 	const allFiles = fs
@@ -1484,8 +1549,69 @@ function recordFixtures(
 		.map((f) => path.join(FIXTURES_DIR, f))
 		.sort();
 	const after = unionInventories(allFiles);
-	fs.writeFileSync(path.join(FIXTURES_DIR, "field-inventory.json"), `${JSON.stringify(after, null, "    ")}\n`);
+	// tab-indented, the committed file's written form
+	// the committed file's written form (tab indent, inline-when-it-fits arrays)
+	fs.writeFileSync(path.join(FIXTURES_DIR, "field-inventory.json"), `${serialiseCommittedForm(after, 0)}\n`);
 	return { diff: diffInventory(committedBefore, after), written };
+}
+
+function badModelResultError(driver: SmokeAgy): boolean {
+	return driver.events.some((e) => e.event === "result" && (e as AgyResultEvent).result.status === "ERROR");
+}
+
+function badModelDriverGone(driver: SmokeAgy | undefined): boolean {
+	return driver?.exited === true;
+}
+
+/** The committed fixture's shape: the prompt goes in before the failure is known, the probe's
+ * error is captured (not fatal), and a still-live child is given a beat for its result event.
+ * Returns the probe's error (if the launch refused) and the child (for the checks and the
+ * fixture). */
+async function badModelProbe(session: SmokeSession): Promise<{ probeError: string | null; driver: SmokeAgy | undefined }> {
+	const startP = session.start();
+	await sleep(200);
+	const earlyDriver = session.processes[0];
+	if (earlyDriver !== undefined && !earlyDriver.exited) {
+		try {
+			earlyDriver.send(PROMPT_PONG);
+		} catch {
+			// the child is already gone: the fixture records what it got
+		}
+	}
+	let probeError: string | null = null;
+	try {
+		await startP;
+	} catch (err) {
+		probeError = (err as Error).message;
+	}
+	const driver = session.processes[0];
+	if (driver !== undefined && !driver.exited) {
+		await sleep(3_000); // give the (committed fixture's) result event a beat to arrive
+		await driver.dispose();
+	}
+	return { probeError, driver };
+}
+
+/** The --record step: a fully green run only - a failed run refuses, so the committed set keeps
+ * the last good run. */
+function runRecordStep(
+	record: boolean,
+	allOk: boolean,
+	fixtures: RecordedFixture[],
+	version: string,
+	privateTmp: string,
+	scratch: string,
+	home: string,
+): { diff: InventoryDiff; written: string[] } | null {
+	if (!record) return null;
+	if (!allOk) {
+		say("\n[--record] refusing to record a failed run: the committed fixtures keep the last green run");
+		return null;
+	}
+	say("\n[--record] writing the live fixtures into test/fixtures/stream/");
+	const result = recordFixtures(fixtures, version, privateTmp, scratch, home);
+	say(`  written: ${result.written.join(", ") || "(nothing mapped)"}`);
+	return result;
 }
 
 // ---------------------------------------------------------------- scenario results
@@ -1560,6 +1686,27 @@ function parseOneArg(i: number, argv: string[], state: ArgState): { code: number
 	return { code: 2, message: `unknown argument: ${a}` };
 }
 
+/**
+ * A scenario body's session must be disposed even when the body throws: the child is a real
+ * `agy` (launched with --dangerously-skip-permissions), and a live child's stdio keeps the
+ * event loop alive, so an undisposed session would wedge the run after the FAIL is printed.
+ * Idempotent (the gate's dispose is flag-guarded, the driver's memoised), so the bodies' own
+ * dispose calls stay.
+ */
+function withDispose<T>(session: SmokeSession, fn: () => Promise<T>): Promise<T> {
+	return (async () => {
+		try {
+			return await fn();
+		} finally {
+			try {
+				await session.dispose();
+			} catch {
+				// best effort: the post-run process check is the backstop
+			}
+		}
+	})();
+}
+
 interface Preflight {
 	status: Awaited<ReturnType<typeof checkAgyVersion>>;
 	modelNote: string;
@@ -1583,6 +1730,15 @@ async function preflight(agyBin: string): Promise<Preflight | string> {
 	} catch (err) {
 		return `refusing before any turn: agy models failed: ${(err as Error).message}`;
 	}
+}
+
+/** The dated, append-only report directory (a second run the same day takes -2, -3, …). */
+function allocateReportDir(date: string): string {
+	let reportDir = path.join(REPO_DIR, "reports", `smoke-${date}`);
+	for (let n = 2; fs.existsSync(reportDir); n++) {
+		reportDir = path.join(REPO_DIR, "reports", `smoke-${date}-${n}`);
+	}
+	return reportDir;
 }
 
 async function main(): Promise<number> {
@@ -1612,17 +1768,25 @@ async function main(): Promise<number> {
 	await fs.promises.chmod(scratch, 0o700);
 	const home = os.homedir();
 
-	// Preflight, before any model turn (see above): the version warning is not a refusal.
-	const pre = await preflight(agyBin);
+	// Preflight, before any model turn (see above): the version warning is not a refusal. The
+	// before-checksum goes first: the preflight's `agy --version`/`agy models` are agy too, and
+	// their config writes must fall inside the before/after window.
+	const configBefore = configChecksums();
+	let pre: Preflight | string;
+	try {
+		pre = await preflight(agyBin);
+	} catch (err) {
+		pre = `refusing before any turn: preflight failed: ${(err as Error).message}`;
+	}
 	if (typeof pre === "string") {
 		say(pre);
 		await fs.promises.rm(privateTmp, { recursive: true, force: true });
+		await fs.promises.rm(scratch, { recursive: true, force: true });
 		return 2;
 	}
 	const { status: versionStatus, modelNote } = pre;
 
 	const recorder = installRecorderHook(scratch);
-	const configBefore = configChecksums();
 	const budget = new TurnBudget();
 	const log = (line: string): void => say(`  ${line}`);
 	const logFile = path.join(privateTmp, "smoke-live.log");
@@ -1692,17 +1856,18 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		trackedPids.push(session.driver?.pid ?? -1);
-		const pong = await session.turn(PROMPT_PONG);
-		await session.dispose();
-		const c: Check[] = [
-			{ passed: pong.result.status === "SUCCESS", label: `turn SUCCESS (got ${pong.result.status})` },
-			{ passed: /PONG/i.test(pong.result.response), label: "response contains PONG" },
-			{ passed: session.asks.length === 0, label: `no permission asks (got ${session.asks.length})` },
-		];
-		pushFixture("simple", "simple", session.processes[0]);
-		return { ok: c.every((x) => x.passed), detail: "one turn; PONG", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			trackedPids.push(session.driver?.pid ?? -1);
+			const pong = await session.turn(PROMPT_PONG);
+			const c: Check[] = [
+				{ passed: pong.result.status === "SUCCESS", label: `turn SUCCESS (got ${pong.result.status})` },
+				{ passed: /PONG/i.test(pong.result.response), label: "response contains PONG" },
+				{ passed: session.asks.length === 0, label: `no permission asks (got ${session.asks.length})` },
+			];
+			pushFixture("simple", "simple", session.processes[0]);
+			return { ok: c.every((x) => x.passed), detail: "one turn; PONG", checks: c };
+		});
 	});
 
 	// 2: multi-turn - three turns in one process (the committed fixture's own shape).
@@ -1717,23 +1882,24 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		trackedPids.push(session.driver?.pid ?? -1);
-		const pong = await session.turn(PROMPT_PONG);
-		await session.turn(PROMPT_REMEMBER_ZEBRA);
-		const recall = await session.turn(PROMPT_RECALL_ZEBRA);
-		await session.dispose();
-		const c: Check[] = [
-			{ passed: pong.result.status === "SUCCESS", label: `first turn SUCCESS (got ${pong.result.status})` },
-			{ passed: /PONG/i.test(pong.result.response), label: "first response contains PONG" },
-			{
-				passed: /ZEBRA/i.test(recall.result.response),
-				label: `recall contains ZEBRA (got ${JSON.stringify(recall.result.response.slice(0, 80))})`,
-			},
-			{ passed: session.asks.length === 0, label: `no permission asks (got ${session.asks.length})` },
-		];
-		pushFixture("multi-turn", "multi-turn", session.processes[0]);
-		return { ok: c.every((x) => x.passed), detail: "three turns in one process; PONG + ZEBRA recall", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			trackedPids.push(session.driver?.pid ?? -1);
+			const pong = await session.turn(PROMPT_PONG);
+			await session.turn(PROMPT_REMEMBER_ZEBRA);
+			const recall = await session.turn(PROMPT_RECALL_ZEBRA);
+			const c: Check[] = [
+				{ passed: pong.result.status === "SUCCESS", label: `first turn SUCCESS (got ${pong.result.status})` },
+				{ passed: /PONG/i.test(pong.result.response), label: "first response contains PONG" },
+				{
+					passed: /ZEBRA/i.test(recall.result.response),
+					label: `recall contains ZEBRA (got ${JSON.stringify(recall.result.response.slice(0, 80))})`,
+				},
+				{ passed: session.asks.length === 0, label: `no permission asks (got ${session.asks.length})` },
+			];
+			pushFixture("multi-turn", "multi-turn", session.processes[0]);
+			return { ok: c.every((x) => x.passed), detail: "three turns in one process; PONG + ZEBRA recall", checks: c };
+		});
 	});
 
 	// 3: tool allow - one ask, allow_once, the command ran.
@@ -1748,33 +1914,34 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		trackedPids.push(session.driver?.pid ?? -1);
-		const r = await session.turn(PROMPT_TOOL_ALLOW);
-		await session.dispose();
-		const fileExists = fs.existsSync(path.join(scratch, "smoke-tool-allow.txt"));
-		const toolRan = session.toolSteps.some((t) => t.name === "run_command" && t.state === "DONE");
-		const c: Check[] = [
-			{ passed: r.result.status === "SUCCESS", label: `turn SUCCESS (got ${r.result.status})` },
-			{
-				passed: session.asks.length === 1 && expectAskFor(session, "smoke-tool-allow"),
-				label: `one ask for the command (got ${session.asks.length})`,
-			},
-			{ passed: toolRan, label: "run_command step DONE" },
-			// the 1.4.2 contract was "the file lands in the session cwd"; agy 1.5.5 runs tool
-			// commands in its own project/sandbox directory (observed drift: the file is not
-			// visible there at all), so the executable check is that the command ran and exited 0
-			{
-				passed: fileExists || toolRan,
-				label: fileExists
-					? "smoke-tool-allow.txt exists in the session cwd (the 1.4.2 layout)"
-					: toolRan
-						? "the command ran (agy 1.5.5: tool commands run in agy's own project dir; the file is not visible in the session cwd)"
-						: "the command did not run (no file, no completed tool step)",
-			},
-		];
-		pushFixture("tool-allow", "tool-allow", session.processes[0]);
-		return { ok: c.every((x) => x.passed), detail: "allow_once let the command run", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			trackedPids.push(session.driver?.pid ?? -1);
+			const r = await session.turn(PROMPT_TOOL_ALLOW);
+			const fileExists = fs.existsSync(path.join(scratch, "smoke-tool-allow.txt"));
+			const toolRan = session.toolSteps.some((t) => t.name === "run_command" && t.state === "DONE");
+			const c: Check[] = [
+				{ passed: r.result.status === "SUCCESS", label: `turn SUCCESS (got ${r.result.status})` },
+				{
+					passed: session.asks.length === 1 && expectAskFor(session, "smoke-tool-allow"),
+					label: `one ask for the command (got ${session.asks.length})`,
+				},
+				{ passed: toolRan, label: "run_command step DONE" },
+				// the 1.4.2 contract was "the file lands in the session cwd"; agy 1.5.5 runs tool
+				// commands in its own project/sandbox directory (observed drift: the file is not
+				// visible there at all), so the executable check is that the command ran and exited 0
+				{
+					passed: fileExists || toolRan,
+					label: fileExists
+						? "smoke-tool-allow.txt exists in the session cwd (the 1.4.2 layout)"
+						: toolRan
+							? "the command ran (agy 1.5.5: tool commands run in agy's own project dir; the file is not visible in the session cwd)"
+							: "the command did not run (no file, no completed tool step)",
+				},
+			];
+			pushFixture("tool-allow", "tool-allow", session.processes[0]);
+			return { ok: c.every((x) => x.passed), detail: "allow_once let the command run", checks: c };
+		});
 	});
 
 	// 4: tool deny - one ask, reject_once, the command did not run.
@@ -1789,27 +1956,28 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		trackedPids.push(session.driver?.pid ?? -1);
-		const r = await session.turn(PROMPT_TOOL_DENY);
-		await session.dispose();
-		const fileAbsent = !fs.existsSync(path.join(scratch, "smoke-tool-deny.txt"));
-		const denied =
-			/denied by agy-acp/i.test(r.result.response) ||
-			session.toolSteps.some((t) => t.errorMessage !== undefined && /denied by agy-acp/i.test(t.errorMessage));
-		const toolErrored = session.toolSteps.some((t) => t.name === "run_command" && t.state === "ERROR");
-		const c: Check[] = [
-			{ passed: r.result.status === "SUCCESS", label: `turn settled (agy reports ${r.result.status})` },
-			{
-				passed: session.asks.length === 1 && expectAskFor(session, "smoke-tool-deny"),
-				label: `one ask for the command (got ${session.asks.length})`,
-			},
-			{ passed: denied, label: "the denial wording reached the model" },
-			{ passed: toolErrored, label: "run_command step ERROR" },
-			{ passed: fileAbsent, label: "smoke-tool-deny.txt absent" },
-		];
-		pushFixture("tool-deny", "tool-deny", session.processes[0]);
-		return { ok: c.every((x) => x.passed), detail: "reject_once: the command never ran", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			trackedPids.push(session.driver?.pid ?? -1);
+			const r = await session.turn(PROMPT_TOOL_DENY);
+			const fileAbsent = !fs.existsSync(path.join(scratch, "smoke-tool-deny.txt"));
+			const denied =
+				/denied by agy-acp/i.test(r.result.response) ||
+				session.toolSteps.some((t) => t.errorMessage !== undefined && /denied by agy-acp/i.test(t.errorMessage));
+			const toolErrored = session.toolSteps.some((t) => t.name === "run_command" && t.state === "ERROR");
+			const c: Check[] = [
+				{ passed: r.result.status === "SUCCESS", label: `turn settled (agy reports ${r.result.status})` },
+				{
+					passed: session.asks.length === 1 && expectAskFor(session, "smoke-tool-deny"),
+					label: `one ask for the command (got ${session.asks.length})`,
+				},
+				{ passed: denied, label: "the denial wording reached the model" },
+				{ passed: toolErrored, label: "run_command step ERROR" },
+				{ passed: fileAbsent, label: "smoke-tool-deny.txt absent" },
+			];
+			pushFixture("tool-deny", "tool-deny", session.processes[0]);
+			return { ok: c.every((x) => x.passed), detail: "reject_once: the command never ran", checks: c };
+		});
 	});
 
 	// 5: plan deny - the gate denies locally (no ask), the child runs with --mode plan.
@@ -1824,25 +1992,28 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		trackedPids.push(session.driver?.pid ?? -1);
-		const r = await session.turn(PROMPT_PLAN_DENY);
-		await session.dispose();
-		const fileAbsent = !fs.existsSync(path.join(scratch, "smoke-plan-deny.txt"));
-		const planReason =
-			/plan mode is read-only/i.test(r.result.response) ||
-			session.toolSteps.some((t) => t.errorMessage !== undefined && /denied by agy-acp/i.test(t.errorMessage));
-		const stateChangingRan = session.toolSteps.some((t) => (t.name === "write_file" || t.name === "run_command") && t.state === "DONE");
-		const c: Check[] = [
-			// plan mode denies state-changing tools ("plan mode is read-only"); reads fall
-			// through to the ask policy by design, so the contract is that nothing
-			// state-changing runs - not that the turn is ask-free
-			{ passed: !stateChangingRan, label: "no state-changing tool completed in plan mode" },
-			{ passed: planReason, label: "the plan-mode denial reason is in the turn" },
-			{ passed: fileAbsent, label: "smoke-plan-deny.txt absent" },
-		];
-		pushFixture("plan-deny", "plan-deny", session.processes[0]);
-		return { ok: c.every((x) => x.passed), detail: "plan mode blocked the state-changing tool", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			trackedPids.push(session.driver?.pid ?? -1);
+			const r = await session.turn(PROMPT_PLAN_DENY);
+			const fileAbsent = !fs.existsSync(path.join(scratch, "smoke-plan-deny.txt"));
+			const gateDeniedPlan = session.gateLogLines.some((l) => /denied by policy/i.test(l) && /plan mode is read-only/i.test(l));
+			const planReason =
+				gateDeniedPlan ||
+				/plan mode is read-only/i.test(r.result.response) ||
+				session.toolSteps.some((t) => t.errorMessage !== undefined && /denied by agy-acp/i.test(t.errorMessage));
+			const stateChangingRan = session.toolSteps.some((t) => (t.name === "write_file" || t.name === "run_command") && t.state === "DONE");
+			const c: Check[] = [
+				// plan mode denies state-changing tools ("plan mode is read-only"); reads fall
+				// through to the ask policy by design, so the contract is that nothing
+				// state-changing runs - not that the turn is ask-free
+				{ passed: !stateChangingRan, label: "no state-changing tool completed in plan mode" },
+				{ passed: planReason, label: "the plan-mode denial is proven (the gate's policy log or the turn's text)" },
+				{ passed: fileAbsent, label: "smoke-plan-deny.txt absent" },
+			];
+			pushFixture("plan-deny", "plan-deny", session.processes[0]);
+			return { ok: c.every((x) => x.passed), detail: "plan mode blocked the state-changing tool", checks: c };
+		});
 	});
 
 	// 6: allow-always - the first ask grants, the second identical command does not ask.
@@ -1857,26 +2028,27 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		trackedPids.push(session.driver?.pid ?? -1);
-		const first = await session.turn(PROMPT_ALLOW_ALWAYS);
-		const asksAfterFirst = session.asks.length;
-		const second = await session.turn(PROMPT_ALLOW_ALWAYS);
-		await session.dispose();
-		const secondAsked = session.asks.length > asksAfterFirst;
-		const c: Check[] = [
-			{ passed: asksAfterFirst === 1, label: `the first turn asked once (got ${asksAfterFirst})` },
-			{ passed: !secondAsked, label: "the second identical command did not ask" },
-			{ passed: first.result.status === "SUCCESS" && second.result.status === "SUCCESS", label: "both turns SUCCESS" },
-			{
-				passed:
-					/SMOKE_ALLOW_ALWAYS/.test(second.result.response) ||
-					session.toolSteps.some((t) => t.output !== undefined && /SMOKE_ALLOW_ALWAYS/.test(t.output)),
-				label: "the second run's output is in the turn",
-			},
-		];
-		pushFixture("allow-always", "allow-always", session.processes[0]);
-		return { ok: c.every((x) => x.passed), detail: "allow_always held for the second identical call", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			trackedPids.push(session.driver?.pid ?? -1);
+			const first = await session.turn(PROMPT_ALLOW_ALWAYS);
+			const asksAfterFirst = session.asks.length;
+			const second = await session.turn(PROMPT_ALLOW_ALWAYS);
+			const secondAsked = session.asks.length > asksAfterFirst;
+			const c: Check[] = [
+				{ passed: asksAfterFirst === 1, label: `the first turn asked once (got ${asksAfterFirst})` },
+				{ passed: !secondAsked, label: "the second identical command did not ask" },
+				{ passed: first.result.status === "SUCCESS" && second.result.status === "SUCCESS", label: "both turns SUCCESS" },
+				{
+					passed:
+						/SMOKE_ALLOW_ALWAYS/.test(second.result.response) ||
+						session.toolSteps.some((t) => t.output !== undefined && /SMOKE_ALLOW_ALWAYS/.test(t.output)),
+					label: "the second run's output is in the turn",
+				},
+			];
+			pushFixture("allow-always", "allow-always", session.processes[0]);
+			return { ok: c.every((x) => x.passed), detail: "allow_always held for the second identical call", checks: c };
+		});
 	});
 
 	// 7: cancel sleep - the production cancel ladder, the tool command must die with the group.
@@ -1891,39 +2063,40 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		const driver = session.driver;
-		if (driver === null) {
-			throw new Error("no driver after start");
-		}
-		trackedPids.push(driver.pid ?? -1);
-		// the turn is live by hand (it is settled by the cancel, not by a result): the budget and
-		// the gate's "no turn in flight" check both need it
-		budget.charge();
-		session.turnCount += 1;
-		session.currentTurn = new Promise<never>(() => {});
-		driver.send(PROMPT_SLEEP);
-		// wait for the tool to be ACTIVE (the ask was answered, the command is running)
-		let toolActive = false;
-		for (let i = 0; i < 120 && !driver.exited; i++) {
-			if (session.toolSteps.some((t) => t.name === "run_command" && t.state === "ACTIVE")) {
-				toolActive = true;
-				break;
+		return withDispose(session, async () => {
+			await session.start();
+			const driver = session.driver;
+			if (driver === null) {
+				throw new Error("no driver after start");
 			}
-			await sleep(1_000);
-		}
-		await session.cancel();
-		// the cancel ladder sweeps the group on its own escalate window; give it the room and then
-		// poll - the child may be gone while its tool command still has to die
-		const leftover = await waitNoStrays([SLEEP_MARKER], scratch, 15_000);
-		const c: Check[] = [
-			{ passed: toolActive, label: "the sleep command was running (ACTIVE) before the cancel" },
-			{ passed: driver.exited, label: "agy exited on the cancel ladder" },
-			{ passed: leftover.length === 0, label: `no leftover sleep process (${leftover.join(", ") || "none"})` },
-		];
-		await session.dispose();
-		pushFixture("cancel-sleep", "cancel-sleep", driver);
-		return { ok: c.every((x) => x.passed), detail: "cancel: the turn settled, the group is empty", checks: c };
+			trackedPids.push(driver.pid ?? -1);
+			// the turn is live by hand (it is settled by the cancel, not by a result): the budget and
+			// the gate's "no turn in flight" check both need it
+			budget.charge();
+			session.turnCount += 1;
+			session.currentTurn = new Promise<never>(() => {});
+			driver.send(PROMPT_SLEEP);
+			// wait for the tool to be ACTIVE (the ask was answered, the command is running)
+			let toolActive = false;
+			for (let i = 0; i < 120 && !driver.exited; i++) {
+				if (session.toolSteps.some((t) => t.name === "run_command" && t.state === "ACTIVE")) {
+					toolActive = true;
+					break;
+				}
+				await sleep(1_000);
+			}
+			await session.cancel();
+			// the cancel ladder sweeps the group on its own escalate window; give it the room and then
+			// poll - the child may be gone while its tool command still has to die
+			const leftover = await waitNoStrays([SLEEP_MARKER], scratch, 15_000);
+			const c: Check[] = [
+				{ passed: toolActive, label: "the sleep command was running (ACTIVE) before the cancel" },
+				{ passed: driver.exited, label: "agy exited on the cancel ladder" },
+				{ passed: leftover.length === 0, label: `no leftover sleep process (${leftover.join(", ") || "none"})` },
+			];
+			pushFixture("cancel-sleep", "cancel-sleep", driver);
+			return { ok: c.every((x) => x.passed), detail: "cancel: the turn settled, the group is empty", checks: c };
+		});
 	});
 
 	// 8: resume after restart - the child crashes between turns; the next prompt respawns with
@@ -1939,33 +2112,37 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		await session.start();
-		const first = session.driver;
-		trackedPids.push(first?.pid ?? -1);
-		await session.turn(PROMPT_REMEMBER_BANANA);
-		session.killChild(); // the simulated crash
-		await sleep(2_000); // let the exit settle
-		let respawned: AgyResultEvent;
-		try {
-			respawned = await session.turn(PROMPT_RECALL_BANANA);
-		} catch (err) {
-			throw new Error(`the respawn turn failed: ${(err as Error).message}`);
-		}
-		await session.dispose();
-		const respawnedProcess = session.processes[session.processes.length - 1];
-		const c: Check[] = [
-			{
-				passed: /BANANA/i.test(respawned.result.response),
-				label: `the resumed conversation remembers BANANA (got ${JSON.stringify(respawned.result.response.slice(0, 80))})`,
-			},
-			{ passed: session.processes.length >= 2, label: `a second process resumed the conversation (${session.processes.length} processes)` },
-			{
-				passed: respawnedProcess?.argv.includes("--conversation") ?? false,
-				label: "the respawn used --conversation",
-			},
-		];
-		pushFixture("resume-after-restart", "resume-after-restart", respawnedProcess);
-		return { ok: c.every((x) => x.passed), detail: "crashed child; the next prompt resumed the conversation", checks: c };
+		return withDispose(session, async () => {
+			await session.start();
+			const first = session.driver;
+			trackedPids.push(first?.pid ?? -1);
+			await session.turn(PROMPT_REMEMBER_BANANA);
+			session.killChild(); // the simulated crash
+			await sleep(2_000); // let the exit settle
+			let respawned: AgyResultEvent;
+			try {
+				respawned = await session.turn(PROMPT_RECALL_BANANA);
+			} catch (err) {
+				throw new Error(`the respawn turn failed: ${(err as Error).message}`);
+			}
+			const respawnedProcess = session.processes[session.processes.length - 1];
+			const c: Check[] = [
+				{
+					passed: /BANANA/i.test(respawned.result.response),
+					label: `the resumed conversation remembers BANANA (got ${JSON.stringify(respawned.result.response.slice(0, 80))})`,
+				},
+				{
+					passed: session.processes.length >= 2,
+					label: `a second process resumed the conversation (${session.processes.length} processes)`,
+				},
+				{
+					passed: respawnedProcess?.argv.includes("--conversation") ?? false,
+					label: "the respawn used --conversation",
+				},
+			];
+			pushFixture("resume-after-restart", "resume-after-restart", respawnedProcess);
+			return { ok: c.every((x) => x.passed), detail: "crashed child; the next prompt resumed the conversation", checks: c };
+		});
 	});
 
 	// 9: bad model - agy refuses the launch (no init; the committed fixture's own error, recorded).
@@ -1980,42 +2157,19 @@ async function main(): Promise<number> {
 			log: bothLog,
 			budget,
 		});
-		// the committed fixture's shape: the prompt goes in before the failure is known
-		const startP = session.start();
-		await sleep(200);
-		const earlyDriver = session.processes[0];
-		if (earlyDriver !== undefined && !earlyDriver.exited) {
-			try {
-				earlyDriver.send(PROMPT_PONG);
-			} catch {
-				// the child is already gone: the fixture records what it got
-			}
-		}
-		let probeError: string | null = null;
-		try {
-			await startP;
-		} catch (err) {
-			probeError = (err as Error).message;
-		}
-		const driver = session.processes[0];
-		if (driver !== undefined && !driver.exited) {
-			await sleep(3_000); // give the (committed fixture's) result event a beat to arrive
-			await driver.dispose();
-		}
-		const badModelRefused =
-			probeError !== null ||
-			(driver !== undefined &&
-				(driver.events.some((e) => e.event === "result" && (e as AgyResultEvent).result.status === "ERROR") || driver.exited));
-		const stderrSays = driver !== undefined && /invalid model selection|not recognized/i.test(driver.stderrTail);
-		const noInit = driver === undefined || !driver.events.some((e) => e.event === "init");
-		const c: Check[] = [
-			{ passed: badModelRefused, label: `the launch failed (probe: ${probeError ?? "the child exited without init"})` },
-			{ passed: noInit, label: "no init event" },
-			{ passed: stderrSays, label: "stderr names the invalid model" },
-		];
-		await session.dispose();
-		pushFixture("bad-model", "bad-model", driver);
-		return { ok: c.every((x) => x.passed), detail: "agy refused the unknown model before any turn", checks: c };
+		return withDispose(session, async () => {
+			const { probeError, driver } = await badModelProbe(session);
+			const badModelRefused = probeError !== null || (driver !== undefined && (badModelResultError(driver) || badModelDriverGone(driver)));
+			const stderrSays = driver !== undefined && /invalid model selection|not recognized/i.test(driver.stderrTail);
+			const noInit = driver === undefined || !driver.events.some((e) => e.event === "init");
+			const c: Check[] = [
+				{ passed: badModelRefused, label: `the launch failed (probe: ${probeError ?? "the child exited without init"})` },
+				{ passed: noInit, label: "no init event" },
+				{ passed: stderrSays, label: "stderr names the invalid model" },
+			];
+			pushFixture("bad-model", "bad-model", driver);
+			return { ok: c.every((x) => x.passed), detail: "agy refused the unknown model before any turn", checks: c };
+		});
 	});
 
 	// 10: client disconnect - the real server, a real JSON-RPC connection, the client's stdin
@@ -2023,7 +2177,14 @@ async function main(): Promise<number> {
 	await runScenario("client-disconnect", async () => {
 		const server = spawn(process.execPath, [MAIN_TS, "--model", MODEL], {
 			cwd: REPO_DIR,
-			env: { ...process.env, AGY_ACP_LOG: path.join(privateTmp, "smoke-server.log") },
+			env: {
+				...process.env,
+				AGY_ACP_LOG: path.join(privateTmp, "smoke-server.log"),
+				// the server's session store must not write into the user's real state dir
+				// (~/.local/state/agy-acp): the run's integrity check covers ~/.gemini, and a
+				// stray record in the user's state is the mutation the run is supposed to avoid
+				AGY_ACP_STATE_DIR: path.join(privateTmp, "state"),
+			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		trackedPids.push(server.pid ?? -1);
@@ -2110,17 +2271,14 @@ async function main(): Promise<number> {
 	// ---------------------------------------------------------------- fixtures, inventory, report
 
 	const date = new Date().toISOString().slice(0, 10);
-	let reportDir = path.join(REPO_DIR, "reports", `smoke-${date}`);
-	for (let n = 2; fs.existsSync(reportDir); n++) {
-		reportDir = path.join(REPO_DIR, "reports", `smoke-${date}-${n}`);
-	}
+	const reportDir = allocateReportDir(date);
 	fs.mkdirSync(path.join(reportDir, "fixtures"), { recursive: true });
 
 	for (const f of recordedFixtures) {
-		const meta = buildMeta(f.driver, `smoke-${date}-${f.fixtureName}`, versionStatus.version, scratch, home);
-		writeFixtureFile(path.join(reportDir, "fixtures"), f.fixtureName, f.driver, meta);
+		const meta = buildMeta(f.driver, `smoke-${date}-${f.fixtureName}`, versionStatus.version, privateTmp, scratch, home);
+		writeFixtureFile(path.join(reportDir, "fixtures"), f.fixtureName, f.driver, meta, privateTmp, scratch, home);
 	}
-	const hookPayloads = readHookPayloads(recorder, scratch, home);
+	const hookPayloads = readHookPayloads(recorder, privateTmp, scratch, home);
 	fs.writeFileSync(
 		path.join(reportDir, "fixtures", "hook-payloads.jsonl"),
 		hookPayloads.join("\n") + (hookPayloads.length > 0 ? "\n" : ""),
@@ -2137,11 +2295,7 @@ async function main(): Promise<number> {
 	fs.writeFileSync(path.join(reportDir, "field-inventory.diff.json"), `${JSON.stringify(inventoryDiff, null, "    ")}\n`);
 
 	let recordResult: { diff: InventoryDiff; written: string[] } | null = null;
-	if (record) {
-		say("\n[--record] writing the live fixtures into test/fixtures/stream/");
-		recordResult = recordFixtures(recordedFixtures, versionStatus.version, scratch, home);
-		say(`  written: ${recordResult.written.join(", ") || "(nothing mapped)"}`);
-	}
+	recordResult = runRecordStep(record, allOk, recordedFixtures, versionStatus.version, privateTmp, scratch, home);
 
 	writeReport({
 		reportDir,
@@ -2249,7 +2403,7 @@ function writeReport(data: ReportData): void {
 	lines.push("");
 	lines.push(`## Artifacts`);
 	lines.push("");
-	lines.push(`- fixtures/ (the run's raw stdout lines + meta, normalised <SMOKE>/<HOME>)`);
+	lines.push(`- fixtures/ (the run's raw stdout lines + meta, normalised to <SPIKE>/<HOME>, the committed fixtures' placeholders)`);
 	lines.push(`- fixtures/hook-payloads.jsonl (${data.hookPayloadCount} hook stdin payloads)`);
 	lines.push(`- field-inventory.live.json, field-inventory.diff.json`);
 	fs.writeFileSync(path.join(data.reportDir, "report.md"), `${lines.join("\n")}\n`);

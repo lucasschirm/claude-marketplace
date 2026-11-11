@@ -458,8 +458,8 @@ A run writes `agy-acp/reports/smoke-<date>/` (a dated, append-only directory; a 
 day takes `smoke-<date>-2`): `report.md` (per-scenario checks, the post-run checks, the field-inventory
 diff summary), `smoke-report.json` (the machine-readable twin), `fixtures/` (each scenario's raw
 stdout lines plus meta — source run, agy version, args, input lines, exit code/signal, stderr,
-timeline — with the scratch and home paths normalised to `<SMOKE>`/`<HOME>` the way the committed
-fixtures are), `fixtures/hook-payloads.jsonl` (the recorded hook stdin payloads),
+timeline — with the run's roots and the home normalised to `<SPIKE>`/`<HOME>`, the committed
+fixtures' placeholders), `fixtures/hook-payloads.jsonl` (the recorded hook stdin payloads),
 `field-inventory.live.json` and `field-inventory.diff.json`. The run **refuses to start when `CI`
 is set** (it spends model quota and needs a logged-in `agy`, both of which are a human's decision),
 and `test/run.sh` never names it.
@@ -467,15 +467,17 @@ and `test/run.sh` never names it.
 ## Recording fixtures (`--record`)
 
 `node agy-acp/scripts/smoke-live.ts --record` writes the run's fixtures into `test/fixtures/stream/`
-under their committed names (the mapping is a table in the script: `simple` → `simple-textblock`,
+under their committed names (a fully green run only - a failed run refuses to record, so the
+committed set keeps the last good run), with the mapping a table in the script: `simple` → `simple-textblock`,
 `multi-turn` → `simple-multiturn-textblocks`, `tool-allow` →
 `tool-allowed-skip-permissions`, `tool-deny` → `tool-hook-denied`, `plan-deny` →
 `plan-mode-denied`, `allow-always` → `allow-always-grant`, `cancel-sleep` → `interrupted-sigint`,
-`resume-after-restart` → `resumed-conversation`, `bad-model` → `bad-model-id` —
+`resume-after-restart` → `resumed-conversation`, `bad-model` → `bad-model-id`) —
 `simple-textblock`, `plan-mode-denied` and `allow-always-grant` are new fixtures, since
 no committed fixture covers them) — the other committed fixtures (crash, shutdown, permission,
 bridge) are untouched — and recomputes `test/fixtures/stream/field-inventory.json` from the whole
-directory (the same file `npm run qa`'s contract tests check the types against). The run's report
+directory (the same file `npm run qa`'s contract tests check the types against, in the committed
+files' written form: tab indent, first-seen marker order, a lone `array` marker a bare string). The run's report
 records which names were written and the inventory diff between the committed and the recomputed
 file, so a record is always diffable against what it replaced.
 
