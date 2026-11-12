@@ -916,6 +916,12 @@ class SmokeSession {
 			driver.on("event", onEvent);
 			driver.on("exit", onExit);
 		});
+		// safety net: if send throws below, the turn already failed and the promise is never
+		// awaited - its deadline timer (or a late driver exit) must not then crash the process
+		// as an unhandled rejection
+		resultPromise.catch(() => {
+			/* handled here by construction: see the comment above */
+		});
 		this.currentTurn = resultPromise;
 		try {
 			driver.send(text);
@@ -1164,6 +1170,7 @@ function isIdLike(s: string): boolean {
 	if (/^\d{4}-\d{2}-\d{2}/.test(s)) return true; // dates
 	if (/^[0-9a-f]{8,}$/i.test(s) && s.length >= 8) return true; // hex ids
 	if (s.startsWith("/") || s.startsWith("~")) return true; // paths
+	if (s.startsWith("<")) return true; // the run's own placeholders (<SPIKE>, <HOME>): recording them would churn the inventory on every refresh
 	if (s.includes("://")) return true; // urls
 	if (/\s/.test(s)) return true; // free text
 	if (/^[0-9.]+$/.test(s)) return true; // numbers in strings
@@ -1223,7 +1230,10 @@ function addArrayToInventory(table: Record<string, InventoryEntry>, path: string
 		if (typeof element === "object" && element !== null && !Array.isArray(element)) {
 			for (const [k, v] of Object.entries(element as Record<string, unknown>)) {
 				if (!/^[A-Za-z_][\w-]*$/.test(k)) continue;
-				addValueToInventory(table, `${path}[]`, v);
+				// the element's key stays in the path (subagents[].type_name): dropping it would
+				// merge the fields under one bare "[]" path - the committed scheme (and
+				// test-contract's accessors) do not have that shape
+				addValueToInventory(table, `${path}[].${k}`, v);
 			}
 		}
 		// primitive elements: the committed scheme records "array" and nothing else
@@ -1283,7 +1293,8 @@ function computeFileInventory(file: string): Inventory {
 	return inv;
 }
 
-/** Unions file inventories into one (stable: events and paths sorted, values sorted). */
+/** Unions file inventories into one (the file list is sorted; inside, the union keeps
+ * first-seen order - the committed file's convention, which stabiliseInventory preserves). */
 function unionInventories(files: string[]): Inventory {
 	const inv: Inventory = {};
 	for (const file of files) mergeOneFile(inv, file);
@@ -1346,24 +1357,39 @@ function serialiseCommittedForm(value: unknown, indent: number): string {
 	const pad = "\t".repeat(indent);
 	const inner = "\t".repeat(indent + 1);
 	const inner2 = "\t".repeat(indent + 2);
+	const serialiseArray = (arr: unknown[]): string => {
+		if (arr.length === 0) return "[]";
+		// an element that is itself an object serialises multi-line (objects always expand),
+		// so such an array never sits on one line - biome re-expands the "[{" hybrid, so
+		// expanding is its only stable layout
+		const hasObjectElement = arr.some((x) => typeof x === "object" && x !== null);
+		if (!hasObjectElement) {
+			const inline = `[${arr.map((v) => serialiseCommittedForm(v, indent + 1)).join(", ")}]`;
+			// biome's hard cutoff: a 140-column array line (key prefix included, tab width one
+			// column) always expands, a 139-column one stays inline, and below the cutoff it
+			// keeps whichever layout the author wrote - so a recorded file is biome-stable
+			// when every line it inlines is under 140 columns (byte-identity with the previous
+			// file is not guaranteed for an array that fits both ways, and that is fine:
+			// `npm run format:check` accepts either)
+			if (pad.length + inline.length < 140) return inline;
+		}
+		return `[\n${arr.map((v) => `${inner}${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}]`;
+	};
 	if (Array.isArray(value)) {
-		if (value.length === 0) return "[]";
-		const inline = `[${value.map((v) => serialiseCommittedForm(v, indent + 1)).join(", ")}]`;
-		// biome's hard cutoff: a 140-column line always expands, a 139-column one stays inline;
-		// below the cutoff biome keeps whichever layout the author wrote, so either is stable
-		if (pad.length + inline.length < 140) return inline;
-		return `[\n${value.map((v) => `${inner}${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}]`;
+		return serialiseArray(value);
 	}
 	if (typeof value === "object" && value !== null) {
 		const entries = Object.entries(value as Record<string, unknown>);
 		if (entries.length === 0) return "{}";
 		const lines = entries.map(([k, v]) => {
 			const keyPart = `${inner}"${k}": `;
-			// an array value decides inline vs expanded on its own full line (the key counts),
-			// the way biome does; every other value serialises on one line already
-			if (Array.isArray(v) && v.length > 0) {
-				const inline = `[${v.map((x) => serialiseCommittedForm(x, indent + 2)).join(", ")}]`;
-				if (keyPart.length + inline.length < 140) return `${keyPart}${inline}`;
+			if (Array.isArray(v)) {
+				if (v.length === 0) return `${keyPart}[]`;
+				const hasObjectElement = v.some((x) => typeof x === "object" && x !== null);
+				if (!hasObjectElement) {
+					const inline = `[${v.map((x) => serialiseCommittedForm(x, indent + 2)).join(", ")}]`;
+					if (keyPart.length + inline.length < 140) return `${keyPart}${inline}`;
+				}
 				return `${keyPart}[\n${v.map((x) => `${inner2}${serialiseCommittedForm(x, indent + 2)}`).join(",\n")}\n${inner}]`;
 			}
 			return `${keyPart}${serialiseCommittedForm(v, indent + 1)}`;
@@ -1787,11 +1813,12 @@ async function main(): Promise<number> {
 	// A private runtime root: the bridge dirs this run creates must not be swept by (or sweep)
 	// anything outside the run.
 	const privateTmp = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-smoke-"));
+	tempRoots.push(privateTmp);
 	process.env.TMPDIR = privateTmp;
 	delete process.env.XDG_RUNTIME_DIR;
 	const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-smoke-work-"));
+	tempRoots.push(scratch);
 	await fs.promises.chmod(scratch, 0o700);
-	tempRoots.push(privateTmp, scratch);
 	const home = os.homedir();
 
 	// Preflight, before any model turn (see above): the version warning is not a refusal. The
