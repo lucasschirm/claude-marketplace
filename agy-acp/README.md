@@ -326,6 +326,51 @@ Zero npm runtime dependencies: Node built-ins only. (Building the single executa
 `agy-acp` package itself stays dependency-free, and the built binary needs nothing but the
 OS it was built for.)
 
+## Installing
+
+The package has zero npm runtime dependencies (Node built-ins only) and no build step, so
+"installing" is one of three, depending on where the server will run. The preconditions are the
+"Requirements" section above: Node >= 23.6 and a POSIX machine (for the checkout and the build
+host - the built binary's target machine needs neither, only a logged-in `agy`), and a
+logged-in `agy` on `PATH` (one `agy` child per session, across the session's turns; a dead
+child is not respawned eagerly - the next prompt pays the resume, as in the driver section
+above; the login state is `agy`'s own concern, not agy-acp's).
+
+**Run from a checkout (the usual path).** `npm install` in the package is not needed - there is
+nothing to install:
+
+```sh
+git clone https://github.com/lucasschirm/claude-marketplace.git   # or use the agy-acp dir of an existing checkout
+cd claude-marketplace/agy-acp
+node src/main.ts --version    # proves the toolchain: Node >= 23.6 runs the TypeScript directly
+```
+
+**The `bin` on `PATH`.** The `bin` maps `agy-acp` to `src/main.ts`, which carries a node shebang,
+so linking the checkout makes the command directly executable:
+
+```sh
+npm link        # in agy-acp/; or npm install -g . for a copy
+agy-acp --version
+```
+
+**The single executable (for machines without Node).** From the checkout - the build tooling
+(`esbuild`, `postject`) is dev-only in the root `package.json`, so the root install is the only
+step, and the `agy-acp` package itself stays dependency-free:
+
+```sh
+cd claude-marketplace && npm install
+cd agy-acp && npm run build:sea
+```
+
+`dist/agy-acp` is a standalone ELF: copy it to the target machine (next to a logged-in `agy`,
+which it still needs) and point the client at it. The permission hook is the same binary
+re-executed with `--bridge-hook`, so one file is the whole install - no Node, no script files,
+no step on the target. (The build's own three steps are documented in the next-but-one section.)
+
+Using it is the next section: point the ACP client at `node agy-acp/src/main.ts` (or the
+executable or the linked `agy-acp`), and the behaviour knobs come from the `AGY_ACP_*`
+environment (`agy-acp --help` prints them).
+
 ## Running it from an ACP client
 
 Point the client at the binary — `bin` maps `agy-acp` to `src/main.ts`, which Node >= 23.6 runs
