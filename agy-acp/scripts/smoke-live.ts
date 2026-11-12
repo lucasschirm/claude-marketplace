@@ -155,6 +155,22 @@ async function waitNoStrays(markers: string[], root: string, timeoutMs: number):
 function configChecksums(): Map<string, string> {
 	const map = new Map<string, string>();
 	const root = path.join(os.homedir(), ".gemini");
+	const hash = (p: string): void => {
+		try {
+			map.set(path.relative(root, p), createHash("sha256").update(fs.readFileSync(p)).digest("hex"));
+		} catch {
+			// unreadable now, unreadable then: not a change
+		}
+	};
+	const statOf = (p: string): fs.Stats | null => {
+		// stat follows a symlink: a dotfile-manager symlinked settings.json must be hashed, not
+		// skipped (a change through the link is a change)
+		try {
+			return fs.statSync(p);
+		} catch {
+			return null; // broken link or a race: not a change
+		}
+	};
 	const walk = (dir: string, depth: number): void => {
 		if (depth > 8) return;
 		let entries: fs.Dirent[];
@@ -165,14 +181,12 @@ function configChecksums(): Map<string, string> {
 		}
 		for (const entry of entries) {
 			const p = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
+			const st = statOf(p);
+			if (st === null) continue;
+			if (st.isDirectory()) {
 				walk(p, depth + 1);
-			} else if (entry.isFile() && (entry.name === "settings.json" || entry.name === "hooks.json")) {
-				try {
-					map.set(path.relative(root, p), createHash("sha256").update(fs.readFileSync(p)).digest("hex"));
-				} catch {
-					// unreadable now, unreadable then: not a change
-				}
+			} else if (st.isFile() && (entry.name === "settings.json" || entry.name === "hooks.json")) {
+				hash(p);
 			}
 		}
 	};
@@ -210,9 +224,11 @@ function normalize(s: string, privateTmp: string, scratch: string, home: string)
 	for (const [from, to] of subs.sort((a, b) => b[0].length - a[0].length)) {
 		out = out.split(from).join(to);
 	}
-	// the per-session bridge dir is a random 16-hex under the run root; mask it so a refresh
-	// writes a stable placeholder instead of a fresh identifier
-	return out.replace(/agy-acp-[0-9a-f]{16}/g, "agy-acp-<BRIDGE>");
+	// the per-session bridge dir is a random 8-16-hex under the run root (the name shrinks to
+	// 12/8 hex when a deep TMPDIR pushes the socket past its path limit - bridge-server.ts's
+	// NAME_HEX_LENGTHS); mask it so a refresh writes a stable placeholder instead of a fresh
+	// identifier
+	return out.replace(/agy-acp-[0-9a-f]{8,16}/g, "agy-acp-<BRIDGE>");
 }
 
 // ---------------------------------------------------------------- the turn budget
@@ -271,6 +287,10 @@ interface HookRecorder {
 }
 
 /** Installs the recorder hook in the scratch workspace (agy walks up from the cwd and finds it). */
+function shellQuote(s: string): string {
+	return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function installRecorderHook(scratch: string): HookRecorder {
 	const payloadFile = path.join(scratch, "hook-payloads.jsonl");
 	fs.writeFileSync(path.join(scratch, "recorder-hook.cjs"), RECORDER_HOOK_SOURCE);
@@ -283,7 +303,9 @@ function installRecorderHook(scratch: string): HookRecorder {
 						hooks: [
 							{
 								type: "command",
-								command: `exec ${process.execPath} ${path.join(scratch, "recorder-hook.cjs")}`,
+								// quoted the way the production bridge layout quotes it: a TMPDIR or node
+								// path with a space would otherwise silently disable payload recording
+								command: `exec ${shellQuote(process.execPath)} ${shellQuote(path.join(scratch, "recorder-hook.cjs"))}`,
 								timeout: 30,
 							},
 						],
@@ -1202,11 +1224,16 @@ const NO_LITERAL_SEGMENTS = new Set([
 	"name",
 	"reason",
 	// the committed file's curation: model ids, tool names and the subagent type stay bare
-	// ["string"] (recording them would churn the inventory on every refresh)
+	// ["string"] (recording them would churn the inventory on every refresh); the tool-call
+	// parameter names join the list the same way (the committed file keeps them bare too)
 	"model",
 	"tool_name",
 	"type_name",
 	"TypeName",
+	"Role",
+	"query",
+	"Path",
+	"CommandLine",
 ]);
 
 function lastSegment(path: string): string {
@@ -1620,9 +1647,35 @@ function recordFixtures(
 		.map((f) => path.join(FIXTURES_DIR, f))
 		.sort();
 	const after = unionInventories(allFiles);
+	// the committed file's key order (events, then paths inside each) is kept, so a record
+	// with no moved keys writes no cosmetic reordering churn
+	const ordered = reorderInventoryLikeCommitted(committedBefore, after);
 	// the committed fixtures' written form (tab indent, arrays inline when they fit)
-	fs.writeFileSync(path.join(FIXTURES_DIR, "field-inventory.json"), `${serialiseCommittedForm(after, 0)}\n`);
+	fs.writeFileSync(path.join(FIXTURES_DIR, "field-inventory.json"), `${serialiseCommittedForm(ordered, 0)}\n`);
 	return { diff: diffInventory(committedBefore, after), written };
+}
+
+/** Reorders `live`'s keys to follow `committed`'s order (committed keys first, new keys last). */
+function reorderInventoryLikeCommitted(committed: Inventory, live: Inventory): Inventory {
+	const reorder = (c: Record<string, unknown> | undefined, l: Record<string, unknown>): Record<string, unknown> => {
+		const out: Record<string, unknown> = {};
+		for (const k of Object.keys(c ?? {})) {
+			if (l[k] !== undefined) out[k] = l[k];
+		}
+		for (const k of Object.keys(l)) {
+			if (out[k] === undefined) out[k] = l[k];
+		}
+		return out;
+	};
+	const out: Inventory = {};
+	for (const event of Object.keys(committed)) {
+		if (live[event] === undefined) continue;
+		out[event] = reorder(committed[event], live[event]) as Record<string, InventoryEntry>;
+	}
+	for (const event of Object.keys(live)) {
+		if (out[event] === undefined) out[event] = live[event];
+	}
+	return out;
 }
 
 function badModelResultError(driver: SmokeAgy): boolean {
