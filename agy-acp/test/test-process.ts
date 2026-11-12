@@ -156,7 +156,11 @@ function driverOptsFor(fixture: string): AgyProcessOptions {
 			if (!opts.addDirs) opts.addDirs = [];
 			opts.addDirs.push(args[i]);
 			i++;
-		} else if (t === "--dangerously-skip-permissions") opts.skipPermissions = true;
+		} else if (t === "--mode") {
+			opts.mode = args[i];
+			i++;
+		} else if (t === "--sandbox") opts.sandbox = true;
+		else if (t === "--dangerously-skip-permissions") opts.skipPermissions = true;
 	}
 	return opts;
 }

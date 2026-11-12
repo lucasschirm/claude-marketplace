@@ -10,3 +10,6 @@ agy-acp/dist/
 # Node diagnostic reports (`node --test` arms --report-signal=SIGUSR2; delivering that signal writes one into the cwd)
 report.*.json
 **/report.*.json
+
+# Dated live-smoke run output (scripts/smoke-live.ts): the run's artifacts, not source
+agy-acp/reports/
