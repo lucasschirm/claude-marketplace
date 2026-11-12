@@ -199,11 +199,20 @@ function diffChecksums(before: Map<string, string>, after: Map<string, string>):
  * both roots collapse to the same placeholder).
  */
 function normalize(s: string, privateTmp: string, scratch: string, home: string): string {
+	// longest path first: scratch lives INSIDE privateTmp (TMPDIR is pointed at it), so the
+	// scratch replacement must land before the privateTmp one, or the random scratch basename
+	// would survive as <SPIKE>/agy-acp-smoke-work-XXXXXX and churn every refresh
+	const subs: [string, string][] = [];
+	if (scratch !== "") subs.push([scratch, "<SPIKE>"]);
+	if (privateTmp !== "") subs.push([privateTmp, "<SPIKE>"]);
+	if (home !== "") subs.push([home, "<HOME>"]);
 	let out = s;
-	if (privateTmp !== "") out = out.split(privateTmp).join("<SPIKE>");
-	if (scratch !== "") out = out.split(scratch).join("<SPIKE>");
-	if (home !== "") out = out.split(home).join("<HOME>");
-	return out;
+	for (const [from, to] of subs.sort((a, b) => b[0].length - a[0].length)) {
+		out = out.split(from).join(to);
+	}
+	// the per-session bridge dir is a random 16-hex under the run root; mask it so a refresh
+	// writes a stable placeholder instead of a fresh identifier
+	return out.replace(/agy-acp-[0-9a-f]{16}/g, "agy-acp-<BRIDGE>");
 }
 
 // ---------------------------------------------------------------- the turn budget
@@ -1185,7 +1194,20 @@ function isIdLike(s: string): boolean {
  * "array" (the committed file keeps `init.tools` at "array"); the free-text paths the committed
  * file keeps generic get no literals either.
  */
-const NO_LITERAL_SEGMENTS = new Set(["response", "text_delta", "initial_prompt", "error", "name", "reason"]);
+const NO_LITERAL_SEGMENTS = new Set([
+	"response",
+	"text_delta",
+	"initial_prompt",
+	"error",
+	"name",
+	"reason",
+	// the committed file's curation: model ids, tool names and the subagent type stay bare
+	// ["string"] (recording them would churn the inventory on every refresh)
+	"model",
+	"tool_name",
+	"type_name",
+	"TypeName",
+]);
 
 function lastSegment(path: string): string {
 	const bare = path.replace(/\[\]$/, "");
@@ -1346,12 +1368,13 @@ function stabiliseInventory(inv: Inventory): Inventory {
 }
 
 /**
- * The committed files' written form, which is also their biome-stable form. Biome's hard rule
- * is a line cutoff: a 140-column array line (key prefix included, tab width one column) always
- * expands, a 139-column one stays inline, and below the cutoff it keeps whichever layout the
- * author wrote - so a recorded file is biome-stable when every line it inlines is under 140
- * columns (byte-identity with the previous file is not guaranteed for an array that fits both
- * ways, and that is fine: `npm run format:check` accepts either).
+ * The committed files' written form, which is also their biome-stable form. Biome's rules (both
+ * measured against this repo's biome): an array's layout derives from its elements' authored
+ * layouts (an element that serialises multi-line forces expansion), and for arrays whose
+ * elements are all inline the hard rule is a line cutoff - a 140-column line (key prefix
+ * included, tab width one column) always expands, a 139-column one stays inline. Objects always
+ * serialise expanded here, so an array of objects expands (matching the committed files), and a
+ * recorded file is biome-stable when every line it inlines is under 140 columns.
  */
 function serialiseCommittedForm(value: unknown, indent: number): string {
 	const pad = "\t".repeat(indent);
@@ -1359,18 +1382,17 @@ function serialiseCommittedForm(value: unknown, indent: number): string {
 	const inner2 = "\t".repeat(indent + 2);
 	const serialiseArray = (arr: unknown[]): string => {
 		if (arr.length === 0) return "[]";
-		// an element that is itself an object serialises multi-line (objects always expand),
-		// so such an array never sits on one line - biome re-expands the "[{" hybrid, so
-		// expanding is its only stable layout
-		const hasObjectElement = arr.some((x) => typeof x === "object" && x !== null);
-		if (!hasObjectElement) {
+		// biome derives an array's layout from its elements' authored layouts: an element that
+		// serialises multi-line (an object - always here) forces the array to expand, and a
+		// short expanded array of inline elements gets collapsed. Nested arrays serialise
+		// inline when they fit, so they do not force expansion (the one corner that remains
+		// unstable: an inner array that does not fit expands, and the outer should too).
+		const hasExpandedElement = arr.some((x) => typeof x === "object" && x !== null && !Array.isArray(x));
+		if (!hasExpandedElement) {
 			const inline = `[${arr.map((v) => serialiseCommittedForm(v, indent + 1)).join(", ")}]`;
 			// biome's hard cutoff: a 140-column array line (key prefix included, tab width one
-			// column) always expands, a 139-column one stays inline, and below the cutoff it
-			// keeps whichever layout the author wrote - so a recorded file is biome-stable
-			// when every line it inlines is under 140 columns (byte-identity with the previous
-			// file is not guaranteed for an array that fits both ways, and that is fine:
-			// `npm run format:check` accepts either)
+			// column) always expands, a 139-column one stays inline - so a recorded file is
+			// biome-stable when every line it inlines is under 140 columns
 			if (pad.length + inline.length < 140) return inline;
 		}
 		return `[\n${arr.map((v) => `${inner}${serialiseCommittedForm(v, indent + 1)}`).join(",\n")}\n${pad}]`;
@@ -1385,8 +1407,8 @@ function serialiseCommittedForm(value: unknown, indent: number): string {
 			const keyPart = `${inner}"${k}": `;
 			if (Array.isArray(v)) {
 				if (v.length === 0) return `${keyPart}[]`;
-				const hasObjectElement = v.some((x) => typeof x === "object" && x !== null);
-				if (!hasObjectElement) {
+				const hasExpandedElement = v.some((x) => typeof x === "object" && x !== null && !Array.isArray(x));
+				if (!hasExpandedElement) {
 					const inline = `[${v.map((x) => serialiseCommittedForm(x, indent + 2)).join(", ")}]`;
 					if (keyPart.length + inline.length < 140) return `${keyPart}${inline}`;
 				}
@@ -2145,7 +2167,7 @@ async function main(): Promise<number> {
 			await session.cancel();
 			// the cancel ladder sweeps the group on its own escalate window; give it the room and then
 			// poll - the child may be gone while its tool command still has to die
-			const leftover = await waitNoStrays([SLEEP_MARKER], scratch, 15_000);
+			const leftover = await waitNoStrays([SLEEP_MARKER], privateTmp, 15_000);
 			const c: Check[] = [
 				{ passed: toolActive, label: "the sleep command was running (ACTIVE) before the cancel" },
 				{ passed: driver.exited, label: "agy exited on the cancel ladder" },
@@ -2284,7 +2306,7 @@ async function main(): Promise<number> {
 			const exit = await client.waitExit(SERVER_EXIT_TIMEOUT_MS);
 			// the server's teardown ladder (SIGINT, escalate, group sweep) has its own window; poll
 			// through it before the orphan verdict
-			const orphans = await waitNoStrays([SLEEP_MARKER], scratch, 15_000);
+			const orphans = await waitNoStrays([SLEEP_MARKER], privateTmp, 15_000);
 			const c: Check[] = [
 				{ passed: sessionId !== "", label: `session/new produced a session (${sessionId.slice(0, 8)}…)` },
 				{ passed: toolRunning, label: "the sleep tool was running when the client disconnected" },
@@ -2305,7 +2327,7 @@ async function main(): Promise<number> {
 
 	await sleep(2_000); // a settle window: a process that is going to be left will be left now
 	const alive = trackedPids.filter((p) => p > 0 && pidAlive(p));
-	const strays = await waitNoStrays([SLEEP_MARKER], scratch, 10_000);
+	const strays = await waitNoStrays([SLEEP_MARKER], privateTmp, 10_000);
 	const configAfter = configChecksums();
 	const configChanges = diffChecksums(configBefore, configAfter);
 	const budgetOk = budget.used <= TURNS_MAX;
@@ -2453,7 +2475,7 @@ function writeReport(data: ReportData): void {
 		} else {
 			lines.push(`- written: ${data.recordResult.written.join(", ") || "(nothing mapped)"}`);
 			lines.push(
-				`- recomputed inventory vs previous: added ${Object.values(data.recordResult.diff.added).flat().length}, removed ${Object.values(data.recordResult.diff.removed).flat().length}`,
+				`- recomputed inventory vs previous: added ${Object.values(data.recordResult.diff.added).flat().length}, removed ${Object.values(data.recordResult.diff.removed).flat().length}, literal +${data.recordResult.diff.literalAdded.length}/-${data.recordResult.diff.literalRemoved.length}, typeChanges ${data.recordResult.diff.typeChanges.length}`,
 			);
 		}
 	}

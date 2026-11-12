@@ -121,7 +121,7 @@ function rawAt(raw: unknown, p: string): unknown {
 
 test("every fixture line parses, and no fixture line is an unknown event type", () => {
 	const names = scenarioNames();
-	assert.strictEqual(names.length, 34, "the spike recorded 34 stream scenarios");
+	assert.ok(names.length >= 34, "the spike recorded 34 stream scenarios; --record adds new ones");
 	let lineCount = 0;
 	for (const name of names) {
 		for (const line of scenarioLines(name)) {
