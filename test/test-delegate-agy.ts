@@ -40,6 +40,9 @@ const LOAD_SESSION_RE = /loadSession:\s*true/;
 // walk stops at the first inner `}` — which reads as "the adapter stopped advertising resume".
 const RESUME_CAPABILITY_RE = /sessionCapabilities:\s*\{(?:[^{}]|\{[^{}]*\})*\bresume\b/;
 const RESTORE_READS_PARAMS_RE = /const sessionId = typeof p\.sessionId[\s\S]{0,200}const cwd = typeof p\.cwd/;
+// The answer carries the same controls `session/new` gives, and that spread is where `modes.currentModeId`
+// and the `model` / `effort` config options come from — the engine's restore reader takes all of them.
+const ADVERTISED_STATE_RE = /\.\.\.advertisedState\(session\)/;
 const REGISTER_RESUME_RE = /registerMethod\("session\/resume"/;
 const BLOCKS_ACP_AGY_CLI_RE = /blocks-agy-acp\+agy-cli/;
 const AGY_ACP_ALLOW_BYPASS_RE = /AGY_ACP_ALLOW_BYPASS/;
@@ -421,11 +424,18 @@ test("the capability claims that a wire feature would have to earn", () => {
 	// The connection's half registers the method; the restore's half reads the params. Both are read here
 	// because the driver's claim spans the two: a method nobody registers is a `-32601` on every follow-up.
 	assert.match(server, REGISTER_RESUME_RE, "nothing registers session/resume any more");
-	assert.match(
-		readAdapter("src/session-restore.ts"),
-		RESTORE_READS_PARAMS_RE,
-		"the restore stopped reading the sessionId/cwd pair the handshake sends",
-	);
+	const restoreSource = readAdapter("src/session-restore.ts");
+	assert.match(restoreSource, RESTORE_READS_PARAMS_RE, "the restore stopped reading the sessionId/cwd pair the handshake sends");
+	// And the answer's own shape. The resume suite feeds `_meta.restored.*` from its own stub, so a rename on
+	// the adapter's side would degrade the notes and corrections to nothing with every test still green; the
+	// advertised-state spread is where `modes.currentModeId` and `configOptions` come from.
+	for (const key of ["cwd", "notes", "droppedUpdates", "truncated"]) {
+		assert.ok(
+			restoreSource.includes(`${key}:`) || restoreSource.includes(`${key} =`),
+			`the restore answer no longer names _meta.restored.${key}, which the engine's reader takes`,
+		);
+	}
+	assert.match(restoreSource, ADVERTISED_STATE_RE, "the restore stopped answering with the session/new vocabulary");
 	assert.strictEqual(caps.plans, false, "agy-acp emits no plan update");
 	assert.strictEqual(caps.cancel, true);
 	assert.strictEqual(caps.permissions, true);

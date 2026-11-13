@@ -49,11 +49,15 @@ honour, corrected on the way in.
 * The notes are written to the session's own event log (`session_resumed`) and repeated on the
   warning channel: a session that is not in the mode its record claims is the operator's problem, not a
   footnote in a file nobody opens.
-* A mode the store corrected also replaces `meta.mode`, from the answer's own `modes.currentModeId`. A
-  restore emits no `current_mode_update`, so without that read the session would go on being reported in
-  the mode that was asked for — the exact lie `mode.changed` was written to prevent mid-turn.
-* An answer naming a **different** id is a refusal. The engine prompts the id it recorded; sending the
-  caller's next sentence into somebody else's conversation is the one outcome worse than failing.
+* A correction replaces the preference it corrected, in all three controls: `meta.mode` from
+  `modes.currentModeId`, `meta.model` and `meta.thinking` from the `model` / `effort` entries of
+  `configOptions`. A restore emits no `current_mode_update` and no `set_*` frame, so this answer is the only
+  place the truth is written — and `delegate_status` reads `meta`, and `delegate_restart` re-sends it. A
+  session restored into `default` that keeps reporting the `accept-edits` it was refused is the exact lie
+  `mode.changed` was written to prevent mid-turn.
+* An answer naming a **different** id — or no id at all — is a refusal. The engine prompts the id it
+  recorded; sending the caller's next sentence into somebody else's conversation is the one outcome worse
+  than failing, and an answer that never confirmed adoption is only a hope.
 
 ## 4. The workspace rule
 
@@ -62,7 +66,9 @@ the one its record names. The engine used to recompute the workspace as `worktre
 reattach time, which is the same answer only while nothing else changes — and a pi restart from a
 different folder is exactly when a resume gets asked for. `SessionMeta` therefore now records
 `sessionCwd` at creation, and the handshake asks in that folder. Records written before this change have
-no `sessionCwd` and fall back to the old expression.
+no `sessionCwd` and fall back to the old expression — and once a resume succeeds, the workspace the store
+named in `_meta.restored.cwd` is written into the record, so the next restart asks in the folder the store
+vouched for instead of falling back again.
 
 Both recorded directories are re-checked on the way back in, by `absolutePathOr` beside `isStorageSafeId`:
 a state file is read after a crash with whatever it names, and these two values become a spawn cwd. A
@@ -71,10 +77,18 @@ resolved against pi's own directory.
 
 ## 5. Failure is the adapter's sentence
 
-`followUp` already answers `REATTACH_FAILED` and releases the slot it reserved; the three refusals
-the store gives — no such conversation, a conversation belonging to another workspace, a conversation
-another process still holds — reach the caller in the adapter's own words, because each has a different
-fix and the recorded path *is* the fix for the second one.
+`followUp` answers `REATTACH_FAILED` and releases the slot it reserved, and the store's refusals arrive in
+its own words rather than translated. Of `OpenFailure`'s five kinds, three are the ones a caller can act
+on: no such conversation, a conversation belonging to another workspace — where the recorded path *is* the
+fix — and a conversation another process still holds. The other two, this adapter already having it open
+and a record it could not read, are still quoted rather than turned into one code.
+
+One spawn serves a window. `activeClients` is filled at the **end** of a reattach and a session is not
+`running` until its turn starts, so two follow-ups arriving together would each spawn an agent and each ask
+for the conversation; the loser of the store's lock then answers "held by another `agy-acp` process", which
+reads like a dead conversation and sends the caller to `delegate_restart` — the loss this path exists to
+prevent. `reattachSession` therefore keys an in-flight promise per session, and the second caller waits for
+the connection the first is making instead of competing for it.
 
 ## 6. Tests
 
@@ -88,6 +102,10 @@ fix and the recorded path *is* the fix for the second one.
 | `sessionCwd` survives a restart in another folder; legacy records still resolve | same |
 | the workspace survives the **record** on disk, and a planted relative one is dropped | same, through `normalizeMeta` |
 | a mode the adapter corrected on restore stops being reported as the one that was asked for | same |
+| the same for model and effort, and the store's own workspace is back-filled into an old record | same |
+| an answer naming no id at all is refused, and nothing is prompted | same |
+| two follow-ups in the reattach window share one spawn and adopt the conversation once | same |
+| the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |

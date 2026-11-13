@@ -37,6 +37,8 @@ const FLUSH_THRESHOLD_CHARS = 2000;
 export class DelegateRuntime {
 	readonly sessions = new Map<string, SessionMeta>();
 	readonly activeClients = new Map<string, DelegateTransport>();
+	/** A reattach in flight, so a second follow-up waits for it instead of spawning a rival agent. */
+	readonly reattaching = new Map<string, Promise<DelegateTransport>>();
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();

@@ -22,10 +22,10 @@
 // replayed as `session/update` frames, and our event log is the file `delegate_status` reads — so a load
 // would append a second copy of every message on every follow-up. `resume` registers and sends nothing.
 
-import { isStorageSafeId } from "./storage.ts";
+import { absolutePathOr, isStorageSafeId } from "./storage.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import type { DelegateTransport } from "./transport.ts";
-import type { AgentDriver } from "./types.ts";
+import { THINKING_LEVELS, type AgentDriver, type ThinkingLevel } from "./types.ts";
 
 /** How long either handshake may take before the start is considered failed. */
 const SETUP_TIMEOUT_MS = 60_000;
@@ -112,6 +112,33 @@ export async function createSession(client: DelegateTransport, label: string, cw
 	return { sessionId, options: advertisedOptions(res) };
 }
 
+/**
+ * The controls the answer says the session has now: the two `current*Id` fields, falling back to the
+ * `configOptions` values a spec-shaped adapter answers with. `effort` has no top-level field to prefer.
+ */
+function currentSelection(res: WireAnswer | undefined): { mode?: string; model?: string; effort?: string } {
+	const values: Record<string, string> = {};
+	for (const opt of Array.isArray(res?.configOptions) ? res.configOptions : []) {
+		const id = typeof opt?.id === "string" ? opt.id : "";
+		const value = typeof opt?.currentValue === "string" ? opt.currentValue : "";
+		if (id && value) {
+			values[id] = value;
+		}
+	}
+	const mode = res?.modes?.currentModeId;
+	const model = res?.models?.currentModelId;
+	return {
+		mode: typeof mode === "string" && mode ? mode : values.mode,
+		model: typeof model === "string" && model ? model : values.model,
+		effort: values.effort ?? values.thinking,
+	};
+}
+
+/** What the store said it could not hand back unchanged. A note is a sentence, so a blank one is nothing. */
+function restoredNotes(restored: WireAnswer): string[] {
+	return Array.isArray(restored.notes) ? restored.notes.filter((n: unknown): n is string => typeof n === "string" && n.trim() !== "") : [];
+}
+
 /** What came back from a restore, in the shape the engine records. */
 export interface RestoredSession {
 	/** The vocabulary the restored session advertises — the same reader as `session/new`'s, on purpose. */
@@ -124,6 +151,11 @@ export interface RestoredSession {
 	 * caller asked for.
 	 */
 	currentModeId?: string;
+	/** The model and effort it came back with, same reason as `currentModeId`. */
+	currentModelId?: string;
+	currentEffort?: ThinkingLevel;
+	/** The workspace the store's own record names, absolute or absent — the engine back-fills it once. */
+	cwd?: string;
 	/** The stored transcript it could not hand back whole (`load` only, but the field is the agent's). */
 	droppedUpdates?: number;
 	truncated?: boolean;
@@ -150,24 +182,34 @@ export async function restoreSession(
 	}
 	const res = (await client.request(handshake.method, handshake.params, SETUP_TIMEOUT_MS)) as WireAnswer | undefined;
 	const answered = res?.sessionId;
-	if (typeof answered === "string" && answered && answered !== sessionId) {
+	if (typeof answered !== "string" || !answered) {
+		// An answer that does not name a conversation has not confirmed it adopted one, and the prompt that
+		// follows would go out under an id this process only hopes the agent recognizes.
+		throw new Error(`${driver.title} answered ${handshake.method} without a session id; refusing to prompt`);
+	}
+	if (answered !== sessionId) {
 		// The engine prompts the id it recorded. Continuing something else would send a follow-up into a
 		// different conversation — the caller's words in someone else's context — so this is a refusal.
 		throw new Error(
 			`${driver.title} answered ${handshake.method} for ${JSON.stringify(sessionId)} with a different session id (${JSON.stringify(answered)}); refusing to prompt it`,
 		);
 	}
-	const wireMode = res?.modes?.currentModeId;
 	const meta: WireAnswer = res?._meta ?? {};
 	const restored: WireAnswer = meta.restored ?? {};
-	const notes = Array.isArray(restored.notes)
-		? restored.notes.filter((n: unknown): n is string => typeof n === "string" && n.trim() !== "")
-		: [];
+	// What the session came back *configured as*, which is not always what was asked: the adapter corrects a
+	// stored mode, model or effort it cannot honour, and a restore emits no `current_mode_update` and no
+	// `set_*` frame, so this answer is the only place the correction is written down.
+	const current = currentSelection(res);
 	const dropped = typeof restored.droppedUpdates === "number" ? restored.droppedUpdates : undefined;
 	return {
 		options: advertisedOptions(res),
-		notes,
-		currentModeId: typeof wireMode === "string" && wireMode ? wireMode : undefined,
+		notes: restoredNotes(restored),
+		cwd: absolutePathOr(restored.cwd),
+		currentModeId: current.mode,
+		currentModelId: current.model,
+		// An effort outside our vocabulary is not a value `meta.thinking` can hold, and refusing it here beats
+		// a cast that makes a status line name a level the tool never offers.
+		currentEffort: (THINKING_LEVELS as readonly string[]).includes(current.effort ?? "") ? (current.effort as ThinkingLevel) : undefined,
 		...(dropped !== undefined && dropped > 0 ? { droppedUpdates: dropped } : {}),
 		...(restored.truncated === true ? { truncated: true } : {}),
 	};

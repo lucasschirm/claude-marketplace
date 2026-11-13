@@ -47,9 +47,10 @@ const RESUMED_EVENT_RE = /session_resumed/;
 const BELONGS_TO_RE = /belongs to \/work\/other/;
 const DIFFERENT_ID_RE = /different session id/;
 const NOT_IN_STORE_RE = /not a conversation this store has/;
+const NO_SESSION_ID_RE = /without a session id/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
-function stubTransport(opts: { resume?: { result?: unknown; error?: Error } } = {}) {
+function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number } } = {}) {
 	const calls: Call[] = [];
 	const events: Array<{ type: string; data: Record<string, unknown> }> = [];
 	let disposed = 0;
@@ -69,6 +70,9 @@ function stubTransport(opts: { resume?: { result?: unknown; error?: Error } } = 
 		request: async (method: string, params: RpcParams) => {
 			calls.push({ method, params });
 			if (method === "session/resume") {
+				if (opts.resume?.delayMs) {
+					await new Promise((done) => setTimeout(done, opts.resume.delayMs));
+				}
 				if (opts.resume?.error) {
 					throw opts.resume.error;
 				}
@@ -222,6 +226,10 @@ test("what the agent corrected on the way in is recorded and said out loud", asy
 			result: {
 				sessionId: "conv-1",
 				modes: { currentModeId: "default" },
+				configOptions: [
+					{ id: "model", currentValue: "gemini-3-flash" },
+					{ id: "effort", currentValue: "high" },
+				],
 				_meta: { restored: { cwd: "/work/checkout", notes: [note], droppedUpdates: 3 } },
 			},
 		},
@@ -234,6 +242,13 @@ test("what the agent corrected on the way in is recorded and said out loud", asy
 		// came back in `default` and went on being reported as `accept-edits` is the lie `mode.changed` was
 		// written to stop — and a restore emits no such update, so the answer's own id has to be read.
 		assert.strictEqual(meta.mode, "default", "a mode the adapter corrected must not stay as requested");
+		// The same staleness in the other two controls: the answer names what the conversation came back as,
+		// and `delegate_status` reports `meta`. A restart then asks for the pair the agent already refused.
+		assert.strictEqual(meta.model, "gemini-3-flash");
+		assert.strictEqual(meta.thinking, "high");
+		// The record had no `sessionCwd` and was resumed by the fallback expression; the store just named the
+		// workspace it vouches for, so the next restart does not have to guess and hit a mismatch.
+		assert.strictEqual(meta.sessionCwd, "/work/checkout");
 		const resumed = stub.events.find((e) => e.type === "session_resumed") as LoggedRestore | undefined;
 		assert.ok(resumed, "the session's own log says the conversation was restored, not restarted");
 		assert.deepStrictEqual(resumed.data.notes, [note]);
@@ -243,6 +258,49 @@ test("what the agent corrected on the way in is recorded and said out loud", asy
 		assert.ok(
 			notifications.some((n) => n[0].includes("resumed")),
 			"a session that is not in the mode its record claims is an operator's problem, not a footnote",
+		);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("an answer that does not name a conversation is a refusal, not a hope", async () => {
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ resume: { result: {} } });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const res = failure(await followUp(rt, deadSession(rt, "agy"), "next"));
+		assert.match(res.error, NO_SESSION_ID_RE);
+		assert.strictEqual(
+			stub.calls.some((c) => c.method === "session/prompt"),
+			false,
+			"nothing is prompted into a conversation the agent never confirmed it adopted",
+		);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("two follow-ups that arrive inside the reattach window share one spawn", async () => {
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ resume: { delayMs: 80 } });
+	let spawns = 0;
+	rt.makeTransport = () => {
+		spawns++;
+		return stub.transport;
+	};
+	try {
+		const meta = deadSession(rt, "agy");
+		// `activeClients` is filled at the end of a reattach, so both callers find no connection. Each still
+		// reserves its own slot — the second is not told the agent is busy — but it must wait for the client
+		// the first is making rather than spawning a rival that loses the store's lock and reports a refusal
+		// reading like a dead conversation, which is what sends callers to `delegate_restart`.
+		const results = await Promise.all([followUp(rt, meta, "first"), followUp(rt, meta, "second")]);
+		assert.strictEqual(spawns, 1, "the second follow-up reuses the connection being made, it does not spawn another agent");
+		assert.strictEqual(stub.calls.filter((c) => c.method === "session/resume").length, 1, "the conversation is adopted once");
+		assert.ok(
+			!results.some((r) => !r.ok && r.code === "REATTACH_FAILED"),
+			`neither caller may be told the conversation could not be continued: ${JSON.stringify(results)}`,
 		);
 	} finally {
 		restoreHome();

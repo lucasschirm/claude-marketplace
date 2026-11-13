@@ -19,8 +19,8 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 212,
     "biome.style/useBlockStatements": 953,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
@@ -40,7 +40,7 @@
     "extensions/lib/delegate/drivers/devin.ts": 195,
     "extensions/lib/delegate/events.ts": 245,
     "extensions/lib/delegate/framing.ts": 114,
-    "extensions/lib/delegate/handshake.ts": 175,
+    "extensions/lib/delegate/handshake.ts": 217,
     "extensions/lib/delegate/liveness.ts": 51,
     "extensions/lib/delegate/permissions.ts": 251,
     "extensions/lib/delegate/persist.ts": 117,
@@ -49,8 +49,8 @@
     "extensions/lib/delegate/queue.ts": 453,
     "extensions/lib/delegate/recovery.ts": 324,
     "extensions/lib/delegate/registry.ts": 238,
-    "extensions/lib/delegate/runtime.ts": 556,
-    "extensions/lib/delegate/session.ts": 484,
+    "extensions/lib/delegate/runtime.ts": 558,
+    "extensions/lib/delegate/session.ts": 511,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
     "extensions/lib/delegate/tools-session.ts": 358,
@@ -690,8 +690,17 @@
         "extensions/lib/delegate/session.ts: 484 lines > baseline 478 (files may only shrink)",
         "extensions/lib/delegate/storage.ts: 131 lines > baseline 122 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "Round two added the shared reattach promise, the restored selection, and a stricter answer check.",
+      "changes": [
+        "extensions/lib/delegate/handshake.ts: 217 lines > baseline 175 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 558 lines > baseline 556 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 511 lines > baseline 484 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "c2f31f3",
+  "generatedFrom": "6421325",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

@@ -388,9 +388,10 @@ function logPathFor(rt: DelegateRuntime, sessionId: string): string {
  * re-attached: minting a new id and passing it off as the same session would silently drop the context the
  * caller was writing into, which is worse than saying "use delegate_restart".
  *
- * The slot is the caller's business (see `followUp`): this spawns, it does not reserve.
+ * The slot is the caller's business (see `followUp`): this spawns, it does not reserve. Two follow-ups that
+ * arrive before either has a connection share one spawn — see the wrapper under this function.
  */
-export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
+async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
 	// The workspace the conversation was created in, not the one this pi process happens to be sitting in:
 	// an agent with its own store refuses to move a session, and after a restart in another folder the two
 	// are not the same answer. Older records have no `sessionCwd` and get the old expression.
@@ -416,12 +417,21 @@ export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, 
 	attach(rt, client, meta);
 	if (restored) {
 		seedOptions(rt, meta.sessionId, restored.options);
-		// A mode the adapter corrected on the way in is the lie `mode.changed` exists to prevent:
-		// `delegate_status` reads `meta.mode`, and a conversation restored into `default` must not keep being
-		// reported as the `accept-edits` one that was asked for. Nothing else says so; a wire id resolves again.
-		if (restored.currentModeId && restored.currentModeId !== meta.mode) {
+		// What the adapter came back with replaces what was asked for: `delegate_status` reads `meta`, and a
+		// conversation restored into `default` must not keep reporting the preference that was refused — the
+		// lie `mode.changed` exists to prevent, readable only from this answer. Each resolves again on restart.
+		if (restored.currentModeId) {
 			meta.mode = restored.currentModeId;
 		}
+		if (restored.currentModelId) {
+			meta.model = restored.currentModelId;
+		}
+		if (restored.currentEffort) {
+			meta.thinking = restored.currentEffort;
+		}
+		// A record older than this field learns the workspace from the store that just vouched for it, so the
+		// next restart does not fall back to an expression and get a mismatch it could have avoided.
+		meta.sessionCwd ??= restored.cwd;
 		client.logEvent("session_resumed", { sessionId: meta.sessionId, cwd, ...restored });
 		// What the agent corrected on the way in belongs in the operator's log as well as the session's:
 		// a stored mode this process cannot honour is a session that is not in the mode its record claims.
@@ -433,6 +443,23 @@ export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, 
 	meta.pid = client.pid;
 	rt.persistSessionMeta(meta, true);
 	return client;
+}
+
+/**
+ * Reattach, once per session however many follow-ups arrived first. `activeClients` is filled at the *end*
+ * of a reattach and the session is not `running` until its turn starts, so two callers in one window would
+ * each spawn an agent and each ask for the conversation; where the agent keeps its own store, the loser
+ * answers "held by another agy-acp process", which reads like a dead conversation and sends the caller to
+ * `delegate_restart` — the loss this path exists to prevent. Waiting costs nothing else.
+ */
+export function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
+	const inFlight = rt.reattaching.get(meta.sessionId);
+	if (inFlight) {
+		return inFlight;
+	}
+	const attempt = reattachOnce(rt, driver, meta).finally(() => rt.reattaching.delete(meta.sessionId));
+	rt.reattaching.set(meta.sessionId, attempt);
+	return attempt;
 }
 
 /**
