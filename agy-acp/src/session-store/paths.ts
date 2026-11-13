@@ -58,7 +58,9 @@ export function resolveStoreRoot(env: NodeJS.ProcessEnv = process.env): StoreRoo
 
 function xdgRoot(env: NodeJS.ProcessEnv): StoreRoot {
 	const xdg = absolute(env.XDG_STATE_HOME);
-	if (xdg !== null) return { root: path.join(xdg, STORE_DIR_NAME), source: "$XDG_STATE_HOME/agy-acp" };
+	if (xdg !== null) {
+		return { root: path.join(xdg, STORE_DIR_NAME), source: "$XDG_STATE_HOME/agy-acp" };
+	}
 	const home = absolute(env.HOME) ?? absolute(os.homedir());
 	if (home !== null) {
 		return { root: path.join(home, ".local", "state", STORE_DIR_NAME), source: "$HOME/.local/state/agy-acp" };
@@ -82,7 +84,9 @@ const realPaths = new Map<string, string>();
 
 function realPath(cwd: string): string | null {
 	const seen = realPaths.get(cwd);
-	if (seen !== undefined) return seen;
+	if (seen !== undefined) {
+		return seen;
+	}
 	try {
 		const resolved = fs.realpathSync(cwd);
 		realPaths.set(cwd, resolved);
@@ -100,7 +104,9 @@ function realPath(cwd: string): string | null {
 export function sameWorkspace(a: string, b: string): boolean {
 	const ra = normalizeCwd(a);
 	const rb = normalizeCwd(b);
-	if (ra === rb) return true;
+	if (ra === rb) {
+		return true;
+	}
 	const ea = realPath(ra);
 	const eb = realPath(rb);
 	return ea !== null && eb !== null && ea === eb;

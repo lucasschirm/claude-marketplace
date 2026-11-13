@@ -79,25 +79,34 @@ export class SessionJournal implements SessionRecorder {
 	 * somewhere, and replaying one would tell a client to watch a live turn that ended.
 	 */
 	record(update: AcpSessionUpdate): void {
-		if (this.closed || update.sessionUpdate === "heartbeat" || this.failure !== null) return;
+		if (this.closed || update.sessionUpdate === "heartbeat" || this.failure !== null) {
+			return;
+		}
 		const at = this.now();
 		this.enqueue("append an update", () => this.updates.append(encodeUpdateLine(at, update)));
 	}
 
 	/** The title a conversation gets: the first prompt only - later ones do not rename the session. */
 	notePrompt(promptText: string): void {
-		if (this.closed || this.metaValue.title !== "") return;
+		if (this.closed || this.metaValue.title !== "") {
+			return;
+		}
 		const title = titleFromPrompt(promptText);
-		if (title === "") return;
+		if (title === "") {
+			return;
+		}
 		this.metaValue.title = title;
 		this.writeMeta("the title");
 	}
 
 	/** The selection a `session/load` must restore, kept current so the store never lags the session. */
 	setSelection(selection: SelectionRecord): void {
-		if (this.closed) return;
-		if (this.metaValue.mode === selection.mode && this.metaValue.model === selection.model && this.metaValue.effort === selection.effort)
+		if (this.closed) {
 			return;
+		}
+		if (this.metaValue.mode === selection.mode && this.metaValue.model === selection.model && this.metaValue.effort === selection.effort) {
+			return;
+		}
 		this.metaValue.mode = selection.mode;
 		this.metaValue.model = selection.model;
 		this.metaValue.effort = selection.effort;
@@ -111,12 +120,16 @@ export class SessionJournal implements SessionRecorder {
 	 * the disk cannot promise anything else; the failure lands in the log and in `degraded`.
 	 */
 	endTurn(): Promise<void> {
-		if (this.closed) return Promise.resolve();
+		if (this.closed) {
+			return Promise.resolve();
+		}
 		this.metaValue.turns += 1;
 		this.metaValue.updatedAtMs = this.now();
 		this.enqueue("write the turn", async () => {
 			await this.updates.sync();
-			if (await this.updates.rotateIfNeeded()) this.log(`session ${this.metaValue.sessionId}: the update log passed its budget - rotated`);
+			if (await this.updates.rotateIfNeeded()) {
+				this.log(`session ${this.metaValue.sessionId}: the update log passed its budget - rotated`);
+			}
 			await writeMetaFile(this.dir, this.metaValue);
 		});
 		return this.bounded("flush the turn");
@@ -135,7 +148,9 @@ export class SessionJournal implements SessionRecorder {
 	 */
 	async ready(): Promise<string | null> {
 		await this.queue;
-		if (this.degraded !== null || this.closed) return this.degraded;
+		if (this.degraded !== null || this.closed) {
+			return this.degraded;
+		}
 		try {
 			await writeMetaFile(this.dir, this.metaValue);
 		} catch (err) {
@@ -145,7 +160,9 @@ export class SessionJournal implements SessionRecorder {
 	}
 
 	async close(): Promise<void> {
-		if (this.closed) return;
+		if (this.closed) {
+			return;
+		}
 		this.closed = true;
 		await this.bounded("flush before close");
 		await this.updates.close().catch((err: Error) => {
@@ -160,7 +177,9 @@ export class SessionJournal implements SessionRecorder {
 	/** One serial writer: whatever is appended here happens after everything already queued. */
 	private enqueue(what: string, op: () => Promise<void>): void {
 		this.queue = this.queue.then(async () => {
-			if (this.failure !== null) return; // already degraded: stop producing work we know will fail
+			if (this.failure !== null) {
+				return; // already degraded: stop producing work we know will fail
+			}
 			try {
 				await op();
 			} catch (err) {

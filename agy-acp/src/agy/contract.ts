@@ -151,7 +151,9 @@ function asUsage(value: unknown): AgyUsage {
 }
 
 function asStringArray(value: unknown): string[] {
-	if (!Array.isArray(value)) return [];
+	if (!Array.isArray(value)) {
+		return [];
+	}
 	return value.every((v) => typeof v === "string") ? (value as string[]) : [];
 }
 
@@ -169,14 +171,18 @@ function toInitEvent(raw: Record<string, unknown>): AgyInitEvent {
 	};
 }
 
-function toToolInfo(raw: unknown): AgyToolInfo | undefined {
-	if (!isRecord(raw)) return undefined;
+/** The caller's `isRecord` guard is what decides whether a step HAS tool info; this only shapes it. */
+function toToolInfo(raw: Record<string, unknown>): AgyToolInfo {
 	const info: AgyToolInfo = {
 		name: asString(raw.name, ""),
 		parameters: isRecord(raw.parameters) ? (raw.parameters as Record<string, unknown>) : {},
 	};
-	if (typeof raw.output === "string") info.output = raw.output;
-	if (isRecord(raw.error)) info.error = { type: asString(raw.error.type, ""), message: asString(raw.error.message, "") };
+	if (typeof raw.output === "string") {
+		info.output = raw.output;
+	}
+	if (isRecord(raw.error)) {
+		info.error = { type: asString(raw.error.type, ""), message: asString(raw.error.message, "") };
+	}
 	return info;
 }
 
@@ -202,11 +208,21 @@ function toStepUpdateEvent(raw: Record<string, unknown>): AgyStepUpdateEvent {
 		state: asString(su.state, "") as AgyStepState,
 		step_type: asString(su.step_type, "") as AgyStepType,
 	};
-	if (typeof su.text_delta === "string") step.text_delta = su.text_delta;
-	if (su.duration_seconds !== undefined) step.duration_seconds = asNumber(su.duration_seconds, 0);
-	if (su.usage !== undefined) step.usage = asUsage(su.usage);
-	if (typeof su.tool_name === "string") step.tool_name = su.tool_name;
-	step.tool_info = toToolInfo(su.tool_info);
+	if (typeof su.text_delta === "string") {
+		step.text_delta = su.text_delta;
+	}
+	if (su.duration_seconds !== undefined) {
+		step.duration_seconds = asNumber(su.duration_seconds, 0);
+	}
+	if (su.usage !== undefined) {
+		step.usage = asUsage(su.usage);
+	}
+	if (typeof su.tool_name === "string") {
+		step.tool_name = su.tool_name;
+	}
+	if (isRecord(su.tool_info)) {
+		step.tool_info = toToolInfo(su.tool_info);
+	}
 	if (isRecord(su.subagent_info)) {
 		const subs = Array.isArray(su.subagent_info.subagents) ? su.subagent_info.subagents : [];
 		step.subagent_info = { subagents: subs.map((s) => toSubagentEntry(s)) };
@@ -229,8 +245,12 @@ function toResultEvent(raw: Record<string, unknown>): AgyResultEvent {
 		duration_seconds: asNumber(r.duration_seconds, 0),
 		usage: asUsage(r.usage),
 	};
-	if (typeof r.error === "string") result.error = r.error;
-	if (Array.isArray(r.denied_actions)) result.denied_actions = r.denied_actions.map((d) => toDeniedAction(d));
+	if (typeof r.error === "string") {
+		result.error = r.error;
+	}
+	if (Array.isArray(r.denied_actions)) {
+		result.denied_actions = r.denied_actions.map((d) => toDeniedAction(d));
+	}
 	return { event: "result", result };
 }
 
@@ -244,9 +264,12 @@ export function parseAgyLine(line: string): ParsedAgyLine {
 	try {
 		raw = JSON.parse(line);
 	} catch {
+		// The line itself is the evidence the caller logs; `raw` is still undefined here.
+		return { kind: "unknown", event: "", raw: line };
+	}
+	if (!isRecord(raw) || typeof raw.event !== "string") {
 		return { kind: "unknown", event: "", raw };
 	}
-	if (!isRecord(raw) || typeof raw.event !== "string") return { kind: "unknown", event: "", raw };
 	switch (raw.event) {
 		case "init":
 			return { kind: "event", event: toInitEvent(raw) };
@@ -268,21 +291,34 @@ export interface AgyResultDelta {
 	usage: AgyUsage;
 	num_turns: number;
 	duration_seconds: number;
+	/** True when a counter went backwards and was clamped: the caller logs it, the client never sees it. */
+	clamped: boolean;
 }
 
-/** Per-turn delta of a result against the cumulative counters observed before this turn. */
+/**
+ * Per-turn delta of a result against the cumulative counters observed before this turn, every counter clamped at 0. A
+ * cumulative counter is supposed to rise, but a resume agy answers with a FRESH conversation reports counters below the
+ * ones already seen, and the subtraction then told the client "this turn used -45 tokens, in -7 seconds, over -2 turns".
+ * `clamped` says it happened, so the driver can log the jump.
+ */
 export function resultDeltas(result: AgyResultEvent["result"], previous: AgyCumulative): AgyResultDelta {
 	const u = result.usage;
 	const p = previous.usage;
+	let clamped = false;
+	const forward = (now: number, before: number): number => {
+		clamped ||= now < before;
+		return Math.max(0, now - before);
+	};
 	return {
 		usage: {
-			input_tokens: u.input_tokens - p.input_tokens,
-			output_tokens: u.output_tokens - p.output_tokens,
-			thinking_tokens: u.thinking_tokens - p.thinking_tokens,
-			cache_read_tokens: u.cache_read_tokens - p.cache_read_tokens,
-			total_tokens: u.total_tokens - p.total_tokens,
+			input_tokens: forward(u.input_tokens, p.input_tokens),
+			output_tokens: forward(u.output_tokens, p.output_tokens),
+			thinking_tokens: forward(u.thinking_tokens, p.thinking_tokens),
+			cache_read_tokens: forward(u.cache_read_tokens, p.cache_read_tokens),
+			total_tokens: forward(u.total_tokens, p.total_tokens),
 		},
-		num_turns: result.num_turns - previous.num_turns,
-		duration_seconds: result.duration_seconds - previous.duration_seconds,
+		num_turns: forward(result.num_turns, previous.num_turns),
+		duration_seconds: forward(result.duration_seconds, previous.duration_seconds),
+		clamped,
 	};
 }

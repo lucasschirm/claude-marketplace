@@ -54,11 +54,17 @@ export interface SessionOpener {
 
 /** The session/new params: an object with an absolute cwd and an optional mcpServers array. */
 function parseSessionNew(params: unknown): { cwd: string; mcpServers: unknown[] | undefined } {
-	if (typeof params !== "object" || params === null) throw new RpcError(INVALID_PARAMS, "session/new params must be an object");
+	if (typeof params !== "object" || params === null) {
+		throw new RpcError(INVALID_PARAMS, "session/new params must be an object");
+	}
 	const p = params as Record<string, unknown>;
 	const cwd = p.cwd;
-	if (typeof cwd !== "string") throw new RpcError(INVALID_PARAMS, "cwd must be a string");
-	if (!path.isAbsolute(cwd)) throw new RpcError(INVALID_PARAMS, `cwd must be an absolute path: ${cwd}`);
+	if (typeof cwd !== "string") {
+		throw new RpcError(INVALID_PARAMS, "cwd must be a string");
+	}
+	if (!path.isAbsolute(cwd)) {
+		throw new RpcError(INVALID_PARAMS, `cwd must be an absolute path: ${cwd}`);
+	}
 	const mcpServers = p.mcpServers;
 	if (mcpServers !== undefined && (!Array.isArray(mcpServers) || mcpServers.some((s) => typeof s !== "object" || s === null))) {
 		throw new RpcError(INVALID_PARAMS, "mcpServers must be an array of server descriptors");
@@ -71,10 +77,12 @@ async function requireWorkspace(cwd: string): Promise<void> {
 	let isDirectory = false;
 	try {
 		isDirectory = (await fs.promises.stat(cwd)).isDirectory();
-	} catch {
-		throw new RpcError(INVALID_PARAMS, `cwd does not exist: ${cwd}`);
+	} catch (err) {
+		throw new RpcError(INVALID_PARAMS, `cwd does not exist: ${cwd}`, { cause: err });
 	}
-	if (!isDirectory) throw new RpcError(INVALID_PARAMS, `cwd is not a directory: ${cwd}`);
+	if (!isDirectory) {
+		throw new RpcError(INVALID_PARAMS, `cwd is not a directory: ${cwd}`);
+	}
 }
 
 /**
@@ -106,7 +114,9 @@ function sessionNewNotes(notes: {
 		log(`session ${sessionId}: ${mcpServers.length} mcpServers requested - unsupported by agy, reported via _meta`);
 		meta.mcpServers = { supported: false, requested: mcpServers };
 	}
-	if (status.warning) meta.agyVersion = { version: status.version, tested: status.tested, warning: status.warning };
+	if (status.warning) {
+		meta.agyVersion = { version: status.version, tested: status.tested, warning: status.warning };
+	}
 	return meta;
 }
 
@@ -138,8 +148,7 @@ export function createSessionOpener(deps: SessionOpenerDeps): SessionOpener {
 			const stored = await store.create({ sessionId, cwd, ...session.selection() });
 			if (!stored.ok) {
 				throw new RpcError(INTERNAL_ERROR, `session ${sessionId} cannot be resumed later: ${stored.reason}`, {
-					reason: "store_unavailable",
-					store: store.root,
+					data: { reason: "store_unavailable", store: store.root },
 				});
 			}
 			session.attachRecorder(stored.opened.journal, () => store.release(sessionId));
@@ -168,10 +177,12 @@ export function createSessionOpener(deps: SessionOpenerDeps): SessionOpener {
 		const status = await deps.checkVersion();
 		if (status.strictRefusal) {
 			throw new RpcError(INTERNAL_ERROR, status.warning ?? "the agy version is refused by AGY_ACP_STRICT_VERSION", {
-				agyVersion: status.version,
+				data: { agyVersion: status.version },
 			});
 		}
-		if (status.warning) log(`agy version warning: ${status.warning}`);
+		if (status.warning) {
+			log(`agy version warning: ${status.warning}`);
+		}
 		// Before the session exists: its session/new result carries the list, and a client must not be able
 		// to pick a model we never advertised. A failure is not fatal - it yields `null`.
 		const modelList = await deps.models.list();
@@ -189,7 +200,9 @@ export function createSessionOpener(deps: SessionOpenerDeps): SessionOpener {
 			status,
 			log,
 		});
-		if (Object.keys(meta).length > 0) result._meta = meta;
+		if (Object.keys(meta).length > 0) {
+			result._meta = meta;
+		}
 		return result;
 	}
 

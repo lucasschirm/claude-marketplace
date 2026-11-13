@@ -16,7 +16,7 @@ import * as os from "node:os";
 // persist failure (must be file-logged once, never console-logged, and must not
 // wedge observation).
 export default function (pi: any) {
-	const handlers: Record<string, Function> = {};
+	const handlers: Record<string, (...args: unknown[]) => unknown> = {};
 	const tools: Record<string, any> = {};
 	const calls = { appendEntry: 0, sendUserMessage: 0, getFlag: 0, getActiveTools: 0 };
 	let stale = false;
@@ -28,7 +28,7 @@ export default function (pi: any) {
 		);
 
 	const mockPi = {
-		on(event: string, handler: Function) {
+		on(event: string, handler: (...args: unknown[]) => unknown) {
 			handlers[event] = handler;
 		},
 		registerTool(t: any) {

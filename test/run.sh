@@ -9,20 +9,27 @@
 # suite includes files that import an extension entry (so pi-tui and typebox resolve at runtime).
 #
 # Suites NOT run here (and not run in CI):
-#   test-devin-delegate.ts            - starts real Devin sessions; run deliberately
-#   test-devin-delegate-lifecycle.ts  - starts real Devin sessions; run deliberately
+#   test-delegate-live.ts             - starts real delegated-agent sessions; run deliberately
+#   test-delegate-live-lifecycle.ts   - starts real delegated-agent sessions; run deliberately
 #   test-orca-orchestration.sh        - needs a live Orca CLI/orchestration backend
 set -e
+
+# Git exports GIT_DIR to its hooks - in a linked worktree an absolute path to THAT repository - and
+# `git commit` adds GIT_INDEX_FILE. Both override `git -C <dir>`, so a suite that builds throwaway
+# repositories would commit into the repository whose hook invoked this runner. It happened once,
+# from .githooks/pre-push. The runner refuses to pass them on, whoever invoked it.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+unset GIT_COMMON_DIR GIT_PREFIX GIT_QUARANTINE_PATH GIT_REFLOG_ACTION
 
 cd "$(dirname "$0")/.."
 
 # Node >= 23.6 is required: node --test runs the TypeScript tests directly.
-UNIT_TESTS="test/test-compaction-fail-recovery.ts test/test-devin-bash-guard.ts test/test-devin-permissions.ts test/test-devin-tui-safety.ts test/test-pr-observer-mcp.ts test/test-pr-observer-hooks.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-mergeability.ts test/test-bump-plugin-versions.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-exec.ts test/test-orca-status.ts test/test-nonblocking.ts test/test-git-repo.ts test/test-worktree-safety.ts"
+UNIT_TESTS="test/test-compaction-fail-recovery.ts test/test-delegate-cli-guard.ts test/test-delegate-permissions.ts test/test-delegate-diagnostics.ts test/test-delegate-slots.ts test/test-delegate-events.ts test/test-delegate-registry.ts test/test-delegate-storage.ts test/test-delegate-recovery.ts test/test-delegate-runtime.ts test/test-delegate-compat.ts test/test-delegate-transport.ts test/test-delegate-framing.ts test/test-delegate-agy.ts test/test-delegate-liveness.ts test/test-delegate-tools.ts test/test-delegate-transcript.ts test/test-delegate-dashboard.ts test/test-delegate-worktree.ts test/test-delegate-pr-detect.ts test/test-delegate-process.ts test/test-pr-observer-mcp.ts test/test-pr-observer-hooks.ts test/test-pr-tasks-manager.ts test/test-gh-health.ts test/test-ci-verdict.ts test/test-mergeability.ts test/test-bump-plugin-versions.ts test/test-orca-client.ts test/test-review-thread-paths.ts test/test-tool-result.ts test/test-exec.ts test/test-orca-status.ts test/test-nonblocking.ts test/test-git-repo.ts test/test-worktree-safety.ts test/test-commit-hooks.ts"
 
 # agy-acp is a standalone package: its tests run under plain `node --test`, not inside Pi.
 AGY_ACP_TESTS="agy-acp/test/test-jsonrpc.ts agy-acp/test/test-contract.ts agy-acp/test/test-process.ts agy-acp/test/test-main.ts agy-acp/test/test-package.ts agy-acp/test/test-sessions.ts agy-acp/test/test-session-store.ts agy-acp/test/test-permission-policy.ts agy-acp/test/test-bridge.ts agy-acp/test/test-permission-integration.ts agy-acp/test/test-lifecycle.ts agy-acp/test/test-shutdown.ts agy-acp/test/test-config.ts"
 
-ALL_SUITES="typecheck lint format check quality-fixtures manifest unit agy-acp compaction-recovery observe-pr observe-pr-gh-failure observe-pr-mergeability observe-pr-branch-scan branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools devin-queue"
+ALL_SUITES="typecheck lint format check quality-fixtures manifest unit agy-acp compaction-recovery observe-pr observe-pr-gh-failure observe-pr-mergeability observe-pr-branch-scan branch-observer startup-notice observe-pr-resume observe-pr-stale pr-tasks pr-tasks-stale pr-tasks-gh-failure pr-tasks-reconcile tools delegate-queue"
 
 usage() {
   sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
@@ -115,9 +122,9 @@ run_suite() {
     tools)
       bash test/test-tools-command.sh
       ;;
-    devin-queue)
-      # Fake `devin acp` (test/fake-acp-server.mjs): no Devin account needed.
-      pi -ne -e test/test-devin-delegate-queue.ts --offline -p "test"
+    delegate-queue)
+      # Fake `devin acp` (test/fake-acp-server.mjs): no agent account needed.
+      pi -ne -e test/test-delegate-queue.ts --offline -p "test"
       ;;
     *)
       echo "Unknown suite: $1" >&2

@@ -9,7 +9,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseAgyLine, type AgyEvent, type AgyInitEvent, type AgyResultEvent, type AgyStepUpdateEvent } from "../src/agy-driver.ts";
+import {
+	parseAgyLine,
+	resultDeltas,
+	ZERO_CUMULATIVE,
+	type AgyEvent,
+	type AgyInitEvent,
+	type AgyResultEvent,
+	type AgyStepUpdateEvent,
+} from "../src/agy-driver.ts";
 
 const STREAM_DIR = fileURLToPath(new URL("./fixtures/stream", import.meta.url));
 
@@ -178,3 +186,70 @@ function checkField(name: string, raw: unknown, event: AgyEvent, kind: string, f
 	assert.deepStrictEqual(accessor(event), rawValue, `${name}: typed view diverges from raw at ${key}`);
 	seen.add(key);
 }
+
+// F9: `tool_info` was the one optional assigned unconditionally, so every non-tool step carried the
+// key with value `undefined`. `exactOptionalPropertyTypes` is what makes that a type error; this is
+// what makes it a behavioural one - a record's absent field must be absent.
+test("a non-tool step carries no tool_info key at all", () => {
+	const parsed = parseAgyLine(
+		JSON.stringify({
+			event: "step_update",
+			step_update: { conversation_id: "c", step_index: 1, state: "ACTIVE", step_type: "agent_response", text_delta: "hi" },
+		}),
+	);
+	assert.strictEqual(parsed.kind, "event");
+	const step = (parsed.event as AgyStepUpdateEvent).step_update;
+	assert.strictEqual(Object.hasOwn(step, "tool_info"), false, "an absent optional must be absent, not present-and-undefined");
+});
+
+test("a tool step still carries its tool_info", () => {
+	const parsed = parseAgyLine(
+		JSON.stringify({
+			event: "step_update",
+			step_update: {
+				conversation_id: "c",
+				step_index: 2,
+				state: "ACTIVE",
+				step_type: "tool",
+				tool_info: { name: "read_file", parameters: { Path: "/w/a.txt" } },
+			},
+		}),
+	);
+	assert.strictEqual(parsed.kind, "event");
+	const step = (parsed.event as AgyStepUpdateEvent).step_update;
+	assert.strictEqual(step.tool_info?.name, "read_file");
+	assert.deepStrictEqual(step.tool_info?.parameters, { Path: "/w/a.txt" });
+});
+
+test("an unparseable line keeps the text it could not parse", () => {
+	const parsed = parseAgyLine("{not json");
+	assert.strictEqual(parsed.kind, "unknown");
+	// The line IS the evidence for the log that follows; `undefined` tells the reader nothing.
+	assert.strictEqual(parsed.kind === "unknown" ? parsed.raw : null, "{not json");
+});
+
+test("a cumulative counter that went backwards clamps to zero and says it clamped", () => {
+	const result: AgyResultEvent["result"] = {
+		conversation_id: "c",
+		status: "SUCCESS",
+		response: "",
+		num_turns: 1,
+		duration_seconds: 2,
+		usage: { input_tokens: 1, output_tokens: 1, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 5 },
+	};
+	const previous = {
+		usage: { input_tokens: 10, output_tokens: 10, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 50 },
+		num_turns: 3,
+		duration_seconds: 9,
+	};
+	const delta = resultDeltas(result, previous);
+	// A client is never told a turn used negative tokens, or ran for a negative number of seconds.
+	assert.strictEqual(delta.usage.total_tokens, 0);
+	assert.strictEqual(delta.usage.input_tokens, 0);
+	assert.strictEqual(delta.num_turns, 0);
+	assert.strictEqual(delta.duration_seconds, 0);
+	assert.strictEqual(delta.clamped, true, "and the driver is told, so it can log the jump");
+	const forward = resultDeltas(result, ZERO_CUMULATIVE);
+	assert.strictEqual(forward.usage.total_tokens, 5, "a normal turn is unchanged");
+	assert.strictEqual(forward.clamped, false);
+});

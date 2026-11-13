@@ -14,7 +14,8 @@
 // efforts a given model supports, so the conflict agy-acp can PREDICT is refused up front and every
 // other pair is passed through for agy to judge.
 
-import { spawnProcessGroup } from "../lib/child-process.ts";
+import type { AgyArgv } from "./args.ts";
+import { runAgyOneShot } from "./one-shot.ts";
 
 /** The `--effort` values `agy --help` documents (1.4.2). */
 export const AGY_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
@@ -53,67 +54,36 @@ export function parseModelsTable(stdout: string): AgyModel[] {
 	const models: AgyModel[] = [];
 	for (const line of stdout.split("\n")) {
 		const trimmed = line.trim();
-		if (trimmed === "") continue;
-		const match = /^([^\s\t]+)\t+(.*)$/.exec(trimmed);
-		if (!match) continue;
+		if (trimmed === "") {
+			continue;
+		}
+		const [, modelId, name] = /^([^\s\t]+)\t+(.*)$/.exec(trimmed) ?? [];
 		// The line is trimmed before the match, so `(.*)` cannot come back empty: a row whose name is
 		// missing has no tab left by then and is skipped with everything else that is not a model row.
-		models.push({ modelId: match[1], name: match[2].trim() });
+		if (modelId === undefined || name === undefined) {
+			continue;
+		}
+		models.push({ modelId, name: name.trim() });
 	}
 	return models;
 }
 
 /** Runs `[...argv, "models"]` in `env`, bounded by `timeoutMs`; throws when it yields no model. */
-export function listAgyModels(argv: string[], timeoutMs: number, env: NodeJS.ProcessEnv): Promise<AgyModel[]> {
-	return new Promise((resolve, reject) => {
-		const child = spawnProcessGroup({
-			command: argv[0],
-			args: [...argv.slice(1), "models"],
-			env,
-			// Named at the call site per the spawn gate: this one is a network call, not a `--version`.
-			timeoutMs,
-		});
-		let stdout = "";
-		let stderr = "";
-		let settled = false;
-		const fail = (message: string) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(watchdog);
-			reject(new Error(`${message}; stderr: ${stderr.trim() || "(empty)"}`));
-		};
-		child.stdout?.on("data", (d: Buffer) => {
-			stdout += d.toString("utf8");
-		});
-		child.stderr?.on("data", (d: Buffer) => {
-			stderr += d.toString("utf8");
-		});
-		// The spawn timeout SIGTERMs the child's pid once; a binary that ignores it must not hold the
-		// session/new hostage, so the watchdog kills the group and says so (agy/version.ts, same shape).
-		const watchdog = setTimeout(() => {
-			if (child.pid !== undefined)
-				try {
-					process.kill(-child.pid, "SIGKILL");
-				} catch {
-					// the group is already gone
-				}
-			fail(`agy models timed out after ${timeoutMs} ms`);
-		}, timeoutMs);
-		watchdog.unref();
-		child.on("error", (err: Error) => fail(`cannot run ${argv[0]} models: ${err.message}`));
-		// "close" (not "exit"): stdout is fully delivered before the terminal state.
-		child.on("close", (code, signal) => {
-			const models = parseModelsTable(stdout);
-			if (code === 0 && models.length > 0) {
-				if (settled) return;
-				settled = true;
-				clearTimeout(watchdog);
-				resolve(models);
-				return;
-			}
-			fail(`agy models exited with code=${code} signal=${signal ?? "none"}, ${models.length} model(s) listed`);
-		});
-	});
+export async function listAgyModels(argv: AgyArgv, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<AgyModel[]> {
+	// The bound is a network call's, not a `--version`'s: see DEFAULT_MODELS_TIMEOUT_MS above.
+	const r = await runAgyOneShot([argv[0], ...argv.slice(1), "models"], timeoutMs, env);
+	const context = `stderr: ${r.stderr.trim() || "(empty)"}`;
+	if (r.spawnError !== null) {
+		throw new Error(`cannot run ${argv[0]} models: ${r.spawnError.message}; ${context}`);
+	}
+	if (r.timedOut) {
+		throw new Error(`agy models timed out after ${timeoutMs} ms; ${context}`);
+	}
+	const models = parseModelsTable(r.stdout);
+	if (r.code === 0 && models.length > 0) {
+		return models;
+	}
+	throw new Error(`agy models exited with code=${r.code} signal=${r.signal ?? "none"}, ${models.length} model(s) listed; ${context}`);
 }
 
 /**
@@ -123,7 +93,7 @@ export function listAgyModels(argv: string[], timeoutMs: number, env: NodeJS.Pro
  * anyway is not blocked by a listing that never worked: agy refuses an unknown id at startup with
  * the available list, which the session reports as its own startup error.
  */
-export function makeModelCatalog(argv: string[], env: NodeJS.ProcessEnv, timeoutMs: number, log: (line: string) => void): ModelCatalog {
+export function makeModelCatalog(argv: AgyArgv, env: NodeJS.ProcessEnv, timeoutMs: number, log: (line: string) => void): ModelCatalog {
 	let pending: Promise<AgyModel[] | null> | null = null;
 	let settled: AgyModel[] | null = null;
 	let reason: string | null = null;
@@ -165,8 +135,12 @@ export function modelEffort(modelId: string): string | undefined {
  * pair goes through: per-model effort support is not on the documented surface, so agy judges it.
  */
 export function effortConflict(modelId: string, effort: string): string | null {
-	if (effort === AGY_DEFAULT_CHOICE || modelId === AGY_DEFAULT_CHOICE) return null;
+	if (effort === AGY_DEFAULT_CHOICE || modelId === AGY_DEFAULT_CHOICE) {
+		return null;
+	}
 	const carried = modelEffort(modelId);
-	if (carried === undefined || carried === effort) return null;
+	if (carried === undefined || carried === effort) {
+		return null;
+	}
 	return `agy refuses --model ${modelId} together with --effort ${effort}: the model id carries ${carried} effort`;
 }

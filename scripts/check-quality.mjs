@@ -47,6 +47,14 @@ function listTs(dir) {
 	return out.sort();
 }
 
+/**
+ * The trees `npm run lint` gates, and therefore the trees the biome metrics describe. Passed to
+ * biome as paths and used to decide whether a diagnostic belongs to the measurement; biome's own
+ * `files.includes` narrows `plugins/` to a plugin's own code, because a plugin's `lib` directory
+ * is a vendored byte-copy of extensions/lib/ and would count the same debt twice.
+ */
+const GATED_TREES = ["extensions", "agy-acp", "test", "scripts", "plugins"];
+
 const extensionFiles = () => listTs(path.join(ROOT, "extensions"));
 const agyAcpSrcFiles = () => listTs(path.join(ROOT, "agy-acp", "src"));
 /**
@@ -365,7 +373,7 @@ function readBiomeDiagnosticJson(res) {
 
 /** True when `abs` is a file inside a tree the biome metrics are supposed to describe. */
 function isUnderGatedTree(abs) {
-	for (const dir of ["extensions", "agy-acp"]) {
+	for (const dir of GATED_TREES) {
 		const rel = path.relative(path.join(ROOT, dir), abs);
 		if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) return true;
 	}
@@ -382,7 +390,7 @@ function biomeRuleCounts() {
 	const override = process.env.PI_QA_FIXTURES === "1" ? process.env.PI_QA_BIOME?.trim() || process.env.PI_QA_BIOME : undefined;
 	if (override) {
 		return readBiomeDiagnosticJson(
-			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"], {
+			spawnSync(override, ["lint", "--reporter=json", "--max-diagnostics=none", ...GATED_TREES], {
 				cwd: ROOT,
 				encoding: "utf-8",
 				maxBuffer: 32 * 1024 * 1024,
@@ -394,8 +402,8 @@ function biomeRuleCounts() {
 	// --max-diagnostics=none: a capped report would understate debt, and undercounting is the failure direction
 	// this whole file is built to refuse.
 	const args = fs.existsSync(localBin)
-		? ["lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"]
-		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", "extensions", "agy-acp"];
+		? ["lint", "--reporter=json", "--max-diagnostics=none", ...GATED_TREES]
+		: ["--no-install", "biome", "lint", "--reporter=json", "--max-diagnostics=none", ...GATED_TREES];
 
 	const res = spawnSync(cmd, args, { cwd: ROOT, encoding: "utf-8", maxBuffer: 32 * 1024 * 1024 });
 	return readBiomeDiagnosticJson(res);
@@ -580,6 +588,147 @@ function countAgyStdoutViolations() {
 }
 
 /**
+ * Turn bookkeeping written outside its owner. A turn settles exactly once - that is what keeps a client
+ * from being answered twice, or told a turn failed after it was told the turn was cancelled - and the
+ * guard was five hand-written copies of "if (pending && !pending.settled) { pending.settled = true;
+ * host.pending = null; ... }". One of them (session.ts's onExit) had already drifted into doing the
+ * bookkeeping itself, which is how a sixth copy arrives.
+ *
+ * So: `.settled =` and the two shapes that retire a turn (`.pending = null`, `.pending = {`) belong to
+ * turn.ts, where settleOnce is. Reading `.settled` is nobody's business but still allowed, and
+ * framing.ts's `this.pending = Buffer.concat(...)` is a byte buffer that happens to share the name -
+ * which is why this matches the assignment shapes rather than the word.
+ */
+const SETTLE_OWNER = "agy-acp/src/turn.ts";
+const SETTLE_WRITE_RE = /\.settled\s*=(?!=)|\.pending\s*=\s*(?:null|\{)/g;
+
+function countSettleWritesOutsideOwner() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		if (rel(file) === SETTLE_OWNER) continue;
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(SETTLE_WRITE_RE)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
+ * An inbound accumulator with no ceiling. A `buf += d.toString()` inside a stream handler grows for as
+ * long as the peer keeps writing, and three of agy-acp's readers had no bound at all: the bridge's
+ * request line (an unauthenticated peer could hold the socket and grow this process's memory until
+ * maxHoldMs ran out), the hook's payload and reply, and the one-shot probes' stdout and stderr. A
+ * timeout is not a bound - it limits the time, not the bytes.
+ *
+ * The rule is per file, like stdoutExitDrain: an accumulation (`x += chunk`, `x += chunk.toString()`,
+ * or a `Buffer.concat` into the same variable) must live in a file that also NAMES a byte ceiling - a
+ * `*_BYTES` constant, `maxFrameBytes`, `stderrLimit`, a `Buffer.byteLength` measurement, or a
+ * `trimToByteBudget` call. Naming it is what a reader can check at a glance; the tests check that the
+ * ceiling is enforced (test-bridge.ts's oversized request, test-process.ts's megabyte trim).
+ */
+const BYTE_CEILING_RE = /_BYTES\b|\bmaxFrameBytes\b|\bstderrLimit\b|\bBuffer\.byteLength\(|\btrimToByteBudget\(/;
+const ACCUMULATION_RE =
+	/(?:this\.)?[A-Za-z_$][\w$]*\s*\+=\s*(?:this\.)?[A-Za-z_$][\w$]*(?:\.toString\([^()]*\))?\s*;|((?:this\.)?[A-Za-z_$][\w$]*)\s*=\s*\1\s*\+|\bBuffer\.concat\(/g;
+
+function countUncappedInboundBuffers() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const src = fs.readFileSync(file, "utf-8");
+		if (BYTE_CEILING_RE.test(src)) continue;
+		for (const m of src.matchAll(ACCUMULATION_RE)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
+ * Where the environment may be read. `process.env` is a global the whole process shares, and a module
+ * that reaches for it is a module that cannot be handed a different one: agy/version.ts took an `env`
+ * parameter, spawned the child with it, and then read the strict-version flag off `process.env`, so a
+ * session launched with its own environment was judged against this process's (F5).
+ *
+ * The doors: config.ts (the typed reader every knob goes through), launch.ts and main.ts (the argv/env
+ * entry points), and bridge-hook.ts, hook-run.ts and bridge-server.ts (a hook child has no caller to be
+ * handed an env by - its environment IS its input; hook-run.ts joined the list when the SEA packaging
+ * moved the hook's body out of bridge-hook.ts, which is now the script-mode entry that calls it).
+ * Everywhere else takes `NodeJS.ProcessEnv` as a parameter. Mentions in comments do not count; the
+ * remaining reads (a session or store env defaulting to this process's, in spawn-agy.ts, agy/process.ts
+ * and session-store/paths.ts) are ratcheted so one more cannot appear quietly.
+ */
+const ENV_DOORS = new Set([
+	"agy-acp/src/config.ts",
+	"agy-acp/src/launch.ts",
+	"agy-acp/src/main.ts",
+	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
+	"agy-acp/src/bridge-server.ts",
+]);
+
+function countEnvAccessOutsideDoors() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		if (ENV_DOORS.has(rel(file))) continue;
+		const src = fs.readFileSync(file, "utf-8");
+		for (const m of src.matchAll(/\bprocess\s*\.\s*env\b/g)) {
+			if (isRealCode(src, m.index)) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/** How many top-level arguments a call text ("(a, b)") carries; commas inside nested brackets, literals or
+ * comments do not count. Used to tell `write(x)` from `write(x, cb)`. */
+function topLevelArgCount(call) {
+	const inner = call.slice(1, -1).trim();
+	if (inner === "") return 0;
+	let count = 1;
+	let depth = 0;
+	let prev = "";
+	for (let i = 0; i < call.length; i++) {
+		const jump = skipCompound(call, i, prev);
+		if (jump >= i) {
+			i = jump;
+			prev = call[i] ?? prev;
+			continue;
+		}
+		const c = call[i];
+		if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") depth--;
+		else if (c === "," && depth === 1) count++;
+		if (!/\s/.test(c)) prev = c;
+	}
+	return count;
+}
+
+/**
+ * A stdout write whose bytes the process's own exit may discard. `process.exit` abandons everything
+ * still queued on stdout, and the queue is not hypothetical: stdout is async for pipes on macOS, and
+ * nothing larger than the pipe buffer (64 KiB) leaves in one write on any platform. bridge-hook.ts is
+ * where this bit - its stdout IS the permission decision, and in agy a missing or unparseable decision
+ * means allow - so the fix is structural: write with a completion callback and exit from it.
+ *
+ * The rule is per file, not per function: a function-level scan would be a parser, and a file that both
+ * writes stdout and calls `process.exit` is the hazard whichever function does which. The exemption is
+ * the callback itself (flush-stdout.ts earns its pass that way, not by name), and `process.exitCode = n`
+ * is deliberately not a hit - that is the shape that lets Node drain on its own.
+ */
+function countStdoutExitDrains() {
+	const hits = [];
+	for (const file of agyAcpSrcFiles()) {
+		const src = fs.readFileSync(file, "utf-8");
+		const exits = [...src.matchAll(/\bprocess\s*\.\s*exit\s*\(/g)].filter((m) => isRealCode(src, m.index));
+		if (exits.length === 0) continue;
+		for (const m of src.matchAll(/\bprocess\s*\.\s*stdout\s*\.\s*write\s*\(/g)) {
+			if (!isRealCode(src, m.index)) continue;
+			if (topLevelArgCount(callTextAt(src, m.index)) < 2) hits.push(`${rel(file)}:${lineOf(src, m.index)}`);
+		}
+	}
+	return { count: hits.length, hits };
+}
+
+/**
  * A mutating external call whose result is never read. `execOrca([... "worker-stop" ...])` with no
  * assignment is how `/orchestration stop` came to announce success on a failed call, so the shape
  * itself is the bug. The verb is read from the call's own argument vector, so both `"worker-stop"` and
@@ -739,8 +888,9 @@ function checkWiredTests() {
 		.filter((f) => fs.existsSync(f))
 		.map((f) => fs.readFileSync(f, "utf-8"))
 		.join("\n");
-	// Named in run.sh's header: these start real Devin sessions, so they are run deliberately.
-	const deliberate = new Set(["test/test-devin-delegate.ts", "test/test-devin-delegate-lifecycle.ts"]);
+	// Named in run.sh's header: these start real delegated-agent sessions (they spend someone's model
+	// quota and depend on a logged-in CLI), so they are run deliberately and never in CI.
+	const deliberate = new Set(["test/test-delegate-live.ts", "test/test-delegate-live-lifecycle.ts"]);
 	const dirs = [
 		{ dir: testDir, prefix: "test" },
 		{ dir: path.join(ROOT, "agy-acp", "test"), prefix: "agy-acp/test" },
@@ -857,6 +1007,26 @@ const INVARIANTS = [
 		measure: countAgyStdoutViolations,
 	},
 	{
+		name: "settleOwnership",
+		description: "a turn's `.settled` / `.pending` bookkeeping is written only in agy-acp/src/turn.ts (settleOnce)",
+		measure: countSettleWritesOutsideOwner,
+	},
+	{
+		name: "inboundBufferCap",
+		description: "in agy-acp/src, a file that accumulates stream data must name a byte ceiling (*_BYTES, stderrLimit, byteLength)",
+		measure: countUncappedInboundBuffers,
+	},
+	{
+		name: "envAccessLocation",
+		description: "process.env is read only in agy-acp/src config.ts, launch.ts, main.ts, bridge-hook.ts, hook-run.ts, bridge-server.ts",
+		measure: countEnvAccessOutsideDoors,
+	},
+	{
+		name: "stdoutExitDrain",
+		description: "in agy-acp/src, a file that calls process.exit may not write stdout without a completion callback",
+		measure: countStdoutExitDrains,
+	},
+	{
 		name: "emptyCatch",
 		description: "empty catch blocks need a reason comment",
 		measure: countEmptyCatches,
@@ -911,21 +1081,87 @@ function biomeConfigHash() {
 }
 
 /**
+ * Copies the JSON string literal that starts at `i` (a double quote), returning its text and the index just
+ * past it. Escapes are consumed in pairs, so a \\" cannot be mistaken for the closing quote.
+ */
+function readJsonStringLiteral(raw, i) {
+	let j = i + 1;
+	while (j < raw.length) {
+		if (raw[j] === "\\") {
+			j += 2;
+			continue;
+		}
+		if (raw[j] === '"') return { text: raw.slice(i, j + 1), next: j + 1 };
+		j++;
+	}
+	return { text: raw.slice(i), next: raw.length };
+}
+
+/**
+ * Strips JSONC comments without touching comment-like text inside string literals.
+ *
+ * A single pass that tracks whether it is inside a string, rather than a pair of regexes, because both halves
+ * of the problem bite here. A glob is allowed to look like a comment: "plugins/<star>/scripts/**" carries an
+ * opening /<star> and a closing <star>/, and a regex stripper pairs that closer with the opener inside an
+ * earlier "extensions/**", deleting the config between them - the parse then throws, ruleEnabledInConfig
+ * answers "enabled" for every rule, and a metric that stopped being measured is called an improvement. And a
+ * comment is allowed to look like a string: several in biome.jsonc quote the severity they discuss, so
+ * splitting on string literals first would strip a comment's prose and leave its quoted fragment behind.
+ *
+ * Trailing commas go the same way, in the same pass. biome accepts `"noConsole": "off",` before a closing
+ * brace and exits 0, so a config that lints perfectly well would otherwise reach JSON.parse and throw - the
+ * same dead end the glob used to reach, arrived at through legal syntax instead of a quirk.
+ */
+function dropTrailingComma(out) {
+	const trimmed = out.trimEnd();
+	return trimmed.endsWith(",") ? trimmed.slice(0, -1) : out;
+}
+
+function stripJsoncComments(raw) {
+	let out = "";
+	let i = 0;
+	while (i < raw.length) {
+		const c = raw[i];
+		if (c === '"') {
+			const literal = readJsonStringLiteral(raw, i);
+			out += literal.text;
+			i = literal.next;
+		} else if (c === "}" || c === "]") {
+			out = dropTrailingComma(out) + c;
+			i++;
+		} else if (c === "/" && raw[i + 1] === "*") {
+			const close = raw.indexOf("*/", i + 2);
+			i = close === -1 ? raw.length : close + 2;
+		} else if (c === "/" && raw[i + 1] === "/") {
+			const nl = raw.indexOf("\n", i);
+			i = nl === -1 ? raw.length : nl;
+		} else {
+			out += c;
+			i++;
+		}
+	}
+	return out;
+}
+
+/**
  * Whether biome.jsonc still runs a rule ("suspicious/noExplicitAny"). Consulted for the stale-metric check,
- * where the counts are ambiguous. An unreadable config answers "enabled": the conservative direction is to
- * keep measuring, never to let a metric quietly disappear.
+ * where the counts are ambiguous.
+ *
+ * An unreadable config answers "not enabled". The question being asked is "did this debt get fixed, or did the
+ * rule stop running?", and a config that will not parse cannot vouch for the first answer; saying so routes
+ * the metric to the path that demands a written reason. Either answer fails --check today, so this decides the
+ * diagnosis rather than the verdict - which is the whole value of asking.
+ *
+ * No fixture drives that fallback, and deliberately so: with comments and trailing commas both handled, every
+ * config biome itself accepts now parses here, and one it rejects fails the run earlier with "the biome run is
+ * not a measurement". The two fixtures next to it pin the two shapes that used to reach it instead.
  */
 function ruleEnabledInConfig(rule) {
 	let cfg;
 	try {
-		const raw = fs
-			.readFileSync(path.join(ROOT, "biome.jsonc"), "utf-8")
-			.replace(/^\uFEFF/, "")
-			.replace(/\/\*[\s\S]*?\*\//g, "")
-			.replace(/(^|[^:"'`])\/\/[^\n]*/g, "$1");
-		cfg = JSON.parse(raw);
+		cfg = JSON.parse(stripJsoncComments(fs.readFileSync(path.join(ROOT, "biome.jsonc"), "utf-8").replace(/^\uFEFF/, "")));
 	} catch {
-		return true;
+		return false;
 	}
 	if (cfg?.linter?.enabled === false || cfg?.linter?.rules === "off") return false;
 	const [group, name] = rule.split("/");
@@ -940,19 +1176,21 @@ function ruleEnabledInConfig(rule) {
 	// (`includes: ["extensions/**/*.ts"]`), which is invisible at the top level. Any override whose include
 	// patterns could match a gated file and turns the rule off wins: the conservative answer is that the rule
 	// is no longer running, which sends the metric down the reasoned path instead of calling it an improvement.
+	// The prefixes come from GATED_TREES rather than a list of their own, because the two drifted apart the
+	// moment lint grew past `extensions` and `agy-acp`: an override naming only `test/**` and `scripts/**` was
+	// skipped as out of scope while holding 251 of the 434 `useTopLevelRegex` sites the baseline gates.
 	// Glob matching is deliberately approximate - the zero-drop rule in run() is what actually guarantees the
 	// record, this only names the cause in the message.
 	for (const o of Array.isArray(cfg?.overrides) ? cfg.overrides : []) {
 		const includes = Array.isArray(o?.includes) ? o.includes : [];
-		const reachesExtensions = includes.some(
+		const reachesGatedTree = includes.some(
 			(pattern) =>
 				pattern === "**" ||
 				pattern.startsWith("**") ||
-				pattern.startsWith("extensions/") ||
-				pattern.startsWith("agy-acp/") ||
-				pattern.includes("**."),
+				pattern.includes("**.") ||
+				GATED_TREES.some((tree) => pattern.startsWith(`${tree}/`)),
 		);
-		if (!reachesExtensions) continue;
+		if (!reachesGatedTree) continue;
 		if (o?.linter?.rules === "off") return false;
 		const oGroup = o?.linter?.rules?.[group];
 		if (oGroup === "off") return false;
@@ -1267,7 +1505,7 @@ if (mode === "write" && reason !== undefined) {
 	const why = reasonProblem(reason);
 	if (why) fail([why]);
 }
-if (only !== undefined && only.startsWith("--")) fail([`--only must name an invariant (see --list), got '${only}'`]);
+if (only?.startsWith("--")) fail([`--only must name an invariant (see --list), got '${only}'`]);
 
 run({ mode, only, reason: reason?.trim(), full });
 
@@ -1288,5 +1526,4 @@ function reasonProblem(text) {
 	// No placeholder blacklist: every list of "banned vague words" rejects the honest short note and admits the
 	// vague sentence long enough to slip past. Length plus word count is the blunt instrument, and the actual
 	// reviewer of a widened baseline is a human reading `notes`.
-	return undefined;
 }

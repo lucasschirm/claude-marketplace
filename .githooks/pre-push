@@ -1,0 +1,4 @@
+#!/bin/sh
+# The tests. They are here rather than in pre-commit because they take three times as long as the
+# static gate: a commit is cheap to redo, a push is what other people see.
+exec node "$(dirname "$0")/../scripts/quality-gate-trailer.mjs" pre-push "$@"

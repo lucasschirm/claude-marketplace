@@ -1261,7 +1261,6 @@ function addValueToInventory(table: Record<string, InventoryEntry>, path: string
 	}
 	if (typeof value === "boolean") {
 		addEntry(table, path, "boolean");
-		return;
 	}
 	// null and undefined: a type the committed scheme does not name - record nothing.
 }
@@ -1585,15 +1584,19 @@ interface RecordedFixture {
 	driver: SmokeAgy;
 }
 
-function writeFixtureFile(
-	dir: string,
-	name: string,
-	driver: SmokeAgy,
-	meta: FixtureMeta,
-	privateTmp: string,
-	scratch: string,
-	home: string,
-): void {
+/**
+ * The three roots a run rewrites out of its output: the private temp root, the session scratch and the
+ * home. They travel as one object because a fifth, sixth and seventh positional string is a call site
+ * that cannot say which is which (and can swap two of them in silence).
+ */
+interface SmokeRoots {
+	privateTmp: string;
+	scratch: string;
+	home: string;
+}
+
+function writeFixtureFile(dir: string, name: string, driver: SmokeAgy, meta: FixtureMeta, roots: SmokeRoots): void {
+	const { privateTmp, scratch, home } = roots;
 	fs.mkdirSync(dir, { recursive: true });
 	const lines = driver.rawLines.map((l) => normalize(l, privateTmp, scratch, home));
 	fs.writeFileSync(path.join(dir, `${name}.stdout.ndjson`), lines.join("\n") + (lines.length > 0 ? "\n" : ""));
@@ -1638,7 +1641,7 @@ function recordFixtures(
 		const name = RECORD_NAME_MAP[f.fixtureName];
 		if (!name) continue;
 		const meta = buildMeta(f.driver, `smoke-${f.fixtureName}`, version, privateTmp, scratch, home);
-		writeFixtureFile(FIXTURES_DIR, name, f.driver, meta, privateTmp, scratch, home);
+		writeFixtureFile(FIXTURES_DIR, name, f.driver, meta, { privateTmp, scratch, home });
 		written.push(name);
 	}
 	const allFiles = fs
@@ -1722,9 +1725,7 @@ function runRecordStep(
 	allOk: boolean,
 	fixtures: RecordedFixture[],
 	version: string,
-	privateTmp: string,
-	scratch: string,
-	home: string,
+	roots: SmokeRoots,
 ): { diff: InventoryDiff; written: string[] } | { refused: true } | null {
 	if (!record) return null;
 	if (!allOk) {
@@ -1733,7 +1734,7 @@ function runRecordStep(
 		return { refused: true };
 	}
 	say("\n[--record] writing the live fixtures into test/fixtures/stream/");
-	const result = recordFixtures(fixtures, version, privateTmp, scratch, home);
+	const result = recordFixtures(fixtures, version, roots.privateTmp, roots.scratch, roots.home);
 	say(`  written: ${result.written.join(", ") || "(nothing mapped)"}`);
 	return result;
 }
@@ -2408,7 +2409,7 @@ async function main(): Promise<number> {
 
 	for (const f of recordedFixtures) {
 		const meta = buildMeta(f.driver, `smoke-${date}-${f.fixtureName}`, versionStatus.version, privateTmp, scratch, home);
-		writeFixtureFile(path.join(reportDir, "fixtures"), f.fixtureName, f.driver, meta, privateTmp, scratch, home);
+		writeFixtureFile(path.join(reportDir, "fixtures"), f.fixtureName, f.driver, meta, { privateTmp, scratch, home });
 	}
 	const hookPayloads = readHookPayloads(recorder, privateTmp, scratch, home);
 	fs.writeFileSync(
@@ -2427,7 +2428,7 @@ async function main(): Promise<number> {
 	fs.writeFileSync(path.join(reportDir, "field-inventory.diff.json"), `${JSON.stringify(inventoryDiff, null, "    ")}\n`);
 
 	let recordResult: { diff: InventoryDiff; written: string[] } | { refused: true } | null = null;
-	recordResult = runRecordStep(record, allOk, recordedFixtures, versionStatus.version, privateTmp, scratch, home);
+	recordResult = runRecordStep(record, allOk, recordedFixtures, versionStatus.version, { privateTmp, scratch, home });
 
 	writeReport({
 		reportDir,

@@ -16,7 +16,9 @@ export function flushStdout(timeoutMs: number = FLUSH_TIMEOUT_MS): Promise<void>
 	return new Promise((resolve) => {
 		let done = false;
 		const finish = (): void => {
-			if (done) return;
+			if (done) {
+				return;
+			}
 			done = true;
 			clearTimeout(timer);
 			resolve();

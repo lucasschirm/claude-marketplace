@@ -82,7 +82,9 @@ export async function readFileOrNull(file: string): Promise<string | null> {
 		return await fs.promises.readFile(file, "utf8");
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR") return null;
+		if (code === "ENOENT" || code === "ENOTDIR") {
+			return null;
+		}
 		throw err;
 	}
 }
@@ -91,7 +93,9 @@ export async function readFileOrNull(file: string): Promise<string | null> {
 export async function sweepTempFiles(dir: string): Promise<void> {
 	try {
 		for (const entry of await fs.promises.readdir(dir)) {
-			if (entry.includes(".tmp-")) await fs.promises.rm(path.join(dir, entry), { force: true });
+			if (entry.includes(".tmp-")) {
+				await fs.promises.rm(path.join(dir, entry), { force: true });
+			}
 		}
 	} catch {
 		// A directory we cannot list is a directory we cannot sweep; the next write tries again.
@@ -132,7 +136,9 @@ export class UpdateLog {
 	}
 
 	private async openForAppend(): Promise<fs.promises.FileHandle> {
-		if (this.handle) return this.handle;
+		if (this.handle) {
+			return this.handle;
+		}
 		const handle = await fs.promises.open(this.livePath, "a", FILE_MODE);
 		try {
 			await handle.chmod(FILE_MODE); // only the first creation gets the mode from `open`
@@ -158,7 +164,9 @@ export class UpdateLog {
 
 	/** The turn-end fsync: everything appended so far is out of this process's reach and into the disk. */
 	async sync(): Promise<void> {
-		if (this.handle) await this.handle.sync();
+		if (this.handle) {
+			await this.handle.sync();
+		}
 	}
 
 	/** Has the live file outgrown its budget? Checked at turn end, before the next append. */
@@ -173,7 +181,9 @@ export class UpdateLog {
 	 * on disk, otherwise rotating can *lose* bytes that a non-rotating crash would have kept.
 	 */
 	async rotateIfNeeded(): Promise<boolean> {
-		if (!this.needsRotation()) return false;
+		if (!this.needsRotation()) {
+			return false;
+		}
 		await this.sync();
 		if (this.handle) {
 			await this.handle.close();
@@ -185,11 +195,15 @@ export class UpdateLog {
 			await fs.promises
 				.rename(path.join(this.dir, updateFileName(gen)), path.join(this.dir, updateFileName(gen + 1)))
 				.catch((err: NodeJS.ErrnoException) => {
-					if (err.code !== "ENOENT") throw err;
+					if (err.code !== "ENOENT") {
+						throw err;
+					}
 				});
 		}
 		await fs.promises.rename(this.livePath, path.join(this.dir, updateFileName(1))).catch((err: NodeJS.ErrnoException) => {
-			if (err.code !== "ENOENT") throw err;
+			if (err.code !== "ENOENT") {
+				throw err;
+			}
 		});
 		await syncDir(this.dir);
 		this.bytes = 0;
@@ -199,7 +213,9 @@ export class UpdateLog {
 	async close(): Promise<void> {
 		const handle = this.handle;
 		this.handle = null;
-		if (!handle) return;
+		if (!handle) {
+			return;
+		}
 		try {
 			await handle.sync();
 		} finally {
@@ -224,19 +240,22 @@ export async function readUpdateLines(dir: string, rotations: number, capBytes: 
 	let truncated = false;
 	for (let gen = 0; gen <= Math.max(0, rotations) && !truncated; gen++) {
 		const text = await readFileOrNull(path.join(dir, updateFileName(gen)));
-		if (text === null) continue;
+		if (text === null) {
+			continue;
+		}
 		const bytes = Buffer.byteLength(text, "utf8");
 		if (bytes > budget) {
 			truncated = true;
 			const buf = Buffer.from(text, "utf8").subarray(Math.max(0, bytes - budget));
 			const firstBreak = buf.indexOf(10); // a partial first line is not history, it is a cut
-			if (firstBreak >= 0)
+			if (firstBreak >= 0) {
 				taken.push(
 					buf
 						.subarray(firstBreak + 1)
 						.toString("utf8")
 						.split("\n"),
 				);
+			}
 			break;
 		}
 		budget -= bytes;
@@ -252,7 +271,9 @@ export async function listSessionDirs(root: string, isSessionDirName: (name: str
 		return entries.filter((e) => e.isDirectory() && isSessionDirName(e.name)).map((e) => e.name);
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
-		if (code === "ENOENT" || code === "ENOTDIR") return [];
+		if (code === "ENOENT" || code === "ENOTDIR") {
+			return [];
+		}
 		throw err;
 	}
 }

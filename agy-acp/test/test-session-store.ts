@@ -664,10 +664,10 @@ test("session/list reports the store: filtered by workspace, newest first, pagin
 	assert.strictEqual(page1.ok ? page1.sessions.length : 0, 1);
 	const cursor = page1.ok ? page1.nextCursor : null;
 	assert.ok(cursor, "a page that is not the end carries a cursor");
-	const page2 = await store.list({ limit: 1, cursor: cursor ?? undefined });
+	const page2 = await store.list({ limit: 1, ...(cursor === null ? {} : { cursor }) });
 	assert.ok(page2.ok, JSON.stringify(page2));
 	assert.strictEqual(page2.ok ? page2.sessions[0].sessionId : "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-	const page3 = await store.list({ limit: 1, cursor: page2.ok ? (page2.nextCursor ?? undefined) : undefined });
+	const page3 = await store.list({ limit: 1, ...(page2.ok && page2.nextCursor !== null ? { cursor: page2.nextCursor } : {}) });
 	assert.ok(page3.ok);
 	assert.strictEqual(page3.ok ? page3.sessions[0].sessionId : "", ID);
 	assert.strictEqual(page3.ok ? page3.nextCursor : "x", null, "the last page carries no cursor");

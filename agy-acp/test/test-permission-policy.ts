@@ -16,6 +16,8 @@ import {
 	PERMISSION_OPTION_IDS,
 	PLAN_DENY_REASON,
 	argsDifferFrom,
+	KNOWN_TOOLS,
+	STATE_CHANGING_TOOLS,
 } from "../src/permission.ts";
 
 const BASE = "/workspace";
@@ -259,4 +261,21 @@ test("argsDifferFrom: order-insensitive on the stream's keys; extra hook-side ke
 	assert.strictEqual(argsDifferFrom({}, { CommandLine: "ls" }), false, "no stream keys: nothing to differ on");
 	assert.strictEqual(argsDifferFrom(undefined, { CommandLine: "ls" }), false, "an undefined stream is treated as no keys");
 	assert.strictEqual(argsDifferFrom({ a: [1, 2] }, { a: [2, 1] }), true, "array order is meaningful");
+});
+
+// F4: the plan-mode deny read `KNOWN_TOOLS.has(t) && STATE_CHANGING_TOOLS.has(t)`. The first term
+// decided nothing, because every member of the second list is a known tool - and on the day it did
+// decide something it would decide it the wrong way round: a state-changing tool the recorded surface
+// has never seen is exactly the one plan mode must keep denying. These two tests are why the term could
+// go: the first pins the containment the term assumed, the second pins the deny to one list.
+test("every state-changing tool is a known tool (the two lists cannot drift apart)", () => {
+	const unknown = [...STATE_CHANGING_TOOLS].filter((t) => !KNOWN_TOOLS.has(t));
+	assert.deepStrictEqual(unknown, [], "a state-changing tool missing from KNOWN_TOOLS must still be denied in plan mode");
+});
+test("plan mode denies every state-changing tool, on that list alone", () => {
+	for (const tool of STATE_CHANGING_TOOLS) {
+		const d = decidePolicy(inputFor("plan", tool, {}));
+		assert.strictEqual(d.kind, "deny", `plan: ${tool} is denied`);
+		assert.strictEqual(d.kind === "deny" ? d.reason : "", PLAN_DENY_REASON, `plan: ${tool} carries the plan reason`);
+	}
 });

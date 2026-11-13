@@ -28,7 +28,9 @@ export interface HookInvocation {
  */
 export function isDirectRun(entryUrl: string | undefined): boolean {
 	const invoked = process.argv[1];
-	if (!invoked) return false;
+	if (!invoked) {
+		return false;
+	}
 	try {
 		return fs.realpathSync(invoked) === fileURLToPath(entryUrl ?? "");
 	} catch {
@@ -55,7 +57,9 @@ export function isDirectRun(entryUrl: string | undefined): boolean {
  */
 export function defaultHookInvocation(): HookInvocation {
 	const hookFile = scriptHookFile();
-	if (hookFile !== null) return { node: process.execPath, hookFile, hookArgs: [] };
+	if (hookFile !== null) {
+		return { node: process.execPath, hookFile, hookArgs: [] };
+	}
 	return { node: process.execPath, hookArgs: ["--bridge-hook"] };
 }
 

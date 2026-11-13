@@ -1,0 +1,24 @@
+{
+	// agy-acp is a standalone Node package, typechecked more strictly than `extensions/**`: it has no
+	// Pi runtime, no ambient globals and no inherited debt, so the flags the extension tree cannot pass
+	// yet are enforced here. Measured when these were switched on (docs/agy-acp-code-quality-review.md
+	// §4): 0 errors each under agy-acp, against 1 / 2 / 1 / 296 under extensions/**.
+	//
+	// exactOptionalPropertyTypes is here for the same reason: `x?: T` means the key may be ABSENT, and a
+	// field that may also be explicitly `undefined` has to say so. It is what turned F9 into a type error.
+	//
+	// tsc owns unused locals and parameters now; biome's `correctness/noUnusedVariables` stays on as the
+	// faster signal in the editor, not as the gate.
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"exactOptionalPropertyTypes": true,
+		"noUncheckedIndexedAccess": true,
+		"noImplicitReturns": true,
+		"noUnusedLocals": true,
+		"noUnusedParameters": true,
+		"verbatimModuleSyntax": true
+	},
+	// test/ has its own project: noUncheckedIndexedAccess costs 128 errors there, all of it indexing
+	// recorded fixtures, and none of it reaching production. See agy-acp/test/tsconfig.json.
+	"include": ["./src/**/*.ts"]
+}

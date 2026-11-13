@@ -68,7 +68,9 @@ function listed(meta: StoredSessionMeta): ListedSession {
 
 /** The entry's own sort key, base64url: opaque to the client, resolvable by us. */
 function cursorOf(entry: ListedSession | undefined): string | null {
-	if (entry === undefined) return null;
+	if (entry === undefined) {
+		return null;
+	}
 	return Buffer.from(`${entry.updatedAtMs}${CURSOR_SEPARATOR}${entry.sessionId}`, "utf8").toString("base64url");
 }
 
@@ -89,10 +91,14 @@ function orderEntries(a: { updatedAtMs: number; sessionId: string }, b: { update
 function indexOfCursor(sorted: ListedSession[], cursor: string): number {
 	const decoded = Buffer.from(cursor, "base64url").toString("utf8");
 	const at = decoded.indexOf(CURSOR_SEPARATOR);
-	if (at <= 0) return -1;
+	if (at <= 0) {
+		return -1;
+	}
 	const updatedAtMs = Number(decoded.slice(0, at));
 	const sessionId = decoded.slice(at + CURSOR_SEPARATOR.length);
-	if (!Number.isFinite(updatedAtMs) || !isSessionId(sessionId)) return -1;
+	if (!Number.isFinite(updatedAtMs) || !isSessionId(sessionId)) {
+		return -1;
+	}
 	const after = sorted.findIndex((s) => orderEntries(s, { updatedAtMs, sessionId }) > 0);
 	return after < 0 ? sorted.length : after;
 }
@@ -123,24 +129,32 @@ export async function listStoredSessions(source: ListingSource, options: ListOpt
 	let unusable = 0;
 	for (const name of names) {
 		const record = await source.readMeta(name);
-		if (record === null) continue; // a directory with no record is not a session, and not damage either
+		if (record === null) {
+			continue; // a directory with no record is not a session, and not damage either
+		}
 		if (!record.ok) {
 			unusable++;
 			continue;
 		}
 		// The same test `session/load` applies, not a cheaper one: `session/list` is how a client finds the
 		// id it is about to load, and a session it can list but not load is a bug it cannot work around.
-		if (options.cwd !== undefined && !sameWorkspace(record.value.cwd, options.cwd)) continue;
+		if (options.cwd !== undefined && !sameWorkspace(record.value.cwd, options.cwd)) {
+			continue;
+		}
 		found.push(listed(record.value));
 	}
-	if (unusable > 0) source.log(`session store: ${unusable} session record(s) were unusable and are not listed`);
+	if (unusable > 0) {
+		source.log(`session store: ${unusable} session record(s) were unusable and are not listed`);
+	}
 	found.sort(orderEntries);
 	const start = options.cursor === undefined ? 0 : indexOfCursor(found, options.cursor);
 	if (start < 0) {
 		return { ok: false, kind: "cursor", reason: `unknown cursor ${JSON.stringify(options.cursor)} - it is not a session this store lists` };
 	}
 	const page = found.slice(start, start + limit);
-	for (const entry of page) entry.inUse = await source.lockIsLive(entry.sessionId);
+	for (const entry of page) {
+		entry.inUse = await source.lockIsLive(entry.sessionId);
+	}
 	return {
 		ok: true,
 		sessions: page,

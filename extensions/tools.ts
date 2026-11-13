@@ -187,7 +187,6 @@ export class ToolsManagerComponent {
 						this.detailsScrollOffset = 0;
 						this.invalidate();
 					}
-					return;
 				}
 			} else {
 				// Details view
@@ -242,7 +241,6 @@ export class ToolsManagerComponent {
 				if (matchesKey(data, "pageDown")) {
 					this.detailsScrollOffset += 10;
 					this.invalidate();
-					return;
 				}
 			}
 		} catch (err) {
@@ -266,7 +264,7 @@ export class ToolsManagerComponent {
 			const headerLine =
 				th.fg("borderMuted", "───") +
 				title +
-				th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Error "))));
+				th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("─── Tool Manager Error "))));
 			errLines.push(truncateToWidth(headerLine, safeWidth));
 			errLines.push("");
 			errLines.push(truncateToWidth(`  ${th.fg("error", "An error occurred while displaying tool details:")}`, safeWidth));
@@ -287,7 +285,7 @@ export class ToolsManagerComponent {
 				const headerLine =
 					th.fg("borderMuted", "───") +
 					title +
-					th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tools & Extensions Configuration "))));
+					th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("─── Tools & Extensions Configuration "))));
 				lines.push(truncateToWidth(headerLine, safeWidth));
 				lines.push("");
 
@@ -365,7 +363,7 @@ export class ToolsManagerComponent {
 					const headerLine =
 						th.fg("borderMuted", "───") +
 						title +
-						th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + ` Tool Details: ${tool.name} `))));
+						th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth(`─── Tool Details: ${tool.name} `))));
 					lines.push(truncateToWidth(headerLine, safeWidth));
 					lines.push("");
 
@@ -462,7 +460,7 @@ export class ToolsManagerComponent {
 			const headerLine =
 				th.fg("borderMuted", "───") +
 				title +
-				th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("───" + " Tool Manager Render Error "))));
+				th.fg("borderMuted", "─".repeat(Math.max(0, safeWidth - visibleWidth("─── Tool Manager Render Error "))));
 			errLines.push(truncateToWidth(headerLine, safeWidth));
 			errLines.push("");
 			errLines.push(truncateToWidth(`  ${th.fg("error", "Failed to render tool details or list:")}`, safeWidth));

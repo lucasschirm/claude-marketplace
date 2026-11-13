@@ -29,7 +29,9 @@ const reasonOf = (err: unknown): string => (err as Error)?.message ?? String(err
  * imply the store had looked somewhere.
  */
 export async function readStoredMeta(dir: string, sessionId: string, log: (line: string) => void): Promise<StoredMetaRead> {
-	if (!isSessionId(sessionId)) return null;
+	if (!isSessionId(sessionId)) {
+		return null;
+	}
 	let text: string | null;
 	try {
 		text = await readFileOrNull(path.join(dir, META_FILE));
@@ -37,14 +39,18 @@ export async function readStoredMeta(dir: string, sessionId: string, log: (line:
 		log(`session store: reading the record of ${sessionId} failed: ${reasonOf(err)}`);
 		return { ok: false, reason: reasonOf(err) };
 	}
-	if (text === null) return null;
+	if (text === null) {
+		return null;
+	}
 	const decoded = decodeMeta(text);
 	if (!decoded.ok) {
 		log(`session ${sessionId}: its meta.json is unusable (${decoded.reason})`);
 		return { ok: false, reason: decoded.reason };
 	}
 	// The file names the session it is in: a record copied into another directory is not that session.
-	if (decoded.value.sessionId !== sessionId) return { ok: false, reason: `its record names ${decoded.value.sessionId}` };
+	if (decoded.value.sessionId !== sessionId) {
+		return { ok: false, reason: `its record names ${decoded.value.sessionId}` };
+	}
 	return decoded;
 }
 
@@ -69,11 +75,18 @@ export async function readStoredUpdates(
 	const replay: StoredUpdate[] = [];
 	let dropped = 0;
 	for (const line of read.lines) {
-		if (line.trim() === "") continue;
+		if (line.trim() === "") {
+			continue;
+		}
 		const decoded = decodeUpdateLine(line);
-		if (decoded.ok) replay.push(decoded.value);
-		else dropped++;
+		if (decoded.ok) {
+			replay.push(decoded.value);
+		} else {
+			dropped++;
+		}
 	}
-	if (dropped > 0) log(`session store: ${dropped} stored update(s) were unreadable and are not replayed (${dir})`);
+	if (dropped > 0) {
+		log(`session store: ${dropped} stored update(s) were unreadable and are not replayed (${dir})`);
+	}
 	return { replay, droppedLines: dropped, truncated: read.truncated };
 }

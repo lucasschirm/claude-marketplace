@@ -90,18 +90,18 @@ function rpcFailure(method: string, sessionId: string, failure: { kind: string; 
 			// ACP's "resource not found": not a conversation this agent has a record of. The reason says
 			// where the record would have been, because "unknown" alone sends an operator to agy's own
 			// storage - the one place agy-acp does not look.
-			return new RpcError(RESOURCE_NOT_FOUND, failure.reason, { reason: "session_not_found", sessionId });
+			return new RpcError(RESOURCE_NOT_FOUND, failure.reason, { data: { reason: "session_not_found", sessionId } });
 		case "cwd-mismatch":
 			// Invalid params: the request asked for a conversation in a workspace that is not the one it
 			// belongs to. The recorded path is in the message because the fix is to open the other project,
 			// and guessing which is how a conversation ends up looking lost.
-			return new RpcError(INVALID_PARAMS, failure.reason, { reason: "cwd_mismatch", sessionId, recordedCwd: failure.recorded });
+			return new RpcError(INVALID_PARAMS, failure.reason, { data: { reason: "cwd_mismatch", sessionId, recordedCwd: failure.recorded } });
 		case "locked":
-			return new RpcError(INTERNAL_ERROR, `${method}: ${failure.reason}`, { reason: "session_in_use", sessionId });
+			return new RpcError(INTERNAL_ERROR, `${method}: ${failure.reason}`, { data: { reason: "session_in_use", sessionId } });
 		case "open-in-process":
-			return new RpcError(INVALID_PARAMS, `${method}: ${failure.reason}`, { reason: "session_open", sessionId });
+			return new RpcError(INVALID_PARAMS, `${method}: ${failure.reason}`, { data: { reason: "session_open", sessionId } });
 		default:
-			return new RpcError(INTERNAL_ERROR, `${method}: ${failure.reason}`, { reason: "store_unavailable", sessionId });
+			return new RpcError(INTERNAL_ERROR, `${method}: ${failure.reason}`, { data: { reason: "store_unavailable", sessionId } });
 	}
 }
 
@@ -124,14 +124,18 @@ async function restore(
 	const p = (params ?? {}) as Record<string, unknown>;
 	const sessionId = typeof p.sessionId === "string" ? p.sessionId : "";
 	const cwd = typeof p.cwd === "string" ? p.cwd : "";
-	if (sessionId === "" || cwd === "") throw new RpcError(INVALID_PARAMS, `${method} requires a sessionId and a cwd`);
+	if (sessionId === "" || cwd === "") {
+		throw new RpcError(INVALID_PARAMS, `${method} requires a sessionId and a cwd`);
+	}
 	// A shape the store could never have written is not a session either way - and it must not reach the
 	// filesystem as a path, which is the other thing this check is for.
 	if (!isSessionId(sessionId)) {
-		throw new RpcError(RESOURCE_NOT_FOUND, deps.store.unknownReason(sessionId), { reason: "session_not_found", sessionId });
+		throw new RpcError(RESOURCE_NOT_FOUND, deps.store.unknownReason(sessionId), { data: { reason: "session_not_found", sessionId } });
 	}
 	const opened = await deps.store.open(sessionId, cwd, withReplay);
-	if (!opened.ok) throw rpcFailure(method, sessionId, opened.failure);
+	if (!opened.ok) {
+		throw rpcFailure(method, sessionId, opened.failure);
+	}
 	const meta = opened.opened.meta;
 	// Opening the store took this conversation's lock, so from here the failure path owes it back, and the
 	// recorder is what hands it over (its release runs on dispose). Hence *before* anything can fail: a load
@@ -151,9 +155,13 @@ async function restore(
 		// be updated is a conversation whose history silently stops at this moment, which is worse than a
 		// load that fails.
 		const degraded = await opened.opened.journal.ready();
-		if (degraded !== null) throw new RpcError(INTERNAL_ERROR, `${method}: the session store cannot be written (${degraded})`);
+		if (degraded !== null) {
+			throw new RpcError(INTERNAL_ERROR, `${method}: the session store cannot be written (${degraded})`);
+		}
 		const notes = session.restoreNotes();
-		for (const note of notes) deps.log(`session ${sessionId}: ${note}`);
+		for (const note of notes) {
+			deps.log(`session ${sessionId}: ${note}`);
+		}
 		if (!registered) {
 			// The connection died mid-load. The registry disposes what arrives late (issue #53) and the
 			// dispose hands the lock back, so nothing is left holding the conversation; the replay is
@@ -172,14 +180,21 @@ async function restore(
 		// `notes` is always the array (a client iterates it without guessing); the two warnings appear
 		// only when they apply, because a key that is always there teaches nobody to read it.
 		restored.notes = notes;
-		if (opened.opened.droppedLines > 0) restored.droppedUpdates = opened.opened.droppedLines;
-		if (opened.opened.truncated) restored.truncated = true;
+		if (opened.opened.droppedLines > 0) {
+			restored.droppedUpdates = opened.opened.droppedLines;
+		}
+		if (opened.opened.truncated) {
+			restored.truncated = true;
+		}
 		return { sessionId, ...advertisedState(session), _meta: { restored, ...unsupportedExtras(p) } };
 	} catch (err) {
 		// Whatever was built goes away, lock included: a failed load must not leave a session holding a
 		// conversation no client has. A failure before it existed still leaves the lock to give back.
-		if (session === null) await release();
-		else await session.dispose();
+		if (session === null) {
+			await release();
+		} else {
+			await session.dispose();
+		}
 		throw err;
 	}
 }
@@ -191,7 +206,9 @@ function unsupportedExtras(p: Record<string, unknown>): Record<string, unknown> 
 	const notes: Record<string, unknown> = {};
 	for (const key of ["mcpServers", "additionalDirectories"] as const) {
 		const requested = p[key];
-		if (Array.isArray(requested) && requested.length > 0) notes[key] = { supported: false, requested };
+		if (Array.isArray(requested) && requested.length > 0) {
+			notes[key] = { supported: false, requested };
+		}
 	}
 	return notes;
 }
@@ -206,20 +223,25 @@ function unsupportedExtras(p: Record<string, unknown>): Record<string, unknown> 
  */
 function replay(deps: RestoreDeps, sessionId: string, updates: StoredUpdate[], truncated: boolean): void {
 	if (updates.length === 0) {
-		if (truncated) deps.log(`session ${sessionId}: the stored transcript was over the read budget and replayed from its end`);
+		if (truncated) {
+			deps.log(`session ${sessionId}: the stored transcript was over the read budget and replayed from its end`);
+		}
 		return;
 	}
 	let sent = 0;
 	for (const stored of updates) {
-		if (!deps.send(sessionId, stored.update)) break;
+		if (!deps.send(sessionId, stored.update)) {
+			break;
+		}
 		sent++;
 	}
-	if (sent < updates.length)
+	if (sent < updates.length) {
 		deps.log(`session ${sessionId}: replay stopped after ${sent}/${updates.length} stored updates - the connection went away`);
-	else
+	} else {
 		deps.log(
 			`session ${sessionId}: replayed ${updates.length} stored update(s)${truncated ? " (the oldest were over the read budget)" : ""}`,
 		);
+	}
 }
 
 /** `session/list` params: the workspace to filter by, the cursor, and (our extension) the page size. */
@@ -227,10 +249,14 @@ function listParams(params: unknown): { cwd?: string; cursor?: string; limit?: n
 	const p = (params ?? {}) as Record<string, unknown>;
 	const limit =
 		typeof p.limit === "number" && Number.isFinite(p.limit) ? Math.min(Math.max(1, Math.trunc(p.limit)), MAX_PAGE_SIZE) : undefined;
+	const cwd = listedCwd(p.cwd);
+	const cursor = typeof p.cursor === "string" && p.cursor !== "" ? p.cursor : undefined;
+	// Absent, not undefined: the store reads a missing cwd as "no filter" and an explicit undefined as a
+	// value it has to be told how to type (`exactOptionalPropertyTypes`).
 	return {
-		cwd: listedCwd(p.cwd),
-		cursor: typeof p.cursor === "string" && p.cursor !== "" ? p.cursor : undefined,
-		limit,
+		...(cwd === undefined ? {} : { cwd }),
+		...(cursor === undefined ? {} : { cursor }),
+		...(limit === undefined ? {} : { limit }),
 	};
 }
 
@@ -240,10 +266,12 @@ function listParams(params: unknown): { cwd?: string; cursor?: string; limit?: n
  * here" is a much worse answer than "that is not a path".
  */
 function listedCwd(cwd: unknown): string | undefined {
-	if (cwd === undefined || cwd === null || cwd === "") return undefined;
+	if (cwd === undefined || cwd === null || cwd === "") {
+		return undefined;
+	}
 	if (typeof cwd !== "string" || !path.isAbsolute(cwd)) {
 		throw new RpcError(INVALID_PARAMS, `session/list: cwd must be an absolute path, got ${JSON.stringify(cwd)}`, {
-			reason: "invalid_cwd",
+			data: { reason: "invalid_cwd" },
 		});
 	}
 	return path.resolve(cwd);
@@ -272,13 +300,16 @@ export async function listSessions(deps: RestoreDeps, params: unknown): Promise<
 	if (!result.ok) {
 		// A cursor the store cannot read is the client's error to fix; a store it cannot read is ours.
 		throw new RpcError(result.kind === "cursor" ? INVALID_PARAMS : INTERNAL_ERROR, `session/list: ${result.reason}`, {
-			reason: result.kind === "cursor" ? "bad_cursor" : "store_unavailable",
+			data: { reason: result.kind === "cursor" ? "bad_cursor" : "store_unavailable" },
 		});
 	}
 	const notes: Record<string, unknown> = {};
-	if (result.unusable > 0) notes.unusableRecords = result.unusable;
-	if (result.scanned >= result.scanLimit)
+	if (result.unusable > 0) {
+		notes.unusableRecords = result.unusable;
+	}
+	if (result.scanned >= result.scanLimit) {
 		notes.truncated = `the store holds more than ${result.scanLimit} session records; ${result.scanned} were read, so this list is not complete`;
+	}
 	return {
 		sessions: result.sessions.map(sessionInfo),
 		nextCursor: result.nextCursor,

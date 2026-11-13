@@ -69,14 +69,25 @@ export class HoldTable {
 	 */
 	async acquire(dir: string): Promise<HoldOutcome> {
 		const existing = this.entries.get(dir);
-		if (existing !== undefined) return { held: existing, contested: false, reason: "already held by this agy-acp process" };
-		if (this.pending.has(dir)) return { held: null, contested: true, reason: "another call in this process is taking it" };
+		if (existing !== undefined) {
+			return { held: existing, contested: false, reason: "already held by this agy-acp process" };
+		}
+		if (this.pending.has(dir)) {
+			return { held: null, contested: true, reason: "another call in this process is taking it" };
+		}
 		this.pending.add(dir);
 		try {
 			const outcome = await acquireLock(dir, { staleMs: this.staleMs, now: this.now });
 			if (!outcome.acquired) {
 				this.log(`session store: ${outcome.reason}`);
-				return { held: null, contested: false, unavailable: outcome.unavailable, reason: outcome.reason };
+				// `unavailable` is reported only when the lock call knows it; the union keeps it absent
+				// otherwise, which is what `exactOptionalPropertyTypes` asks of a pass-through.
+				return {
+					held: null,
+					contested: false,
+					...(outcome.unavailable === undefined ? {} : { unavailable: outcome.unavailable }),
+					reason: outcome.reason,
+				};
 			}
 			// A temp file left by a crash is nobody's state; the atomic writer would overwrite it anyway.
 			await sweepTempFiles(dir);
@@ -95,9 +106,13 @@ export class HoldTable {
 	 */
 	async release(dir: string): Promise<void> {
 		const held = this.entries.get(dir);
-		if (held === undefined) return;
+		if (held === undefined) {
+			return;
+		}
 		held.refs -= 1;
-		if (held.refs > 0) return;
+		if (held.refs > 0) {
+			return;
+		}
 		this.entries.delete(dir);
 		try {
 			await held.journal?.close();
@@ -105,7 +120,9 @@ export class HoldTable {
 			this.log(`session store: closing the writer of ${dir} failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 		const failed = await releaseLock(dir);
-		if (failed) this.log(`session store: ${failed} (${dir})`);
+		if (failed) {
+			this.log(`session store: ${failed} (${dir})`);
+		}
 	}
 
 	/**
@@ -115,8 +132,12 @@ export class HoldTable {
 	 */
 	async isLive(dir: string): Promise<boolean> {
 		const seen = await readLockHolder(dir);
-		if (seen.holder === null) return false;
-		if (seen.holder.host !== this.hostname()) return true;
+		if (seen.holder === null) {
+			return false;
+		}
+		if (seen.holder.host !== this.hostname()) {
+			return true;
+		}
 		return pidAlive(seen.holder.pid);
 	}
 }

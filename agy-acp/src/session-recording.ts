@@ -71,12 +71,16 @@ export class SessionRecording {
 
 	/** Stop recording for good: flush what is pending, then hand the lock back. */
 	async detach(): Promise<void> {
-		if (this.disposed) return;
+		if (this.disposed) {
+			return;
+		}
 		this.disposed = true;
 		const release = this.release;
 		this.recorder = null;
 		this.release = null;
-		if (!release) return;
+		if (!release) {
+			return;
+		}
 		try {
 			await release();
 		} catch (err) {

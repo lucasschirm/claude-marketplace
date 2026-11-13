@@ -51,9 +51,7 @@ let loading;
  */
 function engine() {
 	loading ??= (async () => {
-		const [tasks, gh, ci, mg] = await Promise.all(
-			ENGINE_FILES.map((file) => import(pathToFileURL(path.join(LIB_DIR, file)).href)),
-		);
+		const [tasks, gh, ci, mg] = await Promise.all(ENGINE_FILES.map((file) => import(pathToFileURL(path.join(LIB_DIR, file)).href)));
 		return {
 			manager: new tasks.PRTasksManager(),
 			formatTaskSummary: tasks.formatTaskSummary,
@@ -105,12 +103,11 @@ async function resolvePrNumber(explicit, cwd) {
  */
 async function readChecks(prNumber, cwd) {
 	let stdout = "";
-	let failed = false;
 	try {
-		stdout = (await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], { cwd, timeout: GH_TIMEOUT_MS })).stdout;
+		stdout = (await execFileAsync("gh", ["pr", "checks", String(prNumber), "--json", "bucket,state"], { cwd, timeout: GH_TIMEOUT_MS }))
+			.stdout;
 	} catch (err) {
 		stdout = typeof err?.stdout === "string" ? err.stdout : "";
-		failed = true;
 	}
 	try {
 		const checks = JSON.parse(stdout);
@@ -133,9 +130,7 @@ async function readMergeability(prNumber, cwd) {
 			timeout: GH_TIMEOUT_MS,
 		});
 		return JSON.parse(stdout);
-	} catch {
-		return undefined;
-	}
+	} catch {}
 }
 
 // ------------------------------------------------------------------ task state
@@ -376,7 +371,10 @@ async function resolveTask(args, cwd) {
 	}
 
 	const accept = Boolean(args?.accept_suggestion);
-	const replyBody = accept && task.suggestion !== undefined && !message.toLowerCase().includes("suggestion") ? `${message}\n\nApplied suggested changes.` : message;
+	const replyBody =
+		accept && task.suggestion !== undefined && !message.toLowerCase().includes("suggestion")
+			? `${message}\n\nApplied suggested changes.`
+			: message;
 
 	if (accept) {
 		const blockedReason = suggestionGuard(e, task);
@@ -400,7 +398,9 @@ async function resolveTask(args, cwd) {
 		comment = await withCurrentThread(task, folder, (threadId) => e.replyToReviewThread(threadId, replyBody, folder));
 	} catch (err) {
 		// The code change is on disk and has no conversation acknowledging it: say so, loudly
-		throw new Error(`${err.message}${task.appliedSuggestion !== undefined ? " (its suggestion was already written to the file; a retry will not write it again)" : ""}`);
+		throw new Error(
+			`${err.message}${task.appliedSuggestion !== undefined ? " (its suggestion was already written to the file; a retry will not write it again)" : ""}`,
+		);
 	} finally {
 		forget?.();
 	}
@@ -424,7 +424,7 @@ function suggestionGuard(e, task) {
 		return `Conversation ${task.conversationId} carries no code suggestion, so accept_suggestion does nothing. Resolve it with just a message.`;
 	}
 	if (task.appliedSuggestion !== undefined) {
-		if (task.appliedSuggestion === task.suggestion) return undefined; // already on disk, resolve from here
+		if (task.appliedSuggestion === task.suggestion) return; // already on disk, resolve from here
 		return `The suggestion of conversation ${task.conversationId} changed on GitHub after an earlier version was applied; nothing more was applied. Edit the code yourself, then resolve without accept_suggestion.`;
 	}
 	if (task.isOutdated || task.isBaseSide || task.isFileLevel) {
@@ -444,7 +444,6 @@ function suggestionGuard(e, task) {
 		e.manager.markShown(task);
 		return `${lead}; nothing was applied. It is:\n\`\`\`\n${task.suggestion}\n\`\`\`\nCall pr_task_resolve again with accept_suggestion to apply it.`;
 	}
-	return undefined;
 }
 
 async function blockTask(args, cwd) {
@@ -545,6 +544,9 @@ lines.on("line", (line) => {
 	}
 	// (requests are handled concurrently: a `gh` call must not hold the next message hostage)
 	handleRequest(request).catch((err) => {
+		// stdout carries this server's JSON-RPC frames, so a stray console.log corrupts the protocol and the
+		// host stops listing the tools. stderr is the only channel left for a failure that cannot be answered.
+		// biome-ignore lint/suspicious/noConsole: stderr is the only channel left; stdout is the protocol stream.
 		console.error(`pr-observer: ${err?.stack ?? err}`);
 		sendError(request?.id, -32603, err?.message ?? String(err));
 	});

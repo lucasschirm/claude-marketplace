@@ -98,21 +98,39 @@ export function decodeMeta(text: string): Decoded<StoredSessionMeta> {
 	} catch (err) {
 		return bad(`not JSON (${(err as Error).message})`);
 	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("not a JSON object");
-	const o = raw as Record<string, unknown>;
-	if (o.version !== STORE_RECORD_VERSION) return bad(`unsupported version ${JSON.stringify(o.version)}`);
-	if (!isSessionId(o.sessionId)) return bad(`sessionId ${JSON.stringify(o.sessionId)} is not usable as a directory name`);
-	if (!isRecordedCwd(o.cwd)) return bad(`cwd ${JSON.stringify(o.cwd)} is not an absolute path`);
-	for (const field of ["mode", "model", "effort"] as const) {
-		if (typeof o[field] !== "string" || o[field] === "") return bad(`${field} must be a non-empty string`);
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return bad("not a JSON object");
 	}
-	if (typeof o.title !== "string") return bad("title must be a string");
+	const o = raw as Record<string, unknown>;
+	if (o.version !== STORE_RECORD_VERSION) {
+		return bad(`unsupported version ${JSON.stringify(o.version)}`);
+	}
+	if (!isSessionId(o.sessionId)) {
+		return bad(`sessionId ${JSON.stringify(o.sessionId)} is not usable as a directory name`);
+	}
+	if (!isRecordedCwd(o.cwd)) {
+		return bad(`cwd ${JSON.stringify(o.cwd)} is not an absolute path`);
+	}
+	for (const field of ["mode", "model", "effort"] as const) {
+		if (typeof o[field] !== "string" || o[field] === "") {
+			return bad(`${field} must be a non-empty string`);
+		}
+	}
+	if (typeof o.title !== "string") {
+		return bad("title must be a string");
+	}
 	const turns = isoMs(o.turns);
-	if (turns === null || !Number.isInteger(turns)) return bad("turns must be a non-negative integer");
+	if (turns === null || !Number.isInteger(turns)) {
+		return bad("turns must be a non-negative integer");
+	}
 	const createdAtMs = isoMs(o.createdAtMs);
 	const updatedAtMs = isoMs(o.updatedAtMs);
-	if (createdAtMs === null) return bad("createdAtMs must be a non-negative number");
-	if (updatedAtMs === null) return bad("updatedAtMs must be a non-negative number");
+	if (createdAtMs === null) {
+		return bad("createdAtMs must be a non-negative number");
+	}
+	if (updatedAtMs === null) {
+		return bad("updatedAtMs must be a non-negative number");
+	}
 	return {
 		ok: true,
 		value: {
@@ -133,10 +151,14 @@ export function decodeMeta(text: string): Decoded<StoredSessionMeta> {
 /** The title a prompt gives a session: its first line, whitespace collapsed. */
 export function titleFromPrompt(text: string): string {
 	const line = text.replace(/\s+/g, " ").trim();
-	if (line.length <= MAX_TITLE_CHARS) return line;
+	if (line.length <= MAX_TITLE_CHARS) {
+		return line;
+	}
 	let cut = line.slice(0, MAX_TITLE_CHARS - 1);
 	const tail = cut.codePointAt(cut.length - 1);
-	if (tail !== undefined && tail >= 0xd800 && tail <= 0xdfff) cut = cut.slice(0, -1); // never split a pair
+	if (tail !== undefined && tail >= 0xd800 && tail <= 0xdfff) {
+		cut = cut.slice(0, -1); // never split a pair
+	}
 	return `${cut}…`;
 }
 
@@ -149,7 +171,9 @@ export function titleFromPrompt(text: string): string {
  */
 function boundForStorage(update: AcpSessionUpdate): AcpSessionUpdate {
 	const line = JSON.stringify(update);
-	if (Buffer.byteLength(line, "utf8") <= MAX_UPDATE_LINE_BYTES) return update;
+	if (Buffer.byteLength(line, "utf8") <= MAX_UPDATE_LINE_BYTES) {
+		return update;
+	}
 	const kept = { ...update } as Record<string, unknown>;
 	delete kept.content; // the tool output and the tool's parameters are the payload; the shape is not
 	delete kept.rawInput;
@@ -171,18 +195,26 @@ export function encodeUpdateLine(atMs: number, update: AcpSessionUpdate): string
 /** One `updates.ndjson` line. A torn last line (a crash mid-append) is unusable, and so is anything
  * whose `update` is not an object with a `sessionUpdate` - which is what the reader reports, per line. */
 export function decodeUpdateLine(line: string): Decoded<StoredUpdate> {
-	if (line.trim() === "") return bad("empty line");
+	if (line.trim() === "") {
+		return bad("empty line");
+	}
 	let raw: unknown;
 	try {
 		raw = JSON.parse(line);
 	} catch (err) {
 		return bad(`not JSON (${(err as Error).message})`);
 	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("not a JSON object");
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return bad("not a JSON object");
+	}
 	const o = raw as Record<string, unknown>;
 	const update = o.update;
-	if (typeof update !== "object" || update === null || Array.isArray(update)) return bad("update is not a JSON object");
-	if (typeof (update as Record<string, unknown>).sessionUpdate !== "string") return bad("update carries no sessionUpdate");
+	if (typeof update !== "object" || update === null || Array.isArray(update)) {
+		return bad("update is not a JSON object");
+	}
+	if (typeof (update as Record<string, unknown>).sessionUpdate !== "string") {
+		return bad("update carries no sessionUpdate");
+	}
 	const atMs = isoMs(o.atMs) ?? 0;
 	return { ok: true, value: { atMs, update: update as AcpSessionUpdate } };
 }
@@ -198,12 +230,20 @@ export function decodeLock(text: string): Decoded<LockHolder> {
 	} catch (err) {
 		return bad(`not JSON (${(err as Error).message})`);
 	}
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("not a JSON object");
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		return bad("not a JSON object");
+	}
 	const o = raw as Record<string, unknown>;
 	const pid = isoMs(o.pid);
-	if (pid === null || !Number.isInteger(pid) || pid <= 0) return bad("pid is not a process id");
-	if (typeof o.host !== "string") return bad("host is not a string");
+	if (pid === null || !Number.isInteger(pid) || pid <= 0) {
+		return bad("pid is not a process id");
+	}
+	if (typeof o.host !== "string") {
+		return bad("host is not a string");
+	}
 	const startedAtMs = isoMs(o.startedAtMs);
-	if (startedAtMs === null) return bad("startedAtMs is not a number");
+	if (startedAtMs === null) {
+		return bad("startedAtMs is not a number");
+	}
 	return { ok: true, value: { pid, host: o.host, startedAtMs } };
 }

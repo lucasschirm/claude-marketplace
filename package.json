@@ -8,20 +8,23 @@
   "scripts": {
     "test": "bash test/run.sh",
     "test:unit": "bash test/run.sh unit agy-acp",
-    "typecheck": "tsc --noEmit",
-    "lint": "biome lint extensions agy-acp",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p agy-acp && tsc --noEmit -p agy-acp/test",
+    "lint": "biome lint extensions agy-acp test scripts plugins",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "node scripts/check-quality.mjs --check",
+    "qa:static": "npm run typecheck && npm run lint && npm run format:check && npm run check && npm run validate",
+    "hooks:install": "node scripts/install-hooks.mjs",
+    "prepare": "node scripts/install-hooks.mjs",
     "qa:baseline": "node scripts/check-quality.mjs --write",
-    "qa": "npm run typecheck && npm run lint && npm run format:check && npm run check && npm run validate && npm run test:unit",
+    "qa": "npm run qa:static && npm run test:unit",
     "validate": "node scripts/validate-marketplace.mjs"
   },
   "pi": {
     "extensions": [
       "./extensions/compaction-fail-recovery.ts",
       "./extensions/observe-pr.ts",
-      "./extensions/devin-delegate.ts",
+      "./extensions/delegate-task.ts",
       "./extensions/orca-orchestration.ts",
       "./extensions/pr-tasks.ts",
       "./extensions/tools.ts"

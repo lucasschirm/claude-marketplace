@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { agyArgs } from "../src/agy/args.ts";
 import { lifecycleConfigFromEnv } from "../src/config.ts";
-import { makeModelGate, parseLaunchArgs, withEnvDefaults } from "../src/launch.ts";
+import { launchArgv, makeModelGate, parseLaunchArgs, withEnvDefaults } from "../src/launch.ts";
 import { SelectionCommands } from "../src/session-selection.ts";
 import { AGY_EFFORTS, DEFAULT_MODELS_TIMEOUT_MS, effortConflict, modelEffort, parseModelsTable, type AgyModel } from "../src/agy/models.ts";
 import { agyModeFlag, offeredModes, SessionSelection, type AcpConfigOption } from "../src/config-options.ts";
@@ -189,6 +189,16 @@ test("the selectors agy-acp advertises are ACP-shaped", () => {
 		oddModel.options.some((o) => o.value === "my-custom-model"),
 		"advertising a model the client cannot pick is a trap",
 	);
+});
+
+// F10: `argv[0]` was typed `string` because the index signature said so, and `launch.ts:74` already
+// resolved `argvPrefix: []` to unset to stop an empty argv reaching a spawn. The argv the probes and the
+// sessions run is non-empty BY CONSTRUCTION, and the type is where that belongs.
+test("the launch argv is never empty: an empty prefix falls back to the command", () => {
+	assert.strictEqual(withEnvDefaults({ argvPrefix: [] }).argvPrefix, undefined);
+	assert.deepStrictEqual(launchArgv(withEnvDefaults({ argvPrefix: [] })), ["agy"]);
+	assert.deepStrictEqual(launchArgv(withEnvDefaults({ command: "agy-wrapper" })), ["agy-wrapper"]);
+	assert.deepStrictEqual(launchArgv(withEnvDefaults({ argvPrefix: ["node", "fake-agy.ts"] })), ["node", "fake-agy.ts"]);
 });
 
 test("parseLaunchArgs reads the selection flags and refuses what it cannot honour", () => {
@@ -597,12 +607,9 @@ test("the mode a child was launched with does not outlive the session's mode", a
 	try {
 		const sid = await newSession(h);
 		await h.request("session/prompt", promptParams(sid, prompts[0]));
-		assert.ok(
-			!recordedLaunches(file)
-				.filter((a) => a[0] !== "models")[0]
-				.includes("--mode"),
-			"the first child is launched with no mode flag",
-		);
+		const firstLaunch = recordedLaunches(file).find((a) => a[0] !== "models");
+		assert.ok(firstLaunch, "a child was launched");
+		assert.ok(!firstLaunch.includes("--mode"), "the first child is launched with no mode flag");
 
 		await h.request("session/set_mode", { sessionId: sid, modeId: "plan" });
 		const planned = await h.request("session/prompt", promptParams(sid, prompts[0]));
@@ -643,7 +650,8 @@ test("effort reaches the next launch, with the operator's sandbox and the sessio
 		const sid = await newSession(h);
 		const turn1 = await h.request("session/prompt", promptParams(sid, prompts[0]));
 		assert.strictEqual((turn1.result as { stopReason?: string })?.stopReason, "end_turn", "the first turn ran");
-		const first = recordedLaunches(file).filter((argv) => argv[0] !== "models")[0];
+		const first = recordedLaunches(file).find((argv) => argv[0] !== "models");
+		assert.ok(first, "the first child was launched");
 		assert.ok(first.includes("--sandbox"), "--sandbox passes through when the operator configured it");
 		assert.ok(!first.includes("--effort"), "and no flag at all when nothing was chosen");
 

@@ -9,7 +9,8 @@
 //   - system_message             → a logged agent_message_chunk notice
 //   - per-turn usage delta       → usage_update (agy-acp extension)
 //
-// Subagent steps have no mapping of their own: their gating and attribution land in sub-issue 59.
+// Subagent steps have no mapping of their own in the stream: a subagent's steps are not in it, and
+// its gated tool calls ride as progress on the parent call (subagents.ts, issue #59).
 // The one exception is settling: a tool step's terminal state may arrive with the step's own
 // type (an invoke_subagent DONE comes in as step_type "subagent"), so a tracked toolCallId
 // settles regardless of the type it arrives under.
@@ -81,7 +82,9 @@ const TITLE_PARAM_CANDIDATES = ["CommandLine", "Path", "query", "Uri", "URL", "R
 export function toolTitleOf(toolName: string, parameters: Record<string, unknown>): string {
 	for (const key of TITLE_PARAM_CANDIDATES) {
 		const value = parameters[key];
-		if (typeof value === "string" && value !== "") return truncate(`${toolName}: ${value}`, 200);
+		if (typeof value === "string" && value !== "") {
+			return truncate(`${toolName}: ${value}`, 200);
+		}
 	}
 	return toolName;
 }
@@ -94,10 +97,16 @@ export function toolLocationsOf(parameters: Record<string, unknown>): AcpToolCal
 
 /** Truncates at a whole code point and says what was lost; the marker carries the original length. */
 export function truncate(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
+	if (text.length <= maxChars) {
+		return text;
+	}
 	let cut = text.slice(0, maxChars);
-	const tail = cut.codePointAt(cut.length - 1);
-	if (tail !== undefined && tail >= 0xd800 && tail <= 0xdfff) cut = cut.slice(0, -1); // a split surrogate pair
+	// Only a HIGH surrogate last (0xD800-0xDBFF) is half a character: its low half is in the part being dropped. A low
+	// surrogate last closes a pair whose high half is already in `cut` - whole; NaN on an empty cut fails both comparisons.
+	const last = cut.charCodeAt(cut.length - 1);
+	if (last >= 0xd800 && last <= 0xdbff) {
+		cut = cut.slice(0, -1);
+	}
 	return `${cut}\n… [truncated, ${text.length} characters total]`;
 }
 
@@ -113,14 +122,20 @@ export function toolCallStarted(
 	locations: AcpToolCallLocation[] | undefined,
 ): AcpToolCall {
 	const update: AcpToolCall = { sessionUpdate: "tool_call", toolCallId, title, kind, status: "pending" };
-	if (rawInput !== undefined) update.rawInput = rawInput;
-	if (locations !== undefined) update.locations = locations;
+	if (rawInput !== undefined) {
+		update.rawInput = rawInput;
+	}
+	if (locations !== undefined) {
+		update.locations = locations;
+	}
 	return update;
 }
 
 export function toolCallCompleted(toolCallId: string, output: string | undefined): AcpToolCallUpdate {
 	const update: AcpToolCallUpdate = { sessionUpdate: "tool_call_update", toolCallId, status: "completed" };
-	if (output !== undefined) update.content = [{ type: "content", content: { type: "text", text: truncate(output, MAX_TOOL_TEXT_CHARS) } }];
+	if (output !== undefined) {
+		update.content = [{ type: "content", content: { type: "text", text: truncate(output, MAX_TOOL_TEXT_CHARS) } }];
+	}
 	return update;
 }
 

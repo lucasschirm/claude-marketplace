@@ -48,7 +48,9 @@ export type LockOutcome =
 
 /** Is a process id alive? EPERM means alive and not ours to signal; ESRCH means gone. */
 export function pidAlive(pid: number): boolean {
-	if (!Number.isInteger(pid) || pid <= 0) return false;
+	if (!Number.isInteger(pid) || pid <= 0) {
+		return false;
+	}
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -69,11 +71,15 @@ export async function readLockHolder(dir: string): Promise<{ holder: LockHolder 
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
 		// No lock file at all: whatever refused the create is gone again (or this reader lost the race).
-		if (code === "ENOENT" || code === "ENOTDIR") return { holder: null, reason: "the lock file is gone" };
+		if (code === "ENOENT" || code === "ENOTDIR") {
+			return { holder: null, reason: "the lock file is gone" };
+		}
 		return { holder: null, reason: `the lock file could not be read: ${(err as Error).message}` };
 	}
 	const decoded = decodeLock(text);
-	if (!decoded.ok) return { holder: null, reason: `the lock file is not readable (${decoded.reason})` };
+	if (!decoded.ok) {
+		return { holder: null, reason: `the lock file is not readable (${decoded.reason})` };
+	}
 	const holder = decoded.value;
 	return { holder, reason: `held by pid ${holder.pid} on host ${holder.host} since ${new Date(holder.startedAtMs).toISOString()}` };
 }
@@ -110,7 +116,9 @@ async function judgeExistingLock(
 /** The verdict for a lock file this process cannot read (corrupt body, or vanished between the `EEXIST`
  * and this read). As good as no holder - a lock that names nobody protects nothing - but only once. */
 function judgeUnreadableLock(attempt: number, reason: string): { action: "refuse"; reason: string } | { action: "takeover" } {
-	if (attempt > 0) return { action: "refuse", reason: `the lock could not be read twice (${reason})` };
+	if (attempt > 0) {
+		return { action: "refuse", reason: `the lock could not be read twice (${reason})` };
+	}
 	return { action: "takeover" };
 }
 
@@ -178,12 +186,12 @@ export async function acquireLock(dir: string, options: LockOptions): Promise<Lo
 			// past the caller's failure model (and, from `session/new`, past the disposal of its child).
 			try {
 				await fs.promises.rm(file, { force: true });
-			} catch (err) {
+			} catch (rmErr) {
 				return {
 					acquired: false,
 					holder: seen.holder,
 					unavailable: true,
-					reason: `a lock that looks stale could not be removed: ${(err as Error).message}`,
+					reason: `a lock that looks stale could not be removed: ${(rmErr as Error).message}`,
 				};
 			}
 			continue;

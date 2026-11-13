@@ -306,6 +306,31 @@ test("session/cancel during a tool call: the prompt answers cancelled, the tool 
 	}
 });
 
+// F8: five sites wrote `pending.settled` and cleared `pending` by hand. The pair that matters here is
+// "a cancel answers the prompt now" and "the child's own result arrives afterwards": a second settle
+// would emit a turn's worth of updates for a turn the client was already told was cancelled.
+test("a result that arrives after a cancel settles nothing: no usage update, no second tool failure", async () => {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-late-result-"));
+	const childPidFile = path.join(tmp, "group-child.pid");
+	const h = await startHarness("interrupted-sigint", { FAKE_AGY_GROUP_CHILD: "30", FAKE_AGY_CHILD_PID_FILE: childPidFile }, {});
+	try {
+		const sid = await newSession(h);
+		const turn = h.request("session/prompt", promptOf(sid, recordedPrompt("interrupted-sigint")));
+		await waitFor("the tool call update", 5000, () => toolUpdates(h).some((u) => u.sessionUpdate === "tool_call"));
+		h.notify("session/cancel", { sessionId: sid });
+		assert.deepStrictEqual(await turn, { stopReason: "cancelled" });
+		const failedOnce = toolUpdates(h).filter((u) => u.status === "failed").length;
+		assert.strictEqual(failedOnce, 1, "the active tool was failed by the cancel");
+		// The child's recorded result, and its exit, both land on a turn that is already settled.
+		await new Promise((r) => setTimeout(r, 500));
+		assert.strictEqual(h.updates.filter((u) => u.sessionUpdate === "usage_update").length, 0, "a settled turn reports no usage");
+		assert.strictEqual(toolUpdates(h).filter((u) => u.status === "failed").length, failedOnce, "and fails no tool a second time");
+	} finally {
+		await h.close();
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
+});
+
 test("session/cancel with a permission request on screen: the ask is denied with the cancel reason", async () => {
 	const h = await startHarness("tool-allowed-skip-permissions", { FAKE_AGY_RUN_HOOKS: "1" }, { heartbeatMs: 100, cancelEscalateMs: 300 });
 	try {

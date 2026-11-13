@@ -1,0 +1,10 @@
+#!/bin/sh
+# Stamps the Quality-Gate trailer - but only onto a commit whose gate actually ran. `--no-verify`
+# skips this hook too, which is why the decision is the sentinel's and not this hook's: being
+# called proves nothing, and not being called must not be the only thing that stops a stamp.
+#
+# commit-msg rather than prepare-commit-msg: this one runs AFTER the editor, on the message the
+# author actually wrote. prepare-commit-msg runs before it, where the message is still git's empty
+# template - adding a trailer there makes the trailer the message, which defeats git's "aborting
+# commit due to empty commit message" and puts the trailer above whatever the author then types.
+exec node "$(dirname "$0")/../scripts/quality-gate-trailer.mjs" commit-msg "$@"

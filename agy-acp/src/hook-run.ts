@@ -5,10 +5,12 @@
 // payload JSON, stdout is the decision.
 //
 // Fail-closed by construction: every exit path goes through finish(), the only writer on stdout,
-// which always prints one JSON decision object first. Empty stdout is impossible - in agy, empty
-// stdout means allow, so this is the security line. The "Do not retry this call" wording matters:
-// without it the model retried 5 times (spike). All paths exit 0: a non-zero exit would make agy
-// report its own generic "hook failed" text instead of the reason the model needs.
+// which always prints one JSON decision object first AND waits for it to reach the pipe before
+// exiting. Empty stdout is impossible - in agy, empty stdout means allow, so this is the security
+// line, and a half-written line is the same failure: unparseable JSON is not a denial. The "Do not
+// retry this call" wording matters: without it the model retried 5 times (spike). All paths exit 0:
+// a non-zero exit would make agy report its own generic "hook failed" text instead of the reason
+// the model needs.
 //
 // The deadline ladder (enforced by the caller, mirrored here): the client deadline (default 10 min)
 // is below AGY_ACP_HOOK_DEADLINE_MS (this file's own timer), which is below the hooks.json timeout,
@@ -20,30 +22,46 @@
 // reads as a fail-closed hook failure).
 
 import { connect } from "node:net";
+import { FLUSH_TIMEOUT_MS } from "./flush-stdout.ts";
 
 export function runBridgeHook(): void {
 	const NO_RETRY = "Do not retry this call.";
+	/**
+	 * The ceiling on each stream this hook reads - its own stdin payload, and the bridge's answer. agy
+	 * writes the first and agy-acp writes the second, but the hook is the security boundary and must
+	 * not be the one reader that buffers whatever it is handed: past the ceiling it denies, which is
+	 * the answer it would have to give anyway. A deny reason is kilobytes (the longest recorded is
+	 * under 300 KiB).
+	 */
+	const MAX_STREAM_BYTES = 1024 * 1024;
 	const local = (why: string): string => `denied by agy-acp: ${why}`;
 
 	const written = { value: false };
 	/** The single stdout writer: prints one JSON decision, then exits 0. Idempotent. Every denial
 	 * carries the no-retry wording - enforced here, so no path can forget it. */
 	function finish(decision: "allow" | "deny", reason?: string): void {
-		if (written.value) return;
+		if (written.value) {
+			return;
+		}
 		written.value = true;
+		const why = reason ?? "the permission bridge failed";
 		const out =
 			decision === "deny"
-				? (() => {
-						const r = reason ?? "the permission bridge failed";
-						return JSON.stringify({ decision, reason: r.includes(NO_RETRY) ? r : `${r}. ${NO_RETRY}` });
-					})()
+				? JSON.stringify({ decision, reason: why.includes(NO_RETRY) ? why : `${why}. ${NO_RETRY}` })
 				: JSON.stringify({ decision });
+		// The exit must not outrun the bytes: a bare `process.exit` abandons whatever stdout still has
+		// queued, and a decision stops fitting one write as soon as a deny reason is long (the pipe
+		// buffer is 64 KiB) - exiting here truncated the JSON into something agy cannot parse, which it
+		// reads as no decision at all. So leave from the write's own completion callback, with a bounded
+		// fallback for a stdout nobody drains: a hook that never exits is worse than a late one.
+		const leave = (): void => process.exit(0);
+		setTimeout(leave, FLUSH_TIMEOUT_MS);
 		try {
-			process.stdout.write(out);
+			process.stdout.write(out, leave);
 		} catch {
 			// a dead stdout cannot be revived; the bytes already queued still say the decision
+			leave();
 		}
-		process.exit(0);
 	}
 
 	const deadlineMs = Number(process.env.AGY_ACP_HOOK_DEADLINE_MS ?? 0);
@@ -89,7 +107,9 @@ export function runBridgeHook(): void {
 		finish("deny", local("the answer from the permission bridge was not a decision"));
 	}
 	function onPayload(): void {
-		if (payloadHandled) return;
+		if (payloadHandled) {
+			return;
+		}
 		payloadHandled = true;
 		let payload: unknown;
 		try {
@@ -114,10 +134,18 @@ export function runBridgeHook(): void {
 				finish("deny", local("writing to the permission bridge failed"));
 			}
 		});
+		let replyBytes = 0;
 		conn.on("data", (d: Buffer) => {
+			replyBytes += d.length;
+			if (replyBytes > MAX_STREAM_BYTES) {
+				finish("deny", local(`the answer from the permission bridge exceeded ${MAX_STREAM_BYTES} bytes`));
+				return;
+			}
 			buf += d.toString("utf8");
 			const i = buf.indexOf("\n");
-			if (i < 0) return;
+			if (i < 0) {
+				return;
+			}
 			handleReply(buf.slice(0, i));
 		});
 		conn.on("error", (err: Error) => finish("deny", local(`the permission socket is unavailable (${err.message})`)));
@@ -127,7 +155,13 @@ export function runBridgeHook(): void {
 	}
 
 	process.stdin.setEncoding("utf8");
+	let inputBytes = 0;
 	process.stdin.on("data", (d: string) => {
+		inputBytes += Buffer.byteLength(d, "utf8");
+		if (inputBytes > MAX_STREAM_BYTES) {
+			finish("deny", local(`the hook payload exceeded ${MAX_STREAM_BYTES} bytes`));
+			return;
+		}
 		input += d;
 	});
 	process.stdin.on("end", () => onPayload());

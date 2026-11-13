@@ -144,7 +144,9 @@ export class SessionStore {
 			return { ok: false, reason: `agy reported a conversation id that cannot be stored: ${JSON.stringify(seed.sessionId)}` };
 		}
 		const root = await this.ensureRoot();
-		if (!root.ok) return { ok: false, reason: root.reason };
+		if (!root.ok) {
+			return { ok: false, reason: root.reason };
+		}
 		const dir = this.sessionDir(seed.sessionId);
 		try {
 			await ensurePrivateDir(dir);
@@ -152,7 +154,9 @@ export class SessionStore {
 			return { ok: false, reason: `the session directory could not be created (${reasonOf(err)})` };
 		}
 		const taken = await this.holds.acquire(dir);
-		if (taken.held === null) return { ok: false, reason: `${seed.sessionId}: ${taken.reason}` };
+		if (taken.held === null) {
+			return { ok: false, reason: `${seed.sessionId}: ${taken.reason}` };
+		}
 		const held = taken.held;
 		const at = this.now();
 		const meta: StoredSessionMeta = {
@@ -178,7 +182,9 @@ export class SessionStore {
 		// A second `session/new` over one id (agy reporting a conversation it already reported) is a new run
 		// of the same conversation: the old writer closes, the log it was appending to stays where it is,
 		// and the history continues rather than being written by two handles at once.
-		if (held.journal) await held.journal.close().catch(() => {});
+		if (held.journal) {
+			await held.journal.close().catch(() => {});
+		}
 		const journal = new SessionJournal({ dir, meta, log: this.log, maxBytes: this.maxBytes, rotations: this.rotations, now: this.now });
 		held.journal = journal;
 		held.refs += 1;
@@ -220,7 +226,9 @@ export class SessionStore {
 			return { ok: false, failure: { kind: "open-in-process", reason: `session ${sessionId} is already open in this agy-acp process` } };
 		}
 		const root = await this.ensureRoot();
-		if (!root.ok) return { ok: false, failure: { kind: "io", reason: root.reason } };
+		if (!root.ok) {
+			return { ok: false, failure: { kind: "io", reason: root.reason } };
+		}
 		const taken = await this.holds.acquire(dir);
 		if (taken.held === null) {
 			if (taken.contested) {
@@ -231,7 +239,9 @@ export class SessionStore {
 			}
 			// Nobody holds it; the state directory refused us. "In use" would point at another process and a
 			// lock worth waiting for.
-			if (taken.unavailable) return { ok: false, failure: { kind: "io", reason: taken.reason } };
+			if (taken.unavailable) {
+				return { ok: false, failure: { kind: "io", reason: taken.reason } };
+			}
 			const seen = await readLockHolder(dir);
 			return { ok: false, failure: { kind: "locked", reason: `session ${sessionId} is held by another agy-acp process (${seen.reason})` } };
 		}
@@ -239,7 +249,9 @@ export class SessionStore {
 		const journal = new SessionJournal({ dir, meta, log: this.log, maxBytes: this.maxBytes, rotations: this.rotations, now: this.now });
 		held.journal = journal;
 		held.refs += 1;
-		if (!withReplay) return { ok: true, opened: { meta, journal, replay: [], droppedLines: 0, truncated: false } };
+		if (!withReplay) {
+			return { ok: true, opened: { meta, journal, replay: [], droppedLines: 0, truncated: false } };
+		}
 		const stored = await this.readUpdates(dir);
 		return { ok: true, opened: { meta, journal, ...stored } };
 	}

@@ -5,7 +5,7 @@
 // layer (the ACP methods that manage one AgyProcess per session) will import from here, so the
 // surface it sees stays put even if the internals move.
 
-export { AGY_PROBE_EVENT, agyArgs, type AgyProcessOptions } from "./agy/args.ts";
+export { AGY_PROBE_EVENT, agyArgs, resolveArgv, type AgyArgv, type AgyProcessOptions } from "./agy/args.ts";
 export type { AgyDriverEvent, AgyExitInfo, AgyResultEventDelta } from "./agy/events.ts";
 export { AgyProcess } from "./agy/process.ts";
 export {

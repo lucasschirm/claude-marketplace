@@ -1,0 +1,9 @@
+#!/bin/sh
+# The static quality gate, and the sentinel that lets prepare-commit-msg tell a gated commit from a
+# bypassed one. Deliberately thin: everything that can be got wrong lives in the .mjs, which
+# test/test-commit-hooks.ts can drive.
+#
+# $0 is "<core.hooksPath>/pre-commit" and git runs hooks from the top of the working tree, so with
+# the relative hooksPath that scripts/install-hooks.mjs sets, this resolves inside whichever
+# worktree is committing - including a linked one, which has its own git dir and its own checkout.
+exec node "$(dirname "$0")/../scripts/quality-gate-trailer.mjs" pre-commit "$@"

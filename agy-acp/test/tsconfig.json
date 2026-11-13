@@ -1,0 +1,11 @@
+{
+	// The suites are held to every flag src is held to, except noUncheckedIndexedAccess: measured at
+	// 128 errors here against 11 in src, and every one of them is a test indexing a recorded fixture
+	// (`lines[3]`, `match[1]`, `updates[0]`) whose shape the fixture itself guarantees. A test that
+	// indexes past the end fails loudly on the spot, which is the signal the flag would buy.
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"noUncheckedIndexedAccess": false
+	},
+	"include": ["./**/*.ts"]
+}

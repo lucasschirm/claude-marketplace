@@ -51,7 +51,11 @@ export function stateKey(sessionId, cwd) {
 }
 
 function sanitize(raw) {
-	return String(raw ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "unknown";
+	return (
+		String(raw ?? "unknown")
+			.replace(/[^a-zA-Z0-9_-]/g, "")
+			.slice(0, 24) || "unknown"
+	);
 }
 
 export function readStdinJson(script, sessionId) {
@@ -124,7 +128,7 @@ export function writeState(key, state) {
 		fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
 		fs.renameSync(tmp, target);
 		return true;
-	} catch (err) {
+	} catch {
 		return false;
 	}
 }
@@ -193,15 +197,11 @@ function classifyMergeabilityFallback(payload) {
 	if (mergeable === "MERGEABLE" || state === "CLEAN" || state === "UNSTABLE" || state === "BLOCKED" || state === "HAS_HOOKS") {
 		return "mergeable";
 	}
-	return undefined;
 }
 
 /** One PR snapshot with everything the hooks decide on. `error` marks an unusable read. */
 export async function readPrSnapshot(engine, cwd) {
-	const view = await ghJson(
-		["pr", "view", "--json", "number,state,isDraft,mergeable,mergeStateStatus"],
-		cwd,
-	);
+	const view = await ghJson(["pr", "view", "--json", "number,state,isDraft,mergeable,mergeStateStatus"], cwd);
 	if (view.failed) {
 		// "no pull requests found" is a normal answer here (the branch has no PR): not an error.
 		const text = `${view.stderr}\n${view.err?.message ?? ""}`;
@@ -211,7 +211,7 @@ export async function readPrSnapshot(engine, cwd) {
 	const pr = view.data ?? {};
 	const state = String(pr.state ?? "").toUpperCase();
 	if (state !== "OPEN") return { none: true, state };
-	if (Boolean(pr.isDraft)) return { none: true, state, draft: true, prNumber: Number(pr.number) };
+	if (pr.isDraft) return { none: true, state, draft: true, prNumber: Number(pr.number) };
 
 	const number = Number(pr.number);
 	const mergeState = engine.classifyMergeability(pr) ?? null;
@@ -252,7 +252,11 @@ function summarizeChecks(engine, rows, ghFailed) {
 		const state = String(row?.state ?? row?.status ?? row?.conclusion ?? "").toUpperCase();
 		const name = String(row?.name ?? "check");
 		if (bucket === "pending" || ["PENDING", "IN_PROGRESS", "QUEUED"].includes(state)) pendingCount++;
-		else if (bucket === "fail" || bucket === "cancel" || ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(state)) {
+		else if (
+			bucket === "fail" ||
+			bucket === "cancel" ||
+			["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"].includes(state)
+		) {
 			failedNames.push(name);
 		}
 	}

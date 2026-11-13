@@ -35,9 +35,13 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
  */
 export function envInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
 	const raw = env[name];
-	if (raw === undefined || raw.trim() === "") return fallback;
+	if (raw === undefined || raw.trim() === "") {
+		return fallback;
+	}
 	// Only a decimal literal counts: Number("0x10") and Number("1e3") would silently widen a window.
-	if (!/^\d+$/.test(raw.trim())) return fallback;
+	if (!/^\d+$/.test(raw.trim())) {
+		return fallback;
+	}
 	const value = Number(raw.trim());
 	return Number.isSafeInteger(value) ? value : fallback;
 }
@@ -59,14 +63,14 @@ export function envPositiveInt(env: NodeJS.ProcessEnv, name: string, fallback: n
 
 export interface LifecycleConfig {
 	/** The agy binary the sessions launch (undefined = "agy", or the launch option's own value). */
-	command?: string;
+	command?: string | undefined;
 	cancelEscalateMs: number;
 	heartbeatMs: number;
 	shutdownTimeoutMs: number;
 	/** The model each session starts on (undefined = agy's own default). */
-	model?: string;
+	model?: string | undefined;
 	/** The effort each session starts on (undefined = the model's own default). */
-	effort?: string;
+	effort?: string | undefined;
 	/** `AGY_ACP_SANDBOX`: launch every child with `--sandbox`. */
 	sandbox: boolean;
 	/** `AGY_ACP_ALLOW_BYPASS`: offer the `bypass` mode. */

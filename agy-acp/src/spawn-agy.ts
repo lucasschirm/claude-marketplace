@@ -2,11 +2,11 @@
 // start and by every `--conversation` respawn (issue #54 made respawns a routine part of a long
 // run, so the two paths must not be able to drift apart).
 //
-// The env is explicit, never inherited: the configured env plus the bridge trio the PreToolUse
-// hook dials with (socket path, per-session token, its own deadline). `--add-dir` carries the
-// bridge dir and `--dangerously-skip-permissions` is forced - the bridge hook is the only gate,
-// and a hook cannot override headless auto-deny, so the two are a pair. A launch without a bridge
-// must never happen (the session starts the bridge before it gets here for that reason).
+// The env is explicit at the spawn: lib/child-process.ts never inherits one implicitly, so the inherit is a decision
+// taken here - the session's configured env, or this process's when the launch carried none - plus the bridge trio the
+// PreToolUse hook dials with (socket path, per-session token, its own deadline). `--add-dir` carries the bridge dir and
+// `--dangerously-skip-permissions` is forced - the bridge hook is the only gate, and a hook cannot override headless
+// auto-deny, so the two are a pair. A launch without a bridge must never happen; the session starts it before this.
 
 import { AgyProcess, type AgyCumulative } from "./agy-driver.ts";
 import type { SessionLaunchConfig } from "./session.ts";

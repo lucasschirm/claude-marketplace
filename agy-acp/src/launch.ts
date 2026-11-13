@@ -6,21 +6,21 @@
 // replays) and `agy models` (the list a client picks from, issue #55). Both run once and cache, and a
 // failed answer is cached too: neither check may be hammered on every session/new.
 
-import { checkAgyVersion, type AgyVersionStatus } from "./agy-driver.ts";
+import { checkAgyVersion, resolveArgv, type AgyVersionStatus } from "./agy-driver.ts";
 import { DEFAULT_MODELS_TIMEOUT_MS, makeModelCatalog, type ModelCatalog } from "./agy/models.ts";
 import { lifecycleConfigFromEnv } from "./config.ts";
 
 export interface AgyLaunchOptions {
 	/** The agy binary (default "agy"). */
-	command?: string;
+	command?: string | undefined;
 	/** argv prefix in place of the command (tests point this at the fake). */
-	argvPrefix?: string[];
+	argvPrefix?: string[] | undefined;
 	/** The exact environment the child sees (default the server's process.env). */
 	env?: NodeJS.ProcessEnv;
 	/** The model every session starts on (a client may change it: session/set_config_option). */
-	model?: string;
+	model?: string | undefined;
 	/** The reasoning effort every session starts on (agy's own level; see agy/models.ts). */
-	effort?: string;
+	effort?: string | undefined;
 	/** `agy --sandbox` for every child: defence in depth under the bridge, never instead of it. */
 	sandbox?: boolean;
 	/**
@@ -71,21 +71,21 @@ export function withEnvDefaults(overrides?: AgyLaunchOptions): AgyLaunchOptions 
 	// the two probes below would happily check `$PATH`'s agy and report a version and a model list for a
 	// binary no session ever runs. Resolve an empty prefix to "unset" once, here, so the gates and the
 	// sessions can only ever point at the same binary.
-	if (out.argvPrefix !== undefined && out.argvPrefix.length === 0) out.argvPrefix = undefined;
+	if (out.argvPrefix !== undefined && out.argvPrefix.length === 0) {
+		out.argvPrefix = undefined;
+	}
 	return out;
 }
 
-/** The argv the sessions will run: the configured prefix, or the command on its own. */
-function launchArgv(launch: AgyLaunchOptions): string[] {
-	return launch.argvPrefix ?? [launch.command ?? "agy"];
-}
+/** The argv the sessions will run (shared with the driver: one resolver, one non-empty guarantee). */
+export const launchArgv = resolveArgv;
 
 /** The version gate: run once before the first session/new, cached (a failed check may retry). */
 export function makeVersionGate(launch: AgyLaunchOptions): () => Promise<AgyVersionStatus> {
 	let cached: Promise<AgyVersionStatus> | null = null;
 	return () => {
 		if (!cached) {
-			cached = checkAgyVersion([...launchArgv(launch), "--version"], undefined, launch.env ?? process.env).catch((err: Error) => {
+			cached = checkAgyVersion([...launchArgv(launch), "--version"], launch.env ?? process.env).catch((err: Error) => {
 				cached = null; // a transient spawn failure is not a verdict about the version
 				throw err;
 			});
@@ -125,14 +125,22 @@ export function parseLaunchArgs(args: string[]): AgyLaunchOptions | undefined {
 	const out: AgyLaunchOptions = {};
 	for (let i = 0; i < tokens.length; i++) {
 		const name = tokens[i];
-		if (name === "--help" || name === "-h" || name === "--version" || name === "-v") continue;
+		if (name === undefined) {
+			break;
+		}
+		if (name === "--help" || name === "-h" || name === "--version" || name === "-v") {
+			continue;
+		}
 		const valued = VALUE_FLAGS[name];
+		const switched = SWITCH_FLAGS[name];
 		if (valued !== undefined) {
 			const value = tokens[++i];
-			if (typeof value !== "string" || value === "" || value.startsWith("-")) return undefined;
+			if (value === undefined || value === "" || value.startsWith("-")) {
+				return undefined;
+			}
 			out[valued] = value;
-		} else if (SWITCH_FLAGS[name] !== undefined) {
-			out[SWITCH_FLAGS[name]] = true;
+		} else if (switched !== undefined) {
+			out[switched] = true;
 		} else {
 			return undefined; // a token that is not a flag we know, or the leftover of a bare switch
 		}

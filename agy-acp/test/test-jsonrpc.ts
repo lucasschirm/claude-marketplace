@@ -1,7 +1,7 @@
 // Run with: node --test agy-acp/test/test-jsonrpc.ts
 import * as assert from "node:assert";
 import { test } from "node:test";
-import { PassThrough } from "node:stream";
+import { PassThrough, type Writable } from "node:stream";
 import { INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, JsonRpcConnection, PARSE_ERROR, RpcError } from "../src/jsonrpc.ts";
 
 interface Peer {
@@ -277,7 +277,7 @@ test("unserializable error data is dropped, but the error is still sent", async 
 	const circular: { self?: unknown } = {};
 	circular.self = circular;
 	peer.conn.registerMethod("bad", () => {
-		throw new RpcError(INVALID_PARAMS, "still answered", circular);
+		throw new RpcError(INVALID_PARAMS, "still answered", { data: circular });
 	});
 	peer.input.write(requestLine(1, "bad"));
 	await settle();
@@ -298,4 +298,37 @@ test("stdin EOF semantics: empty lines are skipped, not answered", async () => {
 	peer.input.write("\n\n   \n\n");
 	await settle();
 	assert.strictEqual(peer.raw(), "");
+});
+
+// The 7 `throw new RpcError(...)` sites in the session layer each wrapped a caught error's *message*
+// and dropped the error, so a stack trace stopped at the rethrow. `useErrorCause` is what keeps them
+// honest; this is what gives them somewhere to put it.
+test("RpcError keeps the error it wrapped as its cause", () => {
+	const origin = new Error("bridge refused");
+	const err = new RpcError(INTERNAL_ERROR, "the permission bridge could not start: bridge refused", { cause: origin });
+	assert.strictEqual(err.cause, origin);
+	assert.strictEqual(err.code, INTERNAL_ERROR);
+	assert.strictEqual(err.data, undefined);
+});
+
+test("RpcError without a cause is unchanged", () => {
+	const err = new RpcError(INVALID_PARAMS, "cwd must be a string", { data: { field: "cwd" } });
+	assert.strictEqual(err.cause, undefined);
+	assert.deepStrictEqual(err.data, { field: "cwd" });
+});
+
+// F11: send() caught the write failure, logged it, and returned true - "sent". The request then sat in
+// `pending` until its timeout (or forever, without one), and the caller was told nothing went wrong.
+test("a write that throws is a failed send: the request rejects instead of waiting for a timeout", async () => {
+	const logs: string[] = [];
+	const output = {
+		write: () => {
+			throw new Error("EPIPE: broken pipe");
+		},
+		once: () => {},
+		on: () => {},
+	} as unknown as Writable;
+	const conn = new JsonRpcConnection({ input: new PassThrough(), output, log: (l) => logs.push(l) });
+	await assert.rejects(conn.request("session/request_permission", { a: 1 }, 2000), /could not be sent/);
+	assert.match(logs.join("\n"), /write failed: EPIPE/);
 });

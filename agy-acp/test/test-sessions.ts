@@ -45,6 +45,7 @@ import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, type AgyAcpServer, type AgyLaunchOptions } from "../src/server.ts";
 import { flattenPrompt } from "../src/prompt.ts";
 import { SessionStore } from "../src/session-store/store.ts";
+import { truncate } from "../src/update-map.ts";
 import "./state-dir.ts"; // a store of our own, so suites and the operator do not share one
 
 const FAKE = fileURLToPath(new URL("./fake-agy.ts", import.meta.url));
@@ -1320,4 +1321,18 @@ test("a load does not promise a session directory that has stopped accepting wri
 	} finally {
 		third.close();
 	}
+});
+
+// A surrogate pair is two code units: cutting between them leaves a lone surrogate, which is not a
+// character any consumer can render or re-encode. The driver truncates tool output and agent text,
+// so the cut lands wherever the model's output happens to put an emoji.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+test("truncate never emits a lone surrogate, at or around a pair boundary", () => {
+	// "ab\u{1F600}cd": a b D83D DE00 c d - the pair ends exactly at maxChars 4
+	assert.strictEqual(truncate("ab\u{1F600}cd", 4), "ab\u{1F600}\n… [truncated, 6 characters total]");
+	assert.strictEqual(truncate("ab\u{1F600}cd", 3), "ab\n… [truncated, 6 characters total]");
+	for (let max = 1; max <= 6; max++) {
+		assert.strictEqual(LONE_SURROGATE.test(truncate("ab\u{1F600}cd", max)), false, `maxChars ${max}`);
+	}
+	assert.strictEqual(truncate("abc", 3), "abc", "a string at the limit is returned untouched");
 });

@@ -24,14 +24,27 @@ export const INTERNAL_ERROR = -32603;
  */
 export const RESOURCE_NOT_FOUND = -32002;
 
-/** A JSON-RPC error a method handler can throw to choose the response code. */
+/** What an RpcError carries beyond its code: the `data` the client sees, the `cause` the log keeps. */
+export interface RpcErrorOptions extends ErrorOptions {
+	/** The JSON-RPC `error.data` member - sent to the peer, so it must be serializable. */
+	data?: unknown;
+}
+
+/**
+ * A JSON-RPC error a method handler can throw to choose the response code.
+ *
+ * `cause` sits in the second argument, where ErrorOptions belongs: the message is what the client
+ * reads, the cause is what the log keeps, and a rethrow without it is where a stack trace stops. It
+ * is deliberately not a third positional - biome's `useErrorCause`, and every reader who knows
+ * `new Error(msg, { cause })`, can only see it here.
+ */
 export class RpcError extends Error {
 	readonly code: number;
 	readonly data?: unknown;
-	constructor(code: number, message: string, data?: unknown) {
-		super(message);
+	constructor(code: number, message: string, options?: RpcErrorOptions) {
+		super(message, options);
 		this.name = "RpcError";
 		this.code = code;
-		this.data = data;
+		this.data = options?.data;
 	}
 }

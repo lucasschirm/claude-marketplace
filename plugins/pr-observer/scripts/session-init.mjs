@@ -27,7 +27,13 @@ try {
 		process.exit(0);
 	}
 	const ok = writeState(key, { createdAt: new Date().toISOString(), lastCheckAt: 0 });
-	logLine(SCRIPT, sessionId, ok ? "info" : "warn", ok ? "session watch state initialized" : "could not write the session watch state", `cwd=${cwd}`);
+	logLine(
+		SCRIPT,
+		sessionId,
+		ok ? "info" : "warn",
+		ok ? "session watch state initialized" : "could not write the session watch state",
+		`cwd=${cwd}`,
+	);
 	process.exit(0);
 } catch (err) {
 	logLine(SCRIPT, "unknown", "error", "session-init hook failed", err?.stack ?? String(err));

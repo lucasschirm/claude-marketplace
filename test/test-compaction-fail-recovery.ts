@@ -214,7 +214,8 @@ test("findOriginalToolResult reads the raw (pre-compression) entry", () => {
 	};
 	const found = findOriginalToolResult(manager, "a1");
 	assert.strictEqual(found?.toolName, "bash");
-	assert.strictEqual((found?.content[0] as { text?: string }).text, original.text);
+	assert.ok(found, "the original tool result is found");
+	assert.strictEqual((found.content[0] as { text?: string }).text, original.text);
 	assert.strictEqual(findOriginalToolResult(manager, "missing"), undefined);
 	assert.strictEqual(findOriginalToolResult({ getEntry: () => ({ type: "compaction" }) }, "a1"), undefined);
 });

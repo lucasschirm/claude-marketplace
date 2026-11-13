@@ -45,15 +45,27 @@ falling back to `os.tmpdir()`) holding `.agents/hooks.json` (one `PreToolUse` ho
 unguessable per-session name, passed to agy as an `--add-dir`) and a 0600 Unix socket.
 agy runs the hook (`src/bridge-hook.ts`) on every tool call; the hook dials the socket
 with the tool name, args and a per-session token and waits for a decision. The hook is
-fail-closed: every exit path prints one JSON decision (empty stdout would be an allow in
-agy), every denial carries the "Do not retry this call." wording (without it the model
-retried 5 times in the spike), and every path exits 0.
+fail-closed: every exit path prints one JSON decision and **waits for it to reach the pipe**
+before exiting (empty stdout would be an allow in agy, and a half-written line is the same
+failure - unparseable JSON is not a denial; a long deny reason does not fit the 64 KiB pipe
+buffer, so the exit leaves from the write's own callback with a bounded fallback), every
+denial carries the "Do not retry this call." wording (without it the model retried 5 times
+in the spike), and every path exits 0. Both streams the hook reads - its stdin payload and
+the bridge's answer - are capped at 1 MiB, past which it denies: it is the security boundary,
+so it must not be the one reader that buffers whatever it is handed.
+
+The bridge reads one JSON line per connection and caps it at 64 KiB
+(`BRIDGE_MAX_REQUEST_BYTES`): past that the connection is logged and destroyed **before** the
+token is compared, so an unauthenticated peer cannot make the server hold an unbounded buffer. A
+request whose `conversationId` is missing or empty is refused the same way - it cannot be matched
+to a session, and guessing one is how a call gets attributed to the wrong turn. A different
+conversation is accepted only when the session knows it as one of its subagents (see "Subagents"
+below); anything else is answered with a denial carrying the reason, so the model does not retry.
 
 Stale bridge dirs (a crashed run) are cleaned at startup: a dir is removed when it is
 over an hour old **and its socket no longer answers** - a live session's dir is never
-removed, however old it is. A subagent's internal tool call may carry its own conversation
-id; it is served (the per-session token is the boundary) and goes through the same policy
-and client ask. `session/set_mode` answers the request and emits a `current_mode_update`
+removed, however old it is. Subagent tool calls are gated like any other (see "Subagents"
+below). `session/set_mode` answers the request and emits a `current_mode_update`
 notification; three of the four mode ids (`default`, `accept-edits`, `plan`) are offered by
 default, and `bypass` - which lets every tool call through this gate - only when the operator
 says so with `--allow-bypass` / `AGY_ACP_ALLOW_BYPASS=1`. A client that asks for a mode that
@@ -90,6 +102,34 @@ a stream-reported key (agy adds metadata fields such as `toolSummary`, which are
 rewrite), the difference is logged and flagged `_meta.argsRewritten`. Remaining risk:
 our hook may not sort last in the chain, so a repo hook running after ours can still
 rewrite the args we evaluated.
+
+## Subagents
+
+agy runs an `invoke_subagent` call as a tool step, but the subagent it starts is a conversation of
+its own: its tool calls fire `PreToolUse` with the **subagent's** conversation id, and its steps never
+appear in the parent's stream. agy names a subagent only on the spawning call's terminal step
+(`subagent_info.subagents[].conversation_id`), which arrives *after* the subagent has worked - so the
+bridge accepts the session's own id, an id agy has reported, and, while exactly one
+subagent-spawning call (`invoke_subagent`, `browser_subagent`) is in flight, a conversation agy has
+not reported yet. That last one is how a subagent's first tool call is gated at all: it is recorded as
+a provisional subagent of that call, and `subagent_info` confirms the mapping later. Anything else is
+denied with a no-retry reason and the client is never asked. Two open spawning calls make the parent
+ambiguous, so an unreported conversation is then denied rather than guessed: the per-session token is
+the real boundary, but a guess is still how a call gets attributed to the wrong parent.
+
+A subagent's ask is attributed to the parent spawning call - the subagent's own step index means
+nothing in the parent conversation - and says a subagent is asking, in the title
+(`subagent "File Creator": run_command: touch sub1.txt`) and in `_meta.subagent` (the subagent's
+conversation id, step index and own tool-call id). Because the subagent's steps are not in the
+parent's stream, each gated tool call also emits a `tool_call_update` on the parent call whose
+`content` says what the subagent is running and whose `_meta.subagent` carries the same identity; the
+parent call's status still belongs to the stream. A subagent inherits the session's mode policy (plan
+mode denies its writes exactly as it denies the parent's), and an `allow_always` answer is held against
+that tool plus command or path for the whole session: because the ask was made at parent level, the
+grant covers the subagent that asked and any later identical call (agy 1.4.6 applies conversation-level
+grants across subagents as well), while an `allow_always` for the `invoke_subagent` call itself never
+covers what the subagent runs. The mapping is per turn: a subagent runs inside the turn that invoked
+it, so an id from an ended turn is not accepted later.
 
 ## Choosing the model, the effort and the mode
 
@@ -294,7 +334,10 @@ The process model, from the spike (agy 1.4.2):
 - stdout is newline-delimited JSON events (split on `"\n"` only, never readline);
 - `result.usage`, `num_turns` and `duration_seconds` are cumulative per process and per resumed
   conversation - the driver emits per-turn deltas and keeps the raw cumulative state under
-  `result.cumulative` for the next process of a `--conversation` resume;
+  `result.cumulative` for the next process of a `--conversation` resume. Every delta is clamped at
+  zero: a counter that goes backwards (agy restarting its own count mid-conversation, a field that
+  stops being cumulative) would otherwise bill a negative turn. The delta carries `clamped: true`
+  when that happens and the driver logs it, so a wrong total is visible rather than silent;
 - SIGINT cancels the running turn (agy reports `error: "interrupted"` and kills its own tool
   children); closing stdin does **not** stop a running turn, so `dispose()` escalates:
   close stdin, `graceMs`, SIGTERM the process group, `termMs`, SIGKILL - nothing outlives it;
@@ -472,6 +515,22 @@ runs the unit tests under `agy-acp/test/`. The suites are mode-agnostic through 
 the built executable instead of `node <script>` (the hook as a re-exec with `--bridge-hook`, the
 hooks.json layout with the flag instead of a hook file) — that is how CI proves the single
 executable, not just the sources.
+
+`agy-acp/src/` is the strictest tree in the repo, because a code quality review of it
+(`docs/agy-acp-code-quality-review.md`) found 14 findings that every gate passed:
+
+- `tsconfig.json` adds `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` (plus four flags
+  that were already satisfied). `agy-acp/test/**` is exempt from the first by a measured decision -
+  128 errors, all in fixtures - so a test that indexes production data will not be caught by it;
+- four biome rules (`noShadow`, `noReturnAssign`, `noMultiAssign`, `useBlockStatements`) are errors
+  here and warnings everywhere else: this is the one tree where they measure zero;
+- four invariants in `scripts/check-quality.mjs` exist for this package - `stdoutExitDrain`,
+  `envAccessLocation`, `inboundBufferCap` and `settleOwnership`. Each has a fixture in
+  `test/quality-gate-fixtures.sh` that proves it still bites;
+- commits are gated before they exist: `.githooks/pre-commit` runs `npm run qa:static` on a checkout
+  of the staged tree (what the commit will contain, not what is on disk) and
+  `.githooks/commit-msg` stamps a `Quality-Gate` trailer, which CI's `commit-hygiene` job requires.
+  `npm run hooks:install` (automatic on `npm install`) is what turns that on.
 
 ## Live smoke test (opt-in, never in CI)
 

@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { AGY_ACP_VERSION } from "../src/server.ts";
-import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs } from "../src/bridge-server.ts";
+import { BridgeServer, createBridgeLayout, bridgeRuntimeDirs, BRIDGE_MAX_REQUEST_BYTES } from "../src/bridge-server.ts";
 import { cleanupStaleBridges } from "../src/bridge-cleanup.ts";
 import { PermissionGate } from "../src/permission-gate.ts";
 import { PLAN_DENY_REASON } from "../src/permission.ts";
@@ -217,13 +217,13 @@ test("a wrong token or an empty conversation-id closes the connection with no re
 			});
 			assert.strictEqual(line, "", `${token}/${conv}: no reply data`);
 			assert.ok(closed, "the connection is closed");
-			assert.match(logs.join("\n"), /token mismatch|conversation mismatch/, "the mismatch was logged");
+			assert.match(logs.join("\n"), /token mismatch|unusable conversation id/, "the refusal was logged");
 		} finally {
 			await server.stop();
 		}
 	}
 });
-test("a subagent's own conversation id is accepted (same token; the call still goes through policy + the client)", async () => {
+test("a subagent conversation id the session reports is accepted (same token; the call still goes through policy + the client)", async () => {
 	const handled: string[] = [];
 	const server = new BridgeServer({
 		log: () => {},
@@ -232,6 +232,7 @@ test("a subagent's own conversation id is accepted (same token; the call still g
 		hookTimeoutSec: 60,
 		maxHoldMs: 5000,
 		conversationId: () => "conv-1",
+		acceptsConversation: (id) => id === "conv-1-sub",
 		handle: async (req) => {
 			handled.push(req.conversationId);
 			return { decision: "allow" };
@@ -248,6 +249,41 @@ test("a subagent's own conversation id is accepted (same token; the call still g
 		});
 		assert.strictEqual(line, JSON.stringify({ decision: "allow" }), "the sub conversation is served, not closed");
 		assert.deepStrictEqual(handled, ["conv-1-sub"], "the request reached the handler");
+	} finally {
+		await server.stop();
+	}
+});
+test("a conversation the session never reported is denied with a reason (never reaches the handler)", async () => {
+	const handled: string[] = [];
+	const logs: string[] = [];
+	const server = new BridgeServer({
+		log: (l) => logs.push(l),
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK_FILE,
+		hookTimeoutSec: 60,
+		maxHoldMs: 5000,
+		conversationId: () => "conv-1",
+		acceptsConversation: (id) => id === "conv-1-sub",
+		handle: async (req) => {
+			handled.push(req.conversationId);
+			return { decision: "allow" };
+		},
+		onConnectionLost: () => {},
+	});
+	await server.start();
+	try {
+		const { line } = await askSocket(server.socketPath, {
+			token: "tok-1",
+			conversationId: "conv-1-stranger",
+			stepIdx: 4,
+			toolCall: { name: "run_command", args: {} },
+		});
+		assert.ok(line.includes('"decision":"deny"'), "an authenticated hook gets a denial, not silence");
+		assert.ok(line.includes("not this session or a subagent it reported"), "the reason names the attribution failure");
+		assert.ok(line.includes("Do not retry this call"), "and the no-retry wording");
+		assert.deepStrictEqual(handled, [], "the request never reached the handler");
+		assert.ok(logs.join("\n").includes("belongs to no subagent of this session"), "the refusal was logged");
 	} finally {
 		await server.stop();
 	}
@@ -962,6 +998,10 @@ test("the gate: a subagent's pending ask (same step index, sub conversation) is 
 			cwd: workspace,
 			requestImpl: () => new Promise((r) => asks.push({ resolve: r })),
 		});
+		// The subagent was reported on a spawning call: its conversation id is accepted from then on.
+		h.gate.onSubagentInfo(2, [
+			{ conversation_id: "conv-1-sub", role: "File Creator", type_name: "self", initial_prompt: "", log_uri: "", workspace_uris: [] },
+		]);
 		// A main ask and a subagent ask at the same step index, both policy-asks (run_command).
 		const mainP = h.ask(5, "run_command", { CommandLine: "ls" });
 		// The subagent ask on a raw connection we control (so its hook side can be dropped).
@@ -1000,10 +1040,16 @@ test("the gate: a subagent's auto-allowed call (a colliding step index) does not
 		h = await startGateHarness({ cwd: workspace });
 		// The main conversation's step 3 went ACTIVE (the stream recorded its parameters)...
 		h.gate.onStreamActive(3, "run_command", { CommandLine: "ls" });
-		// ...and a subagent's in-workspace read_file (auto-allowed) lands on the same step index.
+		// ...and a reported subagent's in-workspace read_file (auto-allowed) lands on the same step index.
+		h.gate.onSubagentInfo(2, [
+			{ conversation_id: "conv-1-sub", role: "File Creator", type_name: "self", initial_prompt: "", log_uri: "", workspace_uris: [] },
+		]);
 		const r = await h.ask(3, "read_file", { Path: path.join(workspace, "a.txt") }, "conv-1-sub");
 		assert.strictEqual(r.decision, "allow", "the subagent's in-workspace read is auto-allowed");
-		assert.strictEqual(h.updates.length, 0, "no tool_call_update for the main step (no bogus in_progress / argsRewritten)");
+		assert.ok(
+			!h.updates.some((u) => u.toolCallId === "conv-1:3"),
+			"no tool_call_update for the main step (no bogus in_progress / argsRewritten)",
+		);
 		assert.ok(!h.logs.some((l) => l.includes("args rewritten")), "no bogus rewrite log");
 	} finally {
 		await h?.gate.dispose();
@@ -1028,4 +1074,91 @@ test("the gate: onTurnEnd forgets the recorded stream steps (a next-turn index c
 });
 test("AGY_ACP_VERSION is a constant", () => {
 	assert.match(AGY_ACP_VERSION, /^\d+\.\d+\.\d+$/);
+});
+
+// F2: `process.exit()` abandons whatever stdout still has queued. Node's stdout is async for pipes on
+// macOS, and a payload past the pipe buffer is queued on every platform, so "wrote the decision, then
+// exited" can mean the decision never arrived - and in agy, empty stdout means allow. A 256 KiB reason
+// is well past any pipe buffer, so the write cannot complete in one go.
+test("the hook's decision is not truncated by its own exit, even when it does not fit one write", async () => {
+	const reason = `denied by agy-acp: ${"x".repeat(256 * 1024)}. Do not retry this call.`;
+	const s = await listenOnce((c) => {
+		c.once("data", () => c.write(`${JSON.stringify({ decision: "deny", reason })}\n`));
+	});
+	try {
+		const r = await runHook({ AGY_ACP_SOCK: s.path, AGY_ACP_TOKEN: "tok-1" }, `${PAYLOAD}\n`);
+		assert.strictEqual(r.code, 0);
+		const decision = JSON.parse(r.stdout) as { decision: string; reason: string };
+		assert.strictEqual(decision.decision, "deny");
+		assert.strictEqual(decision.reason.length, reason.length, "the whole reason reached agy");
+	} finally {
+		await s.close();
+	}
+});
+
+/** Raw bytes to the socket, with no newline: what an oversized request looks like before it is a line. */
+function writeRaw(sockPath: string, payload: string): Promise<{ closed: boolean }> {
+	return new Promise((resolve) => {
+		const conn = net.createConnection(sockPath);
+		let finished = false;
+		const finish = (closed: boolean) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			conn.destroy();
+			resolve({ closed });
+		};
+		conn.on("error", () => finish(true));
+		conn.on("close", () => finish(true));
+		conn.on("connect", () => conn.write(payload));
+		setTimeout(() => finish(false), 3000);
+	});
+}
+
+// F12: the request line was accumulated with no ceiling, and the token check only happens once a "\n"
+// arrives - so an unauthenticated peer could hold a socket open and grow the server's memory until
+// maxHoldMs (5 min for a real session) ran out. The cheapest check has to come first.
+test("the bridge drops a request line that exceeds the cap, before any token check", async () => {
+	const logs: string[] = [];
+	const server = new BridgeServer({
+		log: (l) => logs.push(l),
+		token: "tok-1",
+		node: process.execPath,
+		hookFile: HOOK_FILE,
+		hookTimeoutSec: 60,
+		maxHoldMs: 60_000,
+		conversationId: () => "conv-1",
+		handle: async () => ({ decision: "allow" }),
+		onConnectionLost: () => {},
+	});
+	await server.start();
+	try {
+		const { closed } = await writeRaw(server.socketPath, "y".repeat(BRIDGE_MAX_REQUEST_BYTES + 1));
+		assert.ok(closed, "the connection is closed well before maxHoldMs");
+		assert.match(logs.join("\n"), /oversized request/, "and the refusal says why");
+		assert.doesNotMatch(logs.join("\n"), /token mismatch/, "the size was judged first - no token was parsed");
+	} finally {
+		await server.stop();
+	}
+});
+
+// A minor from the review: workspaceRoots() ran fs.realpathSync on every hook request, inside the async
+// handler that keeps agy - and the tool call - waiting. A session's cwd is fixed at session/new.
+test("the workspace root is resolved once per session, not once per hook request", async () => {
+	const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-roots-")));
+	const real = path.join(tmp, "real");
+	const link = path.join(tmp, "link");
+	fs.mkdirSync(real);
+	fs.symlinkSync(real, link);
+	let h: GateHarness | null = null;
+	try {
+		h = await startGateHarness({ cwd: link });
+		const first = h.gate.workspaceRoots;
+		assert.deepStrictEqual(first, [real], "the symlinked cwd is resolved");
+		assert.strictEqual(h.gate.workspaceRoots, first, "and the same array comes back: resolved once, cached");
+	} finally {
+		await h?.gate.dispose();
+		fs.rmSync(tmp, { recursive: true, force: true });
+	}
 });

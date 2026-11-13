@@ -111,8 +111,11 @@ export function startAgyAcpServer(options: AgyAcpServerOptions): AgyAcpServer {
 	});
 
 	function handleNotification(method: string, params: unknown): void {
-		if (method === "session/cancel") cancelSession(params);
-		else log(`ignored notification: ${method}`);
+		if (method === "session/cancel") {
+			cancelSession(params);
+		} else {
+			log(`ignored notification: ${method}`);
+		}
 	}
 	connection.onClose((reason) => {
 		log(`connection closed: ${reason}`);

@@ -40,6 +40,15 @@
 //                              fixture's conversation id (noted in FAKE_AGY_RESUME_SEEN_FILE)
 //   FAKE_AGY_IDLE_EXIT_MS=N    exit N ms after start, once a turn boundary is reached: the child
 //                              that dies between turns, as a real agy dies on its own timeout
+//
+// Issue #59 (subagents) adds two knobs, both off by default:
+//   FAKE_AGY_SUBAGENT_TOOL={"name","args"}  run the hook for one synthetic subagent tool call
+//                                            between invoke_subagent's ACTIVE line and its terminal
+//                                            line, under the subagent's recorded conversation id
+//   FAKE_AGY_STRAY_HOOK={"conversationId","name","args"}  run the hook for a conversation the
+//                                            session never reported, after any tool step: the
+//                                            unknown-conversation denial
+//   FAKE_AGY_HOOK_LOG=<file>   append one JSON line per hook run ({conversationId, name, code, stdout})
 
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -82,6 +91,38 @@ const modelAllow = (process.env.FAKE_AGY_MODEL_ALLOW ?? "").split(",").filter((s
 // additions the test has to claim, the way a respawn claims --conversation and a picked model claims
 // --model. Without that, a driver inventing `--effort max` on every launch would replay green.
 const allowSelection = process.env.FAKE_AGY_ALLOW_SELECTION === "1";
+
+interface SyntheticTool {
+	name: string;
+	args: Record<string, unknown>;
+	conversationId?: string;
+	stepIdx?: number;
+}
+
+/** A synthetic hook call from the test's env knob, or null when the knob is unset or malformed. */
+function parseSynthetic(value: string | undefined): SyntheticTool | null {
+	if (!value) {
+		return null;
+	}
+	try {
+		const o = JSON.parse(value) as { name?: unknown; args?: unknown; conversationId?: unknown; stepIdx?: unknown };
+		if (typeof o.name !== "string" || o.name === "") {
+			return null;
+		}
+		return {
+			name: o.name,
+			args: typeof o.args === "object" && o.args !== null ? (o.args as Record<string, unknown>) : {},
+			...(typeof o.conversationId === "string" ? { conversationId: o.conversationId } : {}),
+			...(typeof o.stepIdx === "number" ? { stepIdx: o.stepIdx } : {}),
+		};
+	} catch {
+		// a malformed knob is no synthetic call: the replay runs as recorded
+		return null;
+	}
+}
+const subagentTool = parseSynthetic(process.env.FAKE_AGY_SUBAGENT_TOOL);
+const strayHook = parseSynthetic(process.env.FAKE_AGY_STRAY_HOOK);
+const subagentStepIdx = Number(process.env.FAKE_AGY_SUBAGENT_STEP_IDX ?? 0);
 
 function die(message: string, code: number): never {
 	process.stderr.write(`${message}\n`);
@@ -396,6 +437,7 @@ async function advance(): Promise<void> {
 			if (hookStep) {
 				const denyReason = await runHookForStep(hookStep);
 				if (denyReason !== undefined) stagedDenies.set(hookStep.index, denyReason);
+				await runSyntheticHooks(hookStep);
 			}
 			void continueAfterLine();
 		})();
@@ -959,5 +1001,68 @@ async function runHookForStep(step: StepInfo): Promise<string | undefined> {
 	if (!hook) return undefined;
 	const cwd = bridgeDir ? path.join(bridgeDir, ".agents") : process.cwd();
 	const { code, stdout } = await runHookCommand(hook.command, hook.timeoutSec, buildPayload(step), cwd);
+	logHook(conversationId, step.name, code, stdout);
 	return judgeHookOutput(code, stdout);
+}
+
+/** One line per hook run, for a test that needs the decision the model saw (the hook's own stdout). */
+function logHook(hookConversationId: string, hookName: string, code: number | null, stdout: string): void {
+	const file = process.env.FAKE_AGY_HOOK_LOG;
+	if (!file) {
+		return;
+	}
+	try {
+		fs.appendFileSync(file, `${JSON.stringify({ conversationId: hookConversationId, name: hookName, code, stdout })}\n`);
+	} catch {
+		// best effort: the log is a test aid, never part of the replay
+	}
+}
+
+/** The conversation a subagent runs under: agy reports it only on the spawning call's terminal line. */
+function subagentConversationFrom(line: string | undefined): string {
+	if (!line) {
+		return "";
+	}
+	try {
+		const o = JSON.parse(line) as { step_update?: { subagent_info?: { subagents?: Array<{ conversation_id?: unknown }> } } };
+		const id = o.step_update?.subagent_info?.subagents?.[0]?.conversation_id;
+		return typeof id === "string" ? id : "";
+	} catch {
+		return "";
+	}
+}
+
+async function runSyntheticHook(call: SyntheticTool & { conversationId: string }, stepIdx: number): Promise<void> {
+	const hook = pickHook(call.name);
+	if (!hook) {
+		return;
+	}
+	const template = hookTemplates[0]?.payload ?? { conversationId: "", stepIdx: 0, modelName: "", workspacePaths: [] };
+	const payload = JSON.stringify({
+		...template,
+		conversationId: call.conversationId,
+		stepIdx,
+		...(modelName !== "" ? { modelName } : {}),
+		toolCall: { name: call.name, args: call.args },
+	});
+	const cwd = bridgeDir ? path.join(bridgeDir, ".agents") : process.cwd();
+	const { code, stdout } = await runHookCommand(hook.command, hook.timeoutSec, payload, cwd);
+	logHook(call.conversationId, call.name, code, stdout);
+}
+
+/**
+ * The hook calls real agy makes that the recorded parent stream does not contain: a subagent's own
+ * tool call (only while the invoke_subagent step is ACTIVE - the window the spike observed) and a
+ * stray one from an unreported conversation.
+ */
+async function runSyntheticHooks(step: StepInfo): Promise<void> {
+	if (subagentTool && step.name === "invoke_subagent") {
+		const subConversationId = subagentConversationFrom(lines[nextLine]);
+		if (subConversationId !== "") {
+			await runSyntheticHook({ ...subagentTool, conversationId: subConversationId }, subagentTool.stepIdx ?? subagentStepIdx);
+		}
+	}
+	if (strayHook?.conversationId !== undefined && strayHook.conversationId !== "") {
+		await runSyntheticHook({ ...strayHook, conversationId: strayHook.conversationId }, strayHook.stepIdx ?? 1);
+	}
 }
