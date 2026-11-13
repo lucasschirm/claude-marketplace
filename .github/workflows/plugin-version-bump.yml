@@ -37,23 +37,35 @@ jobs:
         run: node scripts/bump-plugin-versions.mjs '${{ github.event.before }}' '${{ github.event.after }}'
 
       - name: Commit and push the bump
-        # The ref can advance between checkout and push (another merge landed): rebase the bump
-        # onto the new head and retry, so a lost race retries instead of failing the job.
+        # The github context reaches the shell as env vars, not as `${{ }}` inside the script: the
+        # interpolation is then one line per value, and the body below stays a script that runs.
+        env:
+          BRANCH: ${{ github.ref_name }}
+          TRIGGERED_SHA: ${{ github.sha }}
+        # Two shapes this step has to survive, both learned the hard way:
+        #   - `git -c` takes ONE argument (`key=value`); the space-separated form hands git the VALUE as
+        #     its subcommand - "git: 'github-actions[bot]' is not a git command", which is what this step
+        #     did the first time a push actually carried a plugin change. Repo-local `git config` also
+        #     covers the rebase below, which needs an identity to rewrite the commit with.
+        #   - checkout of a push event leaves HEAD detached, where a bare `git push` refuses ("You are
+        #     not currently on a branch"), so the push names its destination.
+        # test/test-bump-plugin-versions.ts extracts and runs this body against a local origin, detached
+        # and with no git identity, so both of those failures come back as a red suite.
         run: |
           if git diff --quiet; then
             echo "No version bumps to commit."
             exit 0
           fi
-          git -c user.name "github-actions[bot]" -c user.email "41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -am "chore(plugins): bump versions after ${{ github.sha }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(plugins): bump versions after ${TRIGGERED_SHA}"
           for attempt in 1 2 3; do
-            if git push; then
+            if git push origin "HEAD:${BRANCH}"; then
               exit 0
             fi
             echo "Push attempt $attempt failed; the ref moved - rebasing onto it and retrying."
-            git fetch origin '${{ github.ref_name }}'
-            git -c user.name "github-actions[bot]" -c user.email "41898282+github-actions[bot]@users.noreply.github.com" \
-              rebase "origin/${{ github.ref_name }}"
+            git fetch origin "${BRANCH}"
+            git rebase "origin/${BRANCH}"
           done
           echo "The push kept losing the race; giving up (the next push to the branch retries the bump)."
           exit 1
