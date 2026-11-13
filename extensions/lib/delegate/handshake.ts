@@ -134,6 +134,19 @@ function currentSelection(res: WireAnswer | undefined): { mode?: string; model?:
 	};
 }
 
+/** The answer's effort, in the only two shapes the engine records: a level we offer, or its own default. */
+function effortAsLevel(value: string | undefined): ThinkingLevel | "default" | undefined {
+	if (!value) {
+		return undefined;
+	}
+	if ((THINKING_LEVELS as readonly string[]).includes(value)) {
+		return value as ThinkingLevel;
+	}
+	// `agy-acp`'s "the model picks" sentinel (`AGY_DEFAULT_CHOICE`). Anything else is an effort this build
+	// has no word for, and guessing would put a value in the record that a status line then invents.
+	return value === "default" ? "default" : undefined;
+}
+
 /** What the store said it could not hand back unchanged. A note is a sentence, so a blank one is nothing. */
 function restoredNotes(restored: WireAnswer): string[] {
 	return Array.isArray(restored.notes) ? restored.notes.filter((n: unknown): n is string => typeof n === "string" && n.trim() !== "") : [];
@@ -153,7 +166,12 @@ export interface RestoredSession {
 	currentModeId?: string;
 	/** The model and effort it came back with, same reason as `currentModeId`. */
 	currentModelId?: string;
-	currentEffort?: ThinkingLevel;
+	/**
+	 * The effort it came back with: one of our levels, or `"default"` when the adapter settled on whatever
+	 * the model picks. That sentinel is not a `ThinkingLevel`, and the engine records it as "no preference"
+	 * rather than as the level that was refused.
+	 */
+	currentEffort?: ThinkingLevel | "default";
 	/** The workspace the store's own record names, absolute or absent — the engine back-fills it once. */
 	cwd?: string;
 	/** The stored transcript it could not hand back whole (`load` only, but the field is the agent's). */
@@ -164,10 +182,10 @@ export interface RestoredSession {
 /**
  * Bring a recorded conversation back into this process, on the driver's own terms.
  *
- * The caller has already spawned the agent and opened its log file; nothing is prompted yet. A failure
- * is the caller's to report (`followUp` answers `REATTACH_FAILED`) — the three the agent gives back are
- * worth reading in its own words, because each has a different fix: no such conversation, a conversation
- * belonging to another workspace, and a conversation another process still holds.
+ * The caller has already spawned the agent and opened its log file; nothing is prompted yet. A failure is
+ * the caller's to report (`followUp` answers `REATTACH_FAILED`), in the adapter's own words: of the five
+ * kinds its store answers with, three have a different fix each — no such conversation, a conversation
+ * belonging to another workspace (whose record names the folder), a conversation another process holds.
  */
 export async function restoreSession(
 	client: DelegateTransport,
@@ -207,9 +225,7 @@ export async function restoreSession(
 		cwd: absolutePathOr(restored.cwd),
 		currentModeId: current.mode,
 		currentModelId: current.model,
-		// An effort outside our vocabulary is not a value `meta.thinking` can hold, and refusing it here beats
-		// a cast that makes a status line name a level the tool never offers.
-		currentEffort: (THINKING_LEVELS as readonly string[]).includes(current.effort ?? "") ? (current.effort as ThinkingLevel) : undefined,
+		currentEffort: effortAsLevel(current.effort),
 		...(dropped !== undefined && dropped > 0 ? { droppedUpdates: dropped } : {}),
 		...(restored.truncated === true ? { truncated: true } : {}),
 	};

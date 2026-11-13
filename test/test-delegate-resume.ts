@@ -264,6 +264,24 @@ test("what the agent corrected on the way in is recorded and said out loud", asy
 	}
 });
 
+test("an effort the model picked for itself is not reported as the level that was asked for", async () => {
+	const { rt, restoreHome } = makeStub();
+	// `agy-acp` answers a restore with `effort: "default"` when the stored level does not go with the model it
+	// came back with. "default" is not a level this tool offers, so the honest record is no preference — the
+	// alternative is a status line that keeps naming `xhigh` and a restart that re-asks a refused pair.
+	const stub = stubTransport({ resume: { result: { sessionId: "conv-1", configOptions: [{ id: "effort", currentValue: "default" }] } } });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		meta.thinking = "xhigh";
+		const res = await followUp(rt, meta, "next");
+		assert.ok(res.ok, JSON.stringify(res));
+		assert.strictEqual(meta.thinking, undefined, "the session runs on the model's pick, not on the level its record claims");
+	} finally {
+		restoreHome();
+	}
+});
+
 test("an answer that does not name a conversation is a refusal, not a hope", async () => {
 	const { rt, restoreHome } = makeStub();
 	const stub = stubTransport({ resume: { result: {} } });
@@ -298,9 +316,14 @@ test("two follow-ups that arrive inside the reattach window share one spawn", as
 		const results = await Promise.all([followUp(rt, meta, "first"), followUp(rt, meta, "second")]);
 		assert.strictEqual(spawns, 1, "the second follow-up reuses the connection being made, it does not spawn another agent");
 		assert.strictEqual(stub.calls.filter((c) => c.method === "session/resume").length, 1, "the conversation is adopted once");
-		assert.ok(
-			!results.some((r) => !r.ok && r.code === "REATTACH_FAILED"),
-			`neither caller may be told the conversation could not be continued: ${JSON.stringify(results)}`,
+		// One connection is not one turn. An agent mid-turn refuses a second prompt (`TURN_IN_PROGRESS`), and
+		// the loser's failure path marks the session failed while the winner is still working — so the caller
+		// that waited is told to send it again, not answered `{ok: true}` for a message nothing received.
+		assert.strictEqual(stub.calls.filter((c) => c.method === "session/prompt").length, 1, "the session takes one turn, not two prompts");
+		assert.deepStrictEqual(
+			results.map((r) => (r.ok ? "ok" : r.code)).sort(),
+			["BUSY", "ok"],
+			`one follow-up starts the turn and the other is refused rather than silently dropped: ${JSON.stringify(results)}`,
 		);
 	} finally {
 		restoreHome();

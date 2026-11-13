@@ -51,7 +51,8 @@ honour, corrected on the way in.
   footnote in a file nobody opens.
 * A correction replaces the preference it corrected, in all three controls: `meta.mode` from
   `modes.currentModeId`, `meta.model` and `meta.thinking` from the `model` / `effort` entries of
-  `configOptions`. A restore emits no `current_mode_update` and no `set_*` frame, so this answer is the only
+  `configOptions` — and an effort of `default`, which is the adapter's way of saying the model chose, clears
+  `meta.thinking` rather than leaving the refused level in the record. A restore emits no `current_mode_update` and no `set_*` frame, so this answer is the only
   place the truth is written — and `delegate_status` reads `meta`, and `delegate_restart` re-sends it. A
   session restored into `default` that keeps reporting the `accept-edits` it was refused is the exact lie
   `mode.changed` was written to prevent mid-turn.
@@ -90,6 +91,12 @@ reads like a dead conversation and sends the caller to `delegate_restart` — th
 prevent. `reattachSession` therefore keys an in-flight promise per session, and the second caller waits for
 the connection the first is making instead of competing for it.
 
+Waiting is not the end of it: the caller that waited must not then prompt a session somebody else just
+started a turn on. `agy-acp` answers a second concurrent `session/prompt` with `TURN_IN_PROGRESS`, and the
+rejection path marks the session failed while the real turn is still running — which would have made the
+second caller's `{ok: true}` a silently dropped message. `followUp` therefore re-reads the status after the
+await and answers `BUSY`, telling the caller to send it again.
+
 ## 6. Tests
 
 | Claim | Where |
@@ -104,7 +111,8 @@ the connection the first is making instead of competing for it.
 | a mode the adapter corrected on restore stops being reported as the one that was asked for | same |
 | the same for model and effort, and the store's own workspace is back-filled into an old record | same |
 | an answer naming no id at all is refused, and nothing is prompted | same |
-| two follow-ups in the reattach window share one spawn and adopt the conversation once | same |
+| two follow-ups in the reattach window share one spawn, adopt once, and the loser is refused (`BUSY`) rather than double-prompting | same |
+| an effort the model picked for itself clears `meta.thinking` instead of leaving the refused level | same |
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |

@@ -285,6 +285,13 @@ export async function drainQueue(rt: DelegateRuntime): Promise<void> {
 installDrainer(drainQueue);
 
 /**
+ * Whether a turn is in flight. A function, because `followUp` asks twice — before it seeks a connection and
+ * again after an `await` that may have let somebody else start the turn — and a type narrowed by the first
+ * answer says nothing about the second.
+ */
+const midTurn = (meta: SessionMeta) => meta.status === "running" || meta.status === "stalled";
+
+/**
  * Continue a session with another prompt, on its live connection if there is one.
  *
  * No re-spawn when the process is alive: a second `devin acp` for a live session id would fork the
@@ -301,7 +308,7 @@ export async function followUp(
 	if (!driver.ok) {
 		return { ok: false, code: "AGENT_UNAVAILABLE", error: `the driver '${meta.agent}' is no longer registered: ${driver.error}` };
 	}
-	if (meta.status === "running" || meta.status === "stalled") {
+	if (midTurn(meta)) {
 		// "Still working" is the wrong story when the session is blocked on a decision the caller could
 		// make right now, and a permission-blocked session is exactly what a follow-up message arrives on.
 		// Name the request, in the same words the status line uses, so the caller can act on the refusal.
@@ -352,6 +359,20 @@ export async function followUp(
 				ok: false,
 				code: "REATTACH_FAILED",
 				error: `could not re-attach to the session: ${extractCliError(err) ?? err?.message ?? err}`,
+			};
+		}
+		// Somebody else's reattach was also their turn: an agent mid-turn refuses a second prompt
+		// (`TURN_IN_PROGRESS`) and the rejection path marks the session failed, so starting here would answer
+		// `{ok: true}` to a message nothing received. The check above ran before this await and could not see
+		// it; the live-client path needs none, because nothing is awaited before its `startTurn`.
+		if (midTurn(meta)) {
+			release();
+			return {
+				ok: false,
+				code: "BUSY",
+				error:
+					`another follow-up re-attached this session and started a turn while yours was waiting for the connection. ` +
+					`Wait for it, or delegate_cancel to stop it, and send the message again.`,
 			};
 		}
 	}

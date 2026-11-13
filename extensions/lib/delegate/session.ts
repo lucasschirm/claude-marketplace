@@ -427,7 +427,9 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 			meta.model = restored.currentModelId;
 		}
 		if (restored.currentEffort) {
-			meta.thinking = restored.currentEffort;
+			// `"default"` is the adapter saying the model picked. That is not a level this tool can name, so the
+			// record stops claiming one instead of keeping the level that was refused.
+			meta.thinking = restored.currentEffort === "default" ? undefined : restored.currentEffort;
 		}
 		// A record older than this field learns the workspace from the store that just vouched for it, so the
 		// next restart does not fall back to an expression and get a mismatch it could have avoided.

@@ -429,9 +429,16 @@ test("the capability claims that a wire feature would have to earn", () => {
 	// And the answer's own shape. The resume suite feeds `_meta.restored.*` from its own stub, so a rename on
 	// the adapter's side would degrade the notes and corrections to nothing with every test still green; the
 	// advertised-state spread is where `modes.currentModeId` and `configOptions` come from.
+	// The pin is read off the answer's own literal, not the file: `cwd:` and `notes =` and `truncated:` all
+	// appear in the restore for reasons that have nothing to do with what the client is told, and a check
+	// that passes because of them is a check that cannot go red.
+	const answerStart = restoreSource.indexOf("const restored: Record<string, unknown>");
+	assert.ok(answerStart >= 0, "the restore no longer builds a `_meta.restored` answer");
+	const answerEnd = restoreSource.indexOf("return {", answerStart);
+	const answer = restoreSource.slice(answerStart, answerEnd > answerStart ? answerEnd : undefined);
 	for (const key of ["cwd", "notes", "droppedUpdates", "truncated"]) {
 		assert.ok(
-			restoreSource.includes(`${key}:`) || restoreSource.includes(`${key} =`),
+			answer.includes(`${key}:`) || answer.includes(`restored.${key} =`),
 			`the restore answer no longer names _meta.restored.${key}, which the engine's reader takes`,
 		);
 	}
