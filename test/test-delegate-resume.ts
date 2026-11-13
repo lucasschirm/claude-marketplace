@@ -20,7 +20,7 @@ import path from "node:path";
 import { DelegateTransport } from "../extensions/lib/delegate/transport.ts";
 import { agyDriver } from "../extensions/lib/delegate/drivers/agy.ts";
 import { devinDriver } from "../extensions/lib/delegate/drivers/devin.ts";
-import { spawnSession, startTurn } from "../extensions/lib/delegate/session.ts";
+import { markSuperseded, spawnSession, startTurn } from "../extensions/lib/delegate/session.ts";
 import { followUp } from "../extensions/lib/delegate/queue.ts";
 import { getEventsLogPath } from "../extensions/lib/delegate/storage.ts";
 import { normalizeMeta } from "../extensions/lib/delegate/recovery.ts";
@@ -49,6 +49,7 @@ const DIFFERENT_ID_RE = /different session id/;
 const NOT_IN_STORE_RE = /not a conversation this store has/;
 const NO_SESSION_ID_RE = /without a session id/;
 const STARTED_ORPHANED_RE = /while its agent was starting/;
+const NEW_SESSION_ID_RE = /brave-walrus/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
 function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number } } = {}) {
@@ -275,16 +276,16 @@ test("what the agent corrected on the way in is recorded and said out loud", asy
 	}
 });
 
-test("a reattach that lands after its session was restarted registers nothing", async () => {
+test("a reattach that lands after this pi closed the session registers nothing", async () => {
 	const { rt, restoreHome } = makeStub();
 	const stub = stubTransport({ resume: { delayMs: 80 } });
 	rt.makeTransport = () => stub.transport;
 	try {
 		const meta = deadSession(rt, "agy");
 		const waiting = followUp(rt, meta, "next");
-		// Mid-spawn, mid-handshake: `delegate_restart` replaces the record, and a `/new` or a shutdown empties
-		// the map. Either way the connection being made belongs to a session nothing tracks — and the child
-		// would still hold the agent's conversation, invisibly to `delegate_status` and `delegate_cancel`.
+		// Mid-spawn, mid-handshake: a `/new`, a shutdown, or a same-id replacement takes the record out of the
+		// map, so the connection being made belongs to a session nothing tracks — and the child would still
+		// hold the agent's conversation, invisibly to `delegate_status` and `delegate_cancel`.
 		await new Promise((done) => setTimeout(done, 20));
 		rt.sessions.delete("conv-1");
 		const res = failure(await waiting);
@@ -292,6 +293,45 @@ test("a reattach that lands after its session was restarted registers nothing", 
 		assert.strictEqual(rt.activeClients.get("conv-1"), undefined, "an orphan connection is not installed");
 		assert.strictEqual(stub.disposed(), 1, "and the agent that was spawned for nothing is disposed");
 		assert.strictEqual(meta.status, "completed", "the record nobody owns is left as it was found");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a conversation that was restarted is not reattached, and says where it went", async () => {
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport();
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		// What `delegate_restart` leaves behind: a new session elsewhere, and this record untouched but for the
+		// pointer. A restart reuses this session's worktree, so reattaching would run two live agents of one
+		// conversation in one checkout — that is the hazard, not the wasted turn.
+		markSuperseded(rt, meta, { sessionId: "brave-walrus" });
+		const res = failure(await followUp(rt, meta, "next"));
+		assert.strictEqual(res.code, "SUPERSEDED");
+		assert.match(res.error, NEW_SESSION_ID_RE);
+		assert.deepStrictEqual(stub.calls, [], "nothing is asked of the agent for a conversation that moved on");
+		assert.strictEqual(meta.status, "completed", "and the old record is left as history");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a restart that lands mid-reattach stops the prompt", async () => {
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ resume: { delayMs: 80 } });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		const waiting = followUp(rt, meta, "next");
+		await new Promise((done) => setTimeout(done, 20));
+		markSuperseded(rt, meta, { sessionId: "brave-walrus" });
+		const res = failure(await waiting);
+		assert.strictEqual(res.code, "REATTACH_FAILED");
+		assert.match(res.error, NEW_SESSION_ID_RE, "the refusal says which session owns the conversation now");
+		assert.strictEqual(rt.activeClients.get("conv-1"), undefined, "the sibling's agent is not installed");
+		assert.strictEqual(stub.disposed(), 1, "and the child spawned for it is disposed");
 	} finally {
 		restoreHome();
 	}

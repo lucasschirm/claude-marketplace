@@ -19,9 +19,9 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 212,
     "biome.style/useBlockStatements": 953,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
     "biome.suspicious/noShadow": 78,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
     "biome.suspicious/noExplicitAny": 158,
@@ -46,18 +46,18 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 474,
-    "extensions/lib/delegate/recovery.ts": 324,
+    "extensions/lib/delegate/queue.ts": 481,
+    "extensions/lib/delegate/recovery.ts": 336,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 558,
-    "extensions/lib/delegate/session.ts": 523,
+    "extensions/lib/delegate/session.ts": 547,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
-    "extensions/lib/delegate/tools-session.ts": 358,
+    "extensions/lib/delegate/tools-session.ts": 365,
     "extensions/lib/delegate/tools.ts": 289,
     "extensions/lib/delegate/transcript.ts": 230,
-    "extensions/lib/delegate/transport.ts": 447,
-    "extensions/lib/delegate/types.ts": 320,
+    "extensions/lib/delegate/transport.ts": 456,
+    "extensions/lib/delegate/types.ts": 327,
     "extensions/lib/delegate/worktree.ts": 201,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
@@ -715,8 +715,29 @@
       "changes": [
         "extensions/lib/delegate/session.ts: 523 lines > baseline 513 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "Round five made a restarted conversation refuse its old id, and that pointer crosses six files.",
+      "changes": [
+        "biome.performance/useTopLevelRegex: 617 -> 621",
+        "biome.style/useBlockStatements: 953 -> 954",
+        "extensions/lib/delegate/queue.ts: 481 lines > baseline 474 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 334 lines > baseline 324 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 547 lines > baseline 523 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 365 lines > baseline 358 (files may only shrink)",
+        "extensions/lib/delegate/transport.ts: 456 lines > baseline 447 (files may only shrink)",
+        "extensions/lib/delegate/types.ts: 327 lines > baseline 320 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "The restart pointer's reader braces its early return, and the two lint figures fall back to where they were.",
+      "changes": [
+        "extensions/lib/delegate/recovery.ts: 336 lines > baseline 334 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "a02c624",
+  "generatedFrom": "9996343",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

@@ -412,13 +412,18 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 		client.dispose();
 		throw err;
 	}
-	// A spawn and a handshake take a moment, and the session may not have waited: `delegate_restart` replaces
-	// this record, and a `/new` or a shutdown empties the map it lives in. Registering anyway hands a live
-	// agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — while the child keeps
-	// the agent's conversation until the next cleanup. Refusing it is the only honest answer left.
-	if (rt.sessions.get(meta.sessionId) !== meta) {
+	// Two things can have taken this conversation away while its agent was starting, and they leave different
+	// traces: a restart mints a new id and marks this record, which stays in the map; a `/new` or a shutdown
+	// empties the map, so the record is no longer the one that was looked up. Registering anyway hands a live
+	// agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — and prompts a
+	// conversation that has moved on, in a worktree its sibling is editing.
+	if (meta.supersededBy || rt.sessions.get(meta.sessionId) !== meta) {
 		client.dispose();
-		throw new Error("the session was restarted, or this pi closed it, while its agent was starting; nothing was prompted");
+		throw new Error(
+			meta.supersededBy
+				? `the agent was still starting when ${supersededError(meta)}`
+				: "this pi closed the session while its agent was starting; nothing was prompted",
+		);
 	}
 	// The wiring a live session has: updates, permission requests, the exit path that reports an interrupted
 	// turn. `attach` owns the session's config-option catalogue from here.
@@ -464,6 +469,25 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
  * answers "held by another agy-acp process", which reads like a dead conversation and sends the caller to
  * `delegate_restart` — the loss this path exists to prevent. Waiting costs nothing else.
  */
+/**
+ * Point a conversation at the session `delegate_restart` took it to. A restart mints a new id and leaves
+ * this record where it was, so without the pointer a follow-up addressed to the old id would reattach it
+ * while its sibling runs: two live agents of one conversation, in one worktree, since a restart reuses it.
+ */
+export function markSuperseded(rt: DelegateRuntime, meta: SessionMeta, target: { sessionId?: string; queueId?: string }): void {
+	meta.supersededBy = target;
+	rt.persistSessionMeta(meta, true);
+	rt.persistState();
+}
+
+/** What the caller of a conversation that moved on hears: where it went, and that nothing was prompted here. */
+export function supersededError(meta: SessionMeta): string {
+	const target = meta.supersededBy?.sessionId
+		? `it was restarted as ${meta.supersededBy.sessionId} — message that session`
+		: `a restart of it is queued as ${meta.supersededBy?.queueId} — message the session that starts from it`;
+	return `${target}; nothing was prompted here, because two live agents of one conversation would share its workspace`;
+}
+
 export function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
 	const inFlight = rt.reattaching.get(meta.sessionId);
 	if (inFlight) {

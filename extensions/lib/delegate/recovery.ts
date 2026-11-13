@@ -74,8 +74,20 @@ export function normalizeMeta(raw: unknown): SessionMeta | null {
 		// the suspicion the id gets: a record naming a relative path is dropped instead of resolved against
 		// whichever directory pi runs in, and the session falls back to the runtime's base.
 		sessionCwd: absolutePathOr(m.sessionCwd),
+		supersededBy: supersededPointerOf(m.supersededBy),
 		worktreePath: absolutePathOr(m.worktreePath),
 	};
+}
+
+/** The restart pointer as read back: an object naming a session, a queue entry, both, or neither. */
+function supersededPointerOf(value: unknown): SessionMeta["supersededBy"] {
+	if (!value || typeof value !== "object") {
+		return undefined;
+	}
+	const raw = value as Record<string, unknown>;
+	const sessionId = typeof raw.sessionId === "string" && raw.sessionId ? raw.sessionId : undefined;
+	const queueId = typeof raw.queueId === "string" && raw.queueId ? raw.queueId : undefined;
+	return sessionId || queueId ? { sessionId, queueId } : undefined;
 }
 
 /** A queued task as it was written to `state.json`. Needs the runtime only to mint a missing id. */

@@ -72,9 +72,12 @@ named in `_meta.restored.cwd` is written into the record, so the next restart as
 vouched for instead of falling back again.
 
 The recorded folder wins over the current one even for an agent with no store to disagree, and that is a
-choice with a cost: a follow-up whose creation folder has since been deleted fails with an `ENOENT` naming
-the path, where re-parenting it onto whatever pi is running in now would have kept going. A conversation
-continued in a workspace nothing else about it belongs to is the worse of the two.
+choice with a cost: a follow-up whose creation folder has since been deleted fails, where re-parenting it
+onto whatever pi is running in now would have kept going. A conversation continued in a workspace nothing
+else about it belongs to is the worse of the two. What it fails *with* mattered more than expected: Node
+reports a failed spawn as `spawn <command> ENOENT` whichever of the two is missing, so the transport now
+quotes the working directory too — otherwise the operator reads "agy-acp not found" for a binary that is
+sitting right there, and the deleted folder never appears in the story.
 
 Both recorded directories are re-checked on the way back in, by `absolutePathOr` beside `isStorageSafeId`:
 a state file is read after a crash with whatever it names, and these two values become a spawn cwd. A
@@ -122,7 +125,11 @@ await and answers `BUSY`, telling the caller to send it again.
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
-| a reattach that lands after its session was restarted or closed installs nothing and disposes its child | same |
+| a reattach that lands after this pi closed the session installs nothing and disposes its child | same |
+| a restarted conversation refuses its follow-ups naming the new id, and spawns nothing for them | same |
+| a restart that lands mid-reattach stops the prompt and disposes the child | same |
+| a spawn failure names the missing workspace, not only the command | `test/test-delegate-transport.ts` |
+| the real `delegate_restart` leaves the pointer, and the real `delegate_message` reads it | `test/test-delegate-queue.ts` (Q4) |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -130,7 +137,26 @@ gaining a mock: the fake now *is* an agent with a conversation that outlives its
 a prompt for one it did not create in this process. The order is then read off `<store>/<id>.calls`, so
 the proof is the child's, not the test's.
 
-## 7. Out of scope
+## 7. A restarted session stops being addressable (round 5)
+
+Round 4 guarded the reattach against the session going away, and round 5 read `delegate_restart` closely
+enough to find that the guard had missed the case its own message named: a restart **mints a new id** and
+leaves the old record in `rt.sessions`, unmutated, so `rt.sessions.get(meta.sessionId) === meta` holds
+throughout and the check passed. What it should have caught is worse than an orphaned connection — a
+follow-up addressed to the old id reattaches the conversation and prompts it while the restarted sibling
+runs, and `delegate_restart` reuses the worktree, so two live agents of one conversation end up editing one
+checkout. `queue.ts` already refuses that for cancelled sessions, and the same end state is reachable
+sequentially (restart, then message the old id, which stayed resumable by design), so the fix was the
+pointer rather than a narrower comment.
+
+`SessionMeta.supersededBy` is written by `markSuperseded` when a restart starts (`{sessionId}`) or queues
+(`{queueId}`), persisted and re-read by `normalizeMeta`, and terminal: nothing clears it. `followUp` refuses
+it before taking a slot; `reattachOnce` refuses it again after the handshake, in case the restart landed
+mid-spawn; both say where the conversation went. The cost is that the old id stops being a way back into the
+conversation — which is what "restart" promises — while its transcript stays readable and its sibling holds
+the continuation.
+
+## 8. Out of scope
 
 * `backfill` for `agy` recovery (reading another program's private store during recovery), still refused
   by the epic's security rules — recovery reports `interrupted`.

@@ -111,12 +111,21 @@ export class DelegateTransport {
 		});
 
 		this.child.on("error", (err) => {
-			this.logEvent("error", { message: err.message });
+			// Node reports every spawn failure as `spawn <command> ENOENT`, naming the binary whether the command
+			// is missing or the working directory is — and a reattach follows a conversation to the folder it was
+			// created in, where folders get deleted. The two look identical and are fixed differently, so name both.
+			const failure =
+				(err as NodeJS.ErrnoException).code === "ENOENT"
+					? Object.assign(new Error(`${err.message} — the command, or the working directory ${this.cwd}, is missing`, { cause: err }), {
+							code: "ENOENT",
+						})
+					: err;
+			this.logEvent("error", { message: failure.message });
 			for (const req of this.pendingRequests.values()) {
 				if (req.timer) {
 					clearTimeout(req.timer);
 				}
-				req.reject(err);
+				req.reject(failure);
 			}
 			this.pendingRequests.clear();
 			if (!this.isDisposed && this.onExitCallback) {

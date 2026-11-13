@@ -12,6 +12,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { admit, findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { cancelSession, delegate, followUp, type DelegateRequest } from "./queue.ts";
+import { markSuperseded } from "./session.ts";
 import { commandForCaller, PERMISSION_DECISIONS, type PermissionDecision } from "./permissions.ts";
 import { releaseWorktree } from "./worktree.ts";
 import type { SessionMeta } from "./types.ts";
@@ -45,8 +46,9 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 			label: "Delegate Message",
 			description:
 				"Sends a follow-up prompt to a delegated session and returns immediately. The session must be idle: " +
-				"a running session is still working, and one whose process died is continued where the agent can " +
-				"restore its conversation, and otherwise restarted (delegate_restart).",
+				"a running session is still working, one whose process died is continued where the agent can " +
+				"restore its conversation and otherwise restarted (delegate_restart), and one that was already " +
+				"restarted refuses and names the session that took its conversation.",
 			parameters: Type.Object({
 				session_id: SESSION_ID,
 				message: Type.String({ description: "Follow-up instruction for the session" }),
@@ -171,6 +173,7 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 			label: "Delegate Restart",
 			description:
 				"Runs an interrupted, failed or finished session again in its original worktree, with the original prompt or a revised one. " +
+				"The id it was given stops taking messages: the new session owns the conversation. " +
 				"This starts a NEW session id — the old one keeps its record; a running session must be cancelled first.",
 			parameters: Type.Object({
 				session_id: SESSION_ID,
@@ -260,6 +263,10 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 				if (!res.ok) {
 					return errorResult(rt, "delegate_restart", `Failed to restart '${meta.sessionId}': ${res.error}`, { code: res.code });
 				}
+				// The conversation belongs to the restarted session now. A restart mints a new id and leaves this
+				// record where it was, so without the pointer a later `delegate_message` to the old id would reattach
+				// it beside its sibling: two live agents of one conversation in the worktree a restart reuses.
+				markSuperseded(rt, meta, "started" in res ? { sessionId: res.started.sessionId } : { queueId: res.queued.queueId });
 				const warnings = [...admitted.warnings];
 				const note = warnings.length ? `\nNote: ${warnings.join("; ")}` : "";
 				if ("started" in res) {

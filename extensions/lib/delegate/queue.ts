@@ -15,7 +15,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { detectPullRequest } from "./pr-detect.ts";
 import { agentTitle, findAgent } from "./registry.ts";
 import { commandForCaller } from "./permissions.ts";
-import { configureSession, installDrainer, reattachSession, spawnSession, startTurn } from "./session.ts";
+import { configureSession, installDrainer, reattachSession, spawnSession, startTurn, supersededError } from "./session.ts";
 import type { DelegateTransport } from "./transport.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { createWorktree, releaseWorktree } from "./worktree.ts";
@@ -325,6 +325,12 @@ export async function followUp(
 		}
 		return { ok: false, code: "BUSY", error: "the session is still working; wait for it or delegate_cancel first" };
 	}
+	// A restarted conversation is not this one any more. `delegate_restart` mints a new id and leaves this
+	// record where it was, so the pointer is the only thing saying its conversation moved on — and the sibling
+	// works in this session's worktree, so reattaching would run two live agents of it in one checkout.
+	if (meta.supersededBy) {
+		return { ok: false, code: "SUPERSEDED", error: supersededError(meta) };
+	}
 
 	// A follow-up turn occupies capacity exactly the way an initial one does, so it asks for the slot the
 	// same way. Without this the limits were a suggestion: two running sessions plus a follow-up was a third
@@ -364,7 +370,8 @@ export async function followUp(
 		// Somebody else's reattach was also their turn: an agent mid-turn refuses a second prompt
 		// (`TURN_IN_PROGRESS`) and the rejection path marks the session failed, so starting here would answer
 		// `{ok: true}` to a message nothing received. The check above ran before this await and could not see
-		// it; the live-client path needs none, because nothing is awaited before its `startTurn`.
+		// it; the live-client path needs none, because nothing is awaited before its `startTurn`. A restart that
+		// landed during the same await is caught inside `reattachSession`, by the pointer it leaves on this record.
 		if (midTurn(meta)) {
 			release();
 			return {

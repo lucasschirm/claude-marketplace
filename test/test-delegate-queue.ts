@@ -268,6 +268,12 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 			assert.match(text(restarted), /^Restarted as session /, text(restarted));
 			created.push(startedId(restarted));
 			await waitFor("set_mode bypass", () => fs.existsSync(path.join(markerDir, "set_mode-bypass")), 10_000);
+			// The restarted session reuses this one's worktree, so the old id must not resurrect the conversation
+			// beside it: two live agents of one conversation in one checkout is the hazard the pointer refuses.
+			const superseded = await call("delegate_message", { session_id: q4Id, message: "still there?" });
+			assert.ok(superseded.isError, "a restarted session must not take follow-ups");
+			assert.ok(text(superseded).includes(startedId(restarted)), `the refusal must name where the conversation went: ${text(superseded)}`);
+			assert.ok(text(superseded).includes("workspace"), `the refusal must say why: ${text(superseded)}`);
 			console.log("✓ Q4: auto -> smart, unknown mode refused, restart mode override applied");
 
 			// ---------- Q5: unimplemented client methods are answered with an error ----------

@@ -21,6 +21,7 @@ const SERVER = path.join(import.meta.dirname, "fake-acp-server.mjs");
 // Every transport this file creates, so a failing assertion cannot leave an agent process behind with
 // its stdout pipe open — which is how a test suite hangs instead of reporting.
 const launched: DelegateTransport[] = [];
+const MISSING_WORKSPACE_RE = /definitely-not-a-workspace/;
 after(() => {
 	for (const t of launched) {
 		try {
@@ -237,5 +238,15 @@ test("a spawn of a command that does not exist fails the start, not the next too
 		clientInfo: { name: "t", version: "1" },
 	});
 	await assert.rejects(() => t.start(), /ghost acp|ENOENT|not running/);
+	t.dispose();
+});
+
+test("a spawn that failed because the workspace is gone names the workspace", async () => {
+	// Node blames the command whichever of the two went missing, and a reattach follows a conversation to the
+	// folder it was created in — where folders get deleted. Without the path in the text the operator goes
+	// hunting for a missing binary, and `agy-acp --help` tells them it is there.
+	const t = new DelegateTransport("/definitely-not-a-workspace", plan());
+	launched.push(t);
+	await assert.rejects(() => t.start(), MISSING_WORKSPACE_RE);
 	t.dispose();
 });

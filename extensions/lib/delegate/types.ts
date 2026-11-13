@@ -281,6 +281,13 @@ export interface SessionMeta {
 	lastMessageTime?: number;
 	turnStartedAt?: number;
 	turnCompletedAt?: number;
+	/**
+	 * Set when `delegate_restart` took this conversation over. A restart mints a *new* session id and leaves
+	 * this record alone, so nothing else tells a follow-up that its conversation has moved on — and the
+	 * restarted sibling reuses this session's worktree, so reattaching the old one would run two live agents
+	 * of one conversation in one checkout. Terminal: never cleared.
+	 */
+	supersededBy?: { sessionId?: string; queueId?: string };
 	pid?: number;
 	dbBackfilled?: boolean;
 	error?: string;
