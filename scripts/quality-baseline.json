@@ -9,20 +9,20 @@
     "agyStdoutFramesOnly": 0,
     "settleOwnership": 0,
     "inboundBufferCap": 0,
-    "envAccessLocation": 2,
+    "envAccessLocation": 3,
     "stdoutExitDrain": 0,
     "emptyCatch": 41,
     "piExtensionsMatchDisk": 0,
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
-    "biome.performance/useTopLevelRegex": 566,
-    "biome.performance/noNamespaceImport": 184,
-    "biome.performance/noAwaitInLoops": 91,
-    "biome.style/useBlockStatements": 879,
-    "biome.suspicious/noShadow": 72,
+    "biome.performance/noAwaitInLoops": 107,
+    "biome.performance/noNamespaceImport": 212,
+    "biome.style/useBlockStatements": 953,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
+    "biome.performance/useTopLevelRegex": 617,
+    "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
-    "biome.complexity/noExcessiveLinesPerFunction": 9,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
     "biome.suspicious/noExplicitAny": 162,
     "biome.suspicious/noConsole": 8
@@ -73,7 +73,7 @@
     "extensions/orca-orchestration.ts": 1742,
     "extensions/pr-tasks.ts": 1509,
     "extensions/tools.ts": 625,
-    "agy-acp/src/acp.ts": 198,
+    "agy-acp/src/acp.ts": 242,
     "agy-acp/src/agy-driver.ts": 40,
     "agy-acp/src/agy/args.ts": 91,
     "agy-acp/src/agy/contract.ts": 325,
@@ -83,30 +83,46 @@
     "agy-acp/src/agy/process.ts": 330,
     "agy-acp/src/agy/version.ts": 64,
     "agy-acp/src/bridge-cleanup.ts": 54,
-    "agy-acp/src/bridge-hook.ts": 153,
-    "agy-acp/src/bridge-server.ts": 361,
+    "agy-acp/src/bridge-hook.ts": 13,
+    "agy-acp/src/bridge-server.ts": 365,
     "agy-acp/src/byte-budget.ts": 40,
     "agy-acp/src/cancel.ts": 100,
-    "agy-acp/src/config-options.ts": 279,
+    "agy-acp/src/config-options.ts": 296,
     "agy-acp/src/config.ts": 104,
-    "agy-acp/src/errors.ts": 37,
+    "agy-acp/src/errors.ts": 51,
     "agy-acp/src/flush-stdout.ts": 41,
     "agy-acp/src/framing.ts": 89,
     "agy-acp/src/heartbeat.ts": 74,
-    "agy-acp/src/jsonrpc.ts": 354,
+    "agy-acp/src/hook-run.ts": 169,
+    "agy-acp/src/invocation.ts": 75,
+    "agy-acp/src/jsonrpc.ts": 361,
     "agy-acp/src/launch.ts": 150,
     "agy-acp/src/lib/child-process.ts": 40,
-    "agy-acp/src/main.ts": 124,
+    "agy-acp/src/main.ts": 121,
     "agy-acp/src/map-steps.ts": 96,
     "agy-acp/src/pending-asks.ts": 114,
     "agy-acp/src/permission-gate.ts": 386,
     "agy-acp/src/permission.ts": 312,
     "agy-acp/src/prompt.ts": 67,
     "agy-acp/src/selection-methods.ts": 120,
-    "agy-acp/src/server.ts": 247,
-    "agy-acp/src/session-registry.ts": 83,
-    "agy-acp/src/session-selection.ts": 134,
-    "agy-acp/src/session.ts": 365,
+    "agy-acp/src/selection-record.ts": 51,
+    "agy-acp/src/selection-restore.ts": 40,
+    "agy-acp/src/server.ts": 193,
+    "agy-acp/src/session-open.ts": 211,
+    "agy-acp/src/session-recording.ts": 91,
+    "agy-acp/src/session-registry.ts": 89,
+    "agy-acp/src/session-restore.ts": 334,
+    "agy-acp/src/session-selection.ts": 145,
+    "agy-acp/src/session-store/files.ts": 280,
+    "agy-acp/src/session-store/hold.ts": 144,
+    "agy-acp/src/session-store/journal.ts": 224,
+    "agy-acp/src/session-store/listing.ts": 167,
+    "agy-acp/src/session-store/lock.ts": 216,
+    "agy-acp/src/session-store/paths.ts": 114,
+    "agy-acp/src/session-store/reading.ts": 93,
+    "agy-acp/src/session-store/records.ts": 250,
+    "agy-acp/src/session-store/store.ts": 301,
+    "agy-acp/src/session.ts": 467,
     "agy-acp/src/shutdown.ts": 120,
     "agy-acp/src/spawn-agy.ts": 60,
     "agy-acp/src/stream-calls.ts": 94,
@@ -115,13 +131,6 @@
     "agy-acp/src/update-map.ts": 167
   },
   "notes": [
-    {
-      "at": "2026-10-20",
-      "reason": "globalThisOwnership was measured with a detector that missed dot-access writes ((globalThis as any).KEY =) and delete statements; the metric now counts 11 assignments + 9 deletes and excludes the 5 if-guard reads. No new debt: same 20 sites that already existed.",
-      "changes": [
-        "globalThisOwnership: 0 -> 20"
-      ]
-    },
     {
       "at": "2026-10-20",
       "reason": "extensions/lib/gh-health.ts 255 -> 274: recordSuccess now runs the retry hooks on the degraded->healthy transition, so a pending observe_pr auto-start cannot strand until the next failure schedules a timer (root cause of the observe-pr-gh-failure CI failure on PR #37).",
@@ -138,11 +147,25 @@
       ]
     },
     {
-      "at": "2026-10-21",
-      "reason": "two deliberate widenings in one commit: record biomeConfigHash (debt figures are only comparable to the biome.jsonc that produced them), and let github-review-threads.ts 524->590 after the metadata-identity and resolved-target guards",
+      "at": "2026-10-20",
+      "reason": "globalThisOwnership was measured with a detector that missed dot-access writes ((globalThis as any).KEY =) and delete statements; the metric now counts 11 assignments + 9 deletes and excludes the 5 if-guard reads. No new debt: same 20 sites that already existed.",
       "changes": [
-        "extensions/lib/github-review-threads.ts: 590 lines > baseline 524 (files may only shrink)",
-        "biome.jsonc changed since these numbers were recorded (unrecorded -> 184447d011b421d7): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+        "globalThisOwnership: 0 -> 20"
+      ]
+    },
+    {
+      "at": "2026-10-21",
+      "reason": "Inherited from merging main PRs 43 and 44: boot-nonblocking and the pr-observer engine grew globalThis writes 25 to 33, empty catches 47 to 53, any 152 to 160, cognitive 52 to 53, and five files grew; measured against origin/main the merged tree matches main exactly, so none of it originates here.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 52 -> 53",
+        "biome.suspicious/noExplicitAny: 152 -> 160",
+        "emptyCatch: 47 -> 53",
+        "globalThisOwnership: 25 -> 33",
+        "extensions/devin-delegate.ts: 2684 lines > baseline 2624 (files may only shrink)",
+        "extensions/lib/pr-tasks-manager.ts: 849 lines > baseline 837 (files may only shrink)",
+        "extensions/observe-pr.ts: 1992 lines > baseline 1890 (files may only shrink)",
+        "extensions/orca-orchestration.ts: 1735 lines > baseline 1649 (files may only shrink)",
+        "extensions/pr-tasks.ts: 1505 lines > baseline 1382 (files may only shrink)"
       ]
     },
     {
@@ -162,33 +185,10 @@
     },
     {
       "at": "2026-10-21",
-      "reason": "Inherited from merging main PRs 43 and 44: boot-nonblocking and the pr-observer engine grew globalThis writes 25 to 33, empty catches 47 to 53, any 152 to 160, cognitive 52 to 53, and five files grew; measured against origin/main the merged tree matches main exactly, so none of it originates here.",
+      "reason": "two deliberate widenings in one commit: record biomeConfigHash (debt figures are only comparable to the biome.jsonc that produced them), and let github-review-threads.ts 524->590 after the metadata-identity and resolved-target guards",
       "changes": [
-        "biome.complexity/noExcessiveCognitiveComplexity: 52 -> 53",
-        "biome.suspicious/noExplicitAny: 152 -> 160",
-        "emptyCatch: 47 -> 53",
-        "globalThisOwnership: 25 -> 33",
-        "extensions/devin-delegate.ts: 2684 lines > baseline 2624 (files may only shrink)",
-        "extensions/lib/pr-tasks-manager.ts: 849 lines > baseline 837 (files may only shrink)",
-        "extensions/observe-pr.ts: 1992 lines > baseline 1890 (files may only shrink)",
-        "extensions/orca-orchestration.ts: 1735 lines > baseline 1649 (files may only shrink)",
-        "extensions/pr-tasks.ts: 1505 lines > baseline 1382 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-22",
-      "reason": "devin-delegate.ts 2646->2650 and devin-permissions.ts 118->137: Devin-supplied command text is JSON-quoted and capped before it reaches the agent (prompt injection), and a failed start releases its slot before reporting it. devin-delegate.ts stays below its pre-PR 2684.",
-      "changes": [
-        "extensions/devin-delegate.ts: 2650 lines > baseline 2646 (files may only shrink)",
-        "extensions/lib/devin-permissions.ts: 137 lines > baseline 118 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-22",
-      "reason": "Authored in this change, not inherited: the head-SHA scoping adds the run-to-commit map and the commit comparison, growing ci-verdict.ts from 66 to 102 lines and observe-pr.ts from 1992 to 2029.",
-      "changes": [
-        "extensions/lib/ci-verdict.ts: 102 lines > baseline 66 (files may only shrink)",
-        "extensions/observe-pr.ts: 2029 lines > baseline 1992 (files may only shrink)"
+        "extensions/lib/github-review-threads.ts: 590 lines > baseline 524 (files may only shrink)",
+        "biome.jsonc changed since these numbers were recorded (unrecorded -> 184447d011b421d7): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
       ]
     },
     {
@@ -201,10 +201,48 @@
     },
     {
       "at": "2026-10-22",
+      "reason": "Authored in this change, not inherited: the head-SHA scoping adds the run-to-commit map and the commit comparison, growing ci-verdict.ts from 66 to 102 lines and observe-pr.ts from 1992 to 2029.",
+      "changes": [
+        "extensions/lib/ci-verdict.ts: 102 lines > baseline 66 (files may only shrink)",
+        "extensions/observe-pr.ts: 2029 lines > baseline 1992 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-22",
       "reason": "Merge reconciliation with main: the only two figures above baseline are this branch's own authored debt, already recorded in the notes above (ci-verdict.ts 66 to 102 to 119, observe-pr.ts 1992 to 2029 to 2058). Every other figure is the stricter of the two sides, so the merge widens nothing.",
       "changes": [
         "extensions/lib/ci-verdict.ts: 119 lines > baseline 66 (files may only shrink)",
         "extensions/observe-pr.ts: 2058 lines > baseline 1992 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-22",
+      "reason": "devin-delegate.ts 2646->2650 and devin-permissions.ts 118->137: Devin-supplied command text is JSON-quoted and capped before it reaches the agent (prompt injection), and a failed start releases its slot before reporting it. devin-delegate.ts stays below its pre-PR 2684.",
+      "changes": [
+        "extensions/devin-delegate.ts: 2650 lines > baseline 2646 (files may only shrink)",
+        "extensions/lib/devin-permissions.ts: 137 lines > baseline 118 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "PR review round 2: serialization failures now answer -32603 instead of silence, EOF became a half-close, and errors.ts split off the error vocabulary - jsonrpc.ts grew 281->296 staying under its 300 budget",
+      "changes": [
+        "agy-acp/src/jsonrpc.ts: 296 lines > baseline 281 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "agy-acp wired into the gates: biome.jsonc now covers agy-acp/** (hash moved), no diagnostic counts changed, and the new agyStdoutFramesOnly invariant starts at zero",
+      "changes": [
+        "biome.jsonc changed since these numbers were recorded (184447d011b421d7 -> 26e8dcbbf3b6c1b0): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-10-26",
+      "reason": "devin-delegate.ts +26 and pr-tasks.ts +5 are payload schemas and the comments naming which swallowed failure is now logged, paid for moving both files onto the door",
+      "changes": [
+        "extensions/devin-delegate.ts: 2676 lines > baseline 2650 (files may only shrink)",
+        "extensions/pr-tasks.ts: 1510 lines > baseline 1505 (files may only shrink)"
       ]
     },
     {
@@ -231,14 +269,6 @@
     },
     {
       "at": "2026-10-26",
-      "reason": "devin-delegate.ts +26 and pr-tasks.ts +5 are payload schemas and the comments naming which swallowed failure is now logged, paid for moving both files onto the door",
-      "changes": [
-        "extensions/devin-delegate.ts: 2676 lines > baseline 2650 (files may only shrink)",
-        "extensions/pr-tasks.ts: 1510 lines > baseline 1505 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-26",
       "reason": "review fixes on this branch grew five files by 74 lines total: the door now carries an unexcerpted body, a fromFailureBody flag and failureText, and the comments name which misclassification each prevents",
       "changes": [
         "extensions/devin-delegate.ts: 2685 lines > baseline 2676 (files may only shrink)",
@@ -246,27 +276,6 @@
         "extensions/lib/gh-health.ts: 295 lines > baseline 280 (files may only shrink)",
         "extensions/lib/github-review-threads.ts: 639 lines > baseline 637 (files may only shrink)",
         "extensions/observe-pr.ts: 2138 lines > baseline 2130 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-26",
-      "reason": "agy-acp wired into the gates: biome.jsonc now covers agy-acp/** (hash moved), no diagnostic counts changed, and the new agyStdoutFramesOnly invariant starts at zero",
-      "changes": [
-        "biome.jsonc changed since these numbers were recorded (184447d011b421d7 -> 26e8dcbbf3b6c1b0): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
-      ]
-    },
-    {
-      "at": "2026-10-26",
-      "reason": "PR review round 2: serialization failures now answer -32603 instead of silence, EOF became a half-close, and errors.ts split off the error vocabulary - jsonrpc.ts grew 281->296 staying under its 300 budget",
-      "changes": [
-        "agy-acp/src/jsonrpc.ts: 296 lines > baseline 281 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-27",
-      "reason": "exclude recorded spike reference fixtures from lint because they are a behavioural specification, not repo code",
-      "changes": [
-        "biome.jsonc changed since these numbers were recorded (26e8dcbbf3b6c1b0 -> 32be8dcbbc1d0ce8): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
       ]
     },
     {
@@ -279,30 +288,16 @@
     },
     {
       "at": "2026-10-27",
+      "reason": "exclude recorded spike reference fixtures from lint because they are a behavioural specification, not repo code",
+      "changes": [
+        "biome.jsonc changed since these numbers were recorded (26e8dcbbf3b6c1b0 -> 32be8dcbbc1d0ce8): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-10-27",
       "reason": "orca-client's deletion verdict now bounds and classifies each git comparison, comments included",
       "changes": [
         "extensions/lib/orca-client.ts: 615 lines > baseline 578 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-28",
-      "reason": "issue 69: observe-pr.ts polls mergeable/mergeableState and announces CONFLICTING/BEHIND transitions on an observed PR; the classification itself lives in the new extensions/lib/mergeability.ts (46 lines, unit-tested).",
-      "changes": [
-        "extensions/observe-pr.ts: 2172 lines > baseline 2133 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-28",
-      "reason": "review fixes on the mergeability work: a transition announced while the startup notice suppresses updates is deferred instead of dropped, and the observe_pr seed is persisted; both close review findings on PR 71.",
-      "changes": [
-        "extensions/observe-pr.ts: 2192 lines > baseline 2172 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-10-28",
-      "reason": "mergeability.ts grows two lines: the real gh field is mergeStateStatus (mergeableState was rejected by gh as an unknown field - caught by the hook work's smoke test against real gh), so the payload carries the alias and the classifier reads both.",
-      "changes": [
-        "extensions/lib/mergeability.ts: 49 lines > baseline 47 (files may only shrink)"
       ]
     },
     {
@@ -318,25 +313,24 @@
       ]
     },
     {
-      "at": "2026-11-03",
-      "reason": "gh-health.ts 308->323: the retry timer now re-arms when it wakes before its slot is due (an early setTimeout fired the hooks into a window acquireSlot refused and the consumed one-shot left nothing scheduled - the pr-tasks-gh-failure CI stall on PR #74 and twice on main)",
+      "at": "2026-10-28",
+      "reason": "issue 69: observe-pr.ts polls mergeable/mergeableState and announces CONFLICTING/BEHIND transitions on an observed PR; the classification itself lives in the new extensions/lib/mergeability.ts (46 lines, unit-tested).",
       "changes": [
-        "extensions/lib/gh-health.ts: 323 lines > baseline 308 (files may only shrink)"
+        "extensions/observe-pr.ts: 2172 lines > baseline 2133 (files may only shrink)"
       ]
     },
     {
-      "at": "2026-11-03",
-      "reason": "issue #55 adds mode, model and effort selection, so the files that launch agy and hold session state grew by the flags, selectors and setters that capability is made of",
+      "at": "2026-10-28",
+      "reason": "mergeability.ts grows two lines: the real gh field is mergeStateStatus (mergeableState was rejected by gh as an unknown field - caught by the hook work's smoke test against real gh), so the payload carries the alias and the classifier reads both.",
       "changes": [
-        "agy-acp/src/acp.ts: 198 lines > baseline 192 (files may only shrink)",
-        "agy-acp/src/agy-driver.ts: 40 lines > baseline 38 (files may only shrink)",
-        "agy-acp/src/agy/args.ts: 64 lines > baseline 51 (files may only shrink)",
-        "agy-acp/src/config.ts: 90 lines > baseline 52 (files may only shrink)",
-        "agy-acp/src/main.ts: 115 lines > baseline 102 (files may only shrink)",
-        "agy-acp/src/server.ts: 274 lines > baseline 271 (files may only shrink)",
-        "agy-acp/src/session-registry.ts: 79 lines > baseline 65 (files may only shrink)",
-        "agy-acp/src/session.ts: 339 lines > baseline 300 (files may only shrink)",
-        "agy-acp/src/spawn-agy.ts: 60 lines > baseline 51 (files may only shrink)"
+        "extensions/lib/mergeability.ts: 49 lines > baseline 47 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-10-28",
+      "reason": "review fixes on the mergeability work: a transition announced while the startup notice suppresses updates is deferred instead of dropped, and the observe_pr seed is persisted; both close review findings on PR 71.",
+      "changes": [
+        "extensions/observe-pr.ts: 2192 lines > baseline 2172 (files may only shrink)"
       ]
     },
     {
@@ -367,6 +361,28 @@
         "agy-acp/src/agy/models.ts: 173 lines > baseline 164 (files may only shrink)",
         "agy-acp/src/config-options.ts: 266 lines > baseline 262 (files may only shrink)",
         "agy-acp/src/server.ts: 224 lines > baseline 220 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "gh-health.ts 308->323: the retry timer now re-arms when it wakes before its slot is due (an early setTimeout fired the hooks into a window acquireSlot refused and the consumed one-shot left nothing scheduled - the pr-tasks-gh-failure CI stall on PR #74 and twice on main)",
+      "changes": [
+        "extensions/lib/gh-health.ts: 323 lines > baseline 308 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-03",
+      "reason": "issue #55 adds mode, model and effort selection, so the files that launch agy and hold session state grew by the flags, selectors and setters that capability is made of",
+      "changes": [
+        "agy-acp/src/acp.ts: 198 lines > baseline 192 (files may only shrink)",
+        "agy-acp/src/agy-driver.ts: 40 lines > baseline 38 (files may only shrink)",
+        "agy-acp/src/agy/args.ts: 64 lines > baseline 51 (files may only shrink)",
+        "agy-acp/src/config.ts: 90 lines > baseline 52 (files may only shrink)",
+        "agy-acp/src/main.ts: 115 lines > baseline 102 (files may only shrink)",
+        "agy-acp/src/server.ts: 274 lines > baseline 271 (files may only shrink)",
+        "agy-acp/src/session-registry.ts: 79 lines > baseline 65 (files may only shrink)",
+        "agy-acp/src/session.ts: 339 lines > baseline 300 (files may only shrink)",
+        "agy-acp/src/spawn-agy.ts: 60 lines > baseline 51 (files may only shrink)"
       ]
     },
     {
@@ -405,6 +421,20 @@
       "changes": [
         "extensions/orca-orchestration.ts: 1742 lines > baseline 1738 (files may only shrink)",
         "biome.jsonc changed since these numbers were recorded (fda3c63ebc0d8b59 -> 53be27d25534b862): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-11-05",
+      "reason": "issue 56 adds the session store, load, resume and list",
+      "changes": [
+        "agy-acp/src/acp.ts: 242 lines > baseline 198 (files may only shrink)",
+        "agy-acp/src/config-options.ts: 279 lines > baseline 266 (files may only shrink)",
+        "agy-acp/src/errors.ts: 38 lines > baseline 24 (files may only shrink)",
+        "agy-acp/src/jsonrpc.ts: 302 lines > baseline 296 (files may only shrink)",
+        "agy-acp/src/main.ts: 117 lines > baseline 115 (files may only shrink)",
+        "agy-acp/src/session-registry.ts: 85 lines > baseline 79 (files may only shrink)",
+        "agy-acp/src/session-selection.ts: 142 lines > baseline 131 (files may only shrink)",
+        "agy-acp/src/session.ts: 443 lines > baseline 349 (files may only shrink)"
       ]
     },
     {
@@ -448,6 +478,20 @@
         "agy-acp/src/turn.ts: 144 lines > baseline 133 (files may only shrink)",
         "agy-acp/src/update-map.ts: 166 lines > baseline 152 (files may only shrink)",
         "biome.jsonc changed since these numbers were recorded (53be27d25534b862 -> 2c5c6196c267ee3b): a rule silenced for a subset of files is indistinguishable from that debt being fixed. Re-record deliberately with `node scripts/check-quality.mjs --write --reason \"what changed and why\"`"
+      ]
+    },
+    {
+      "at": "2026-11-05",
+      "reason": "the review round fixed lock failures, a leaked load hold and cursor drift",
+      "changes": [
+        "agy-acp/src/session-open.ts: 198 lines > baseline 189 (files may only shrink)",
+        "agy-acp/src/session-restore.ts: 303 lines > baseline 283 (files may only shrink)",
+        "agy-acp/src/session-store/hold.ts: 123 lines > baseline 105 (files may only shrink)",
+        "agy-acp/src/session-store/journal.ts: 205 lines > baseline 196 (files may only shrink)",
+        "agy-acp/src/session-store/listing.ts: 153 lines > baseline 146 (files may only shrink)",
+        "agy-acp/src/session-store/lock.ts: 208 lines > baseline 187 (files may only shrink)",
+        "agy-acp/src/session-store/paths.ts: 108 lines > baseline 99 (files may only shrink)",
+        "agy-acp/src/session-store/store.ts: 289 lines > baseline 284 (files may only shrink)"
       ]
     },
     {
@@ -509,33 +553,6 @@
     },
     {
       "at": "2026-11-10",
-      "reason": "unlabelled permission requests now say so",
-      "changes": [
-        "extensions/lib/delegate/permissions.ts: 226 lines > baseline 222 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-11-10",
-      "reason": "third review round: chunk loss, id paths, titles",
-      "changes": [
-        "biome.performance/useTopLevelRegex: 563 -> 566",
-        "extensions/lib/delegate/recovery.ts: 318 lines > baseline 300 (files may only shrink)",
-        "extensions/lib/delegate/runtime.ts: 533 lines > baseline 513 (files may only shrink)",
-        "extensions/lib/delegate/session.ts: 522 lines > baseline 521 (files may only shrink)",
-        "extensions/lib/delegate/storage.ts: 122 lines > baseline 107 (files may only shrink)",
-        "extensions/lib/delegate/transcript.ts: 226 lines > baseline 210 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-11-10",
-      "reason": "log stream failure handling keeps the host alive",
-      "changes": [
-        "extensions/lib/delegate/runtime.ts: 540 lines > baseline 533 (files may only shrink)",
-        "extensions/lib/delegate/transport.ts: 431 lines > baseline 417 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-11-10",
       "reason": "Issue #59 adds subagent attribution, gating and progress across the permission gate, the bridge conversation boundary and their tests, which grows those files past their budgets.",
       "changes": [
         "agy-acp/src/bridge-server.ts: 363 lines > baseline 336 (files may only shrink)",
@@ -554,6 +571,40 @@
       ]
     },
     {
+      "at": "2026-11-10",
+      "reason": "log stream failure handling keeps the host alive",
+      "changes": [
+        "extensions/lib/delegate/runtime.ts: 540 lines > baseline 533 (files may only shrink)",
+        "extensions/lib/delegate/transport.ts: 431 lines > baseline 417 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-10",
+      "reason": "third review round: chunk loss, id paths, titles",
+      "changes": [
+        "biome.performance/useTopLevelRegex: 563 -> 566",
+        "extensions/lib/delegate/recovery.ts: 318 lines > baseline 300 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 533 lines > baseline 513 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 522 lines > baseline 521 (files may only shrink)",
+        "extensions/lib/delegate/storage.ts: 122 lines > baseline 107 (files may only shrink)",
+        "extensions/lib/delegate/transcript.ts: 226 lines > baseline 210 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-10",
+      "reason": "unlabelled permission requests now say so",
+      "changes": [
+        "extensions/lib/delegate/permissions.ts: 226 lines > baseline 222 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-11",
+      "reason": "agy backend: framing decoder, exact-id permissions and per-binary guard grew these files",
+      "changes": [
+        "extensions/lib/delegate/transcript.ts: 230 lines > baseline 226 (files may only shrink)"
+      ]
+    },
+    {
       "at": "2026-11-11",
       "reason": "agy delegate driver: a third backend, exact-id permissions and per-binary CLI verbs grew these files",
       "changes": [
@@ -564,13 +615,6 @@
         "extensions/lib/delegate/registry.ts: 238 lines > baseline 225 (files may only shrink)",
         "extensions/lib/delegate/transport.ts: 447 lines > baseline 431 (files may only shrink)",
         "extensions/lib/delegate/types.ts: 317 lines > baseline 304 (files may only shrink)"
-      ]
-    },
-    {
-      "at": "2026-11-11",
-      "reason": "agy backend: framing decoder, exact-id permissions and per-binary guard grew these files",
-      "changes": [
-        "extensions/lib/delegate/transcript.ts: 230 lines > baseline 226 (files may only shrink)"
       ]
     },
     {
@@ -588,8 +632,46 @@
       "changes": [
         "extensions/lib/delegate/drivers/agy.ts: 307 lines > baseline 294 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "Merge origin/main into dev, so one tree is measured where two baselines were kept: dev's agy-acp session store, packaging and live smoke now meet main's widened biome survey and stricter flags, the falls to zero are main's already-recorded rule decisions re-read over the merged tree, and hook-run.ts joins the env doors because the hook's body moved there in the SEA packaging.",
+      "changes": [
+        "biome.complexity/noExcessiveLinesPerFunction: 9 -> 10",
+        "biome.performance/noAwaitInLoops: 91 -> 107",
+        "biome.performance/noNamespaceImport: 184 -> 212",
+        "biome.performance/useTopLevelRegex: 566 -> 617",
+        "biome.style/useBlockStatements: 879 -> 953",
+        "biome.suspicious/noShadow: 72 -> 78",
+        "envAccessLocation: 2 -> 3",
+        "biome.style/noNonNullAssertion: 5 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.style/useTemplate: 7 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.correctness/noUnusedImports: 1 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.suspicious/noGlobalIsNan: 8 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.correctness/noUnusedFunctionParameters: 1 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "biome.complexity/useOptionalChain: 8 -> 0. Either the debt is genuinely gone or the rule stopped reporting it (biome.jsonc, an overrides entry, a renamed rule, a substituted reporter). Record the decision with `--write --reason \"why\"`",
+        "agy-acp/src/bridge-server.ts: 365 lines > baseline 361 (files may only shrink)",
+        "agy-acp/src/config-options.ts: 296 lines > baseline 279 (files may only shrink)",
+        "agy-acp/src/errors.ts: 51 lines > baseline 38 (files may only shrink)",
+        "agy-acp/src/jsonrpc.ts: 361 lines > baseline 354 (files may only shrink)",
+        "agy-acp/src/session-open.ts: 211 lines > baseline 198 (files may only shrink)",
+        "agy-acp/src/session-recording.ts: 91 lines > baseline 87 (files may only shrink)",
+        "agy-acp/src/session-registry.ts: 89 lines > baseline 85 (files may only shrink)",
+        "agy-acp/src/session-restore.ts: 334 lines > baseline 303 (files may only shrink)",
+        "agy-acp/src/session-selection.ts: 145 lines > baseline 142 (files may only shrink)",
+        "agy-acp/src/session-store/files.ts: 280 lines > baseline 259 (files may only shrink)",
+        "agy-acp/src/session-store/hold.ts: 144 lines > baseline 123 (files may only shrink)",
+        "agy-acp/src/session-store/journal.ts: 224 lines > baseline 205 (files may only shrink)",
+        "agy-acp/src/session-store/listing.ts: 167 lines > baseline 153 (files may only shrink)",
+        "agy-acp/src/session-store/lock.ts: 216 lines > baseline 208 (files may only shrink)",
+        "agy-acp/src/session-store/paths.ts: 114 lines > baseline 108 (files may only shrink)",
+        "agy-acp/src/session-store/reading.ts: 93 lines > baseline 80 (files may only shrink)",
+        "agy-acp/src/session-store/records.ts: 250 lines > baseline 210 (files may only shrink)",
+        "agy-acp/src/session-store/store.ts: 301 lines > baseline 289 (files may only shrink)",
+        "agy-acp/src/session.ts: 467 lines > baseline 443 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "dd53a99",
+  "generatedFrom": "509f94b",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

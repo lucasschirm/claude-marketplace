@@ -131,6 +131,41 @@ jobs:
       - name: Run agy-acp suite
         run: bash test/run.sh agy-acp
 
+  # The packaging build: the source bundles to one CJS file and is patched into the Node SEA
+  # runtime (agy-acp/scripts/build-sea.mjs), and the agy-acp suite runs again against the built
+  # executable (the suites are mode-agnostic through the AGY_ACP_TEST_BIN seam). The binary is
+  # 0700 and needs no install; Node 24 is the build and test runtime (Node >= 23.6 supports SEA).
+  agy-acp-sea:
+    name: agy-acp SEA build + binary-mode tests
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build the single executable
+        run: node agy-acp/scripts/build-sea.mjs
+
+      - name: Run the agy-acp suite against the built binary
+        env:
+          AGY_ACP_TEST_BIN: ${{ github.workspace }}/agy-acp/dist/agy-acp
+        run: bash test/run.sh agy-acp
+
+      - name: Upload the built executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: agy-acp-sea
+          path: agy-acp/dist/agy-acp
+          # A 121 MiB artifact is rebuildable by any contributor; it needs no long shelf life.
+          retention-days: 7
+
   # Extension suites that run inside the Pi runtime. They use mock `gh`/Pi APIs
   # and `--offline`, so no model credentials are needed.
   # Excluded on purpose: test-delegate-live(.ts|-lifecycle.ts) start real Devin

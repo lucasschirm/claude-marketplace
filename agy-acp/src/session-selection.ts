@@ -12,6 +12,7 @@ import type { AcpSessionUpdate } from "./acp.ts";
 import type { AcpConfigOption, AcpConfigOptionUpdate } from "./config-options.ts";
 import type { ModelCatalog } from "./agy/models.ts";
 import { AGY_DEFAULT_CHOICE, type SessionSelection } from "./config-options.ts";
+import type { SelectionRecord } from "./selection-record.ts";
 
 export interface SelectionCommandsConfig {
 	/** The session's own selection; this class never replaces it, only changes it. */
@@ -40,6 +41,16 @@ export class SelectionCommands {
 	/** The selection that decides what the next child is launched with. */
 	relaunchKey(): string {
 		return this.selection.relaunchKey();
+	}
+
+	/**
+	 * What the session is set to launch with, in the shape the store keeps (issue #56): `default` means
+	 * "pass no flag". The launch triple rather than what agy's `init` reported, for the reason in
+	 * selection-record.ts - a record must say what to do next, not what somebody said last time.
+	 */
+	record(): SelectionRecord {
+		const f = this.selection.flags();
+		return { mode: this.selection.mode, model: f.model ?? AGY_DEFAULT_CHOICE, effort: f.effort ?? AGY_DEFAULT_CHOICE };
 	}
 
 	/** The `agy` arguments this selection produces, for the next spawn. */

@@ -6,13 +6,13 @@
 // named by AGY_ACP_LOG. The client hangs up by closing stdin; we answer EOF with a clean exit.
 
 import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { startAgyAcpServer, AGY_ACP_VERSION, PROTOCOL_VERSION } from "./server.ts";
 import { cleanupStaleBridges } from "./bridge-cleanup.ts";
 import { createShutdown } from "./shutdown.ts";
 import { lifecycleConfigFromEnv } from "./config.ts";
 import { parseLaunchArgs } from "./launch.ts";
+import { isDirectRun } from "./invocation.ts";
+import { runBridgeHook } from "./hook-run.ts";
 export { AGY_ACP_VERSION, PROTOCOL_VERSION };
 
 const USAGE = `agy-acp ${AGY_ACP_VERSION} - an ACP server for Google's agy CLI
@@ -21,6 +21,7 @@ Usage:
   agy-acp              serve ACP over stdio (this is what an ACP client spawns)
   agy-acp --version    print the version
   agy-acp --help       print this help
+  agy-acp --bridge-hook  run the PreToolUse hook on stdin (the mode the bridge's hooks.json invokes)
 
 Selection (what the agy children run with; a client may change model and effort per session):
   --model <id>               the model to start on (agy models lists the ids)
@@ -34,6 +35,8 @@ Environment:
   AGY_ACP_CANCEL_ESCALATE_MS SIGINT -> process-group SIGTERM/SIGKILL window (default 5000)
   AGY_ACP_HEARTBEAT_MS       heartbeat interval during a turn (default 15000, 0 disables)
   AGY_ACP_SHUTDOWN_TIMEOUT_MS  exit deadline after a hang-up or signal (default 10000)
+  AGY_ACP_STATE_DIR            the session store directory (default: $XDG_STATE_HOME/agy-acp);
+                               an absolute path, and a session is only loadable from its own workspace
   AGY_ACP_MODEL / AGY_ACP_EFFORT / AGY_ACP_SANDBOX / AGY_ACP_ALLOW_BYPASS / AGY_ACP_MODELS_TIMEOUT_MS
                              the same selection knobs as the flags (1 turns a switch on)
 `;
@@ -104,20 +107,14 @@ export function main(args: string[]): void {
 	exit.installSignals(); // after the server exists: the cleanup disposes its sessions
 }
 
-const thisFile = fileURLToPath(import.meta.url);
-const invoked = process.argv[1];
-const isDirectRun = (() => {
-	if (!invoked) {
-		return false;
-	}
-	try {
-		return fs.realpathSync(invoked) === thisFile;
-	} catch {
-		// a vanished argv[1] can still be compared by path
-		return path.resolve(invoked) === thisFile;
-	}
-})();
-
-if (isDirectRun) {
-	main(process.argv.slice(2));
+const argv = process.argv.slice(2);
+// `--bridge-hook` runs the PreToolUse hook (the bridge's hooks.json invokes the binary that way in
+// SEA mode): it comes before the server and never starts one. The isDirectRun guard keeps the
+// script-mode import safety (a host that imports main.ts is not hijacked into reading its stdin
+// and exiting because its argv carries the flag; in the SEA the tell is always direct-run).
+const direct = isDirectRun(import.meta.url);
+if (argv.includes("--bridge-hook") && direct) {
+	runBridgeHook();
+} else if (direct) {
+	main(argv);
 }

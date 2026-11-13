@@ -184,6 +184,23 @@ export class SessionSelection {
 	}
 
 	/**
+	 * Bring a mode back from the store (issue #56): the same offer check `setMode` runs, and no return
+	 * value a caller has to remember to act on - false means "the caller keeps `default` and says so".
+	 * Not `setMode` because the two differ in what they owe the client: a change notifies
+	 * `current_mode_update`, a restoration is the state the answer itself carries.
+	 */
+	adoptMode(modeId: string): boolean {
+		if (modeId === this.modeId) {
+			return true;
+		}
+		if (!offeredModes(this.allowBypass).some((m) => m.id === modeId)) {
+			return false;
+		}
+		this.modeId = modeId;
+		return true;
+	}
+
+	/**
 	 * A model id, or `default` for "no `--model` flag, whatever agy picks". `known` is the list agy
 	 * gave us; `null` means the listing failed, nothing can be checked here, and the id goes through
 	 * for agy to judge at startup - its refusal names every available model (the `bad-model-id`

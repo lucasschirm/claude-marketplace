@@ -7,6 +7,10 @@
 	"bin": {
 		"agy-acp": "src/main.ts"
 	},
+	"scripts": {
+		"build:sea": "node scripts/build-sea.mjs",
+		"smoke:live": "node scripts/smoke-live.ts"
+	},
 	"engines": {
 		"node": ">=23.6"
 	}

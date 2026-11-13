@@ -527,7 +527,10 @@ const INBOUND_PARSE_ALLOWLIST = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/agy/contract.ts",
 	"agy-acp/src/bridge-server.ts",
-	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
+	// The session store's decoder: `$XDG_STATE_HOME` is operator-writable, so its records are inbound
+	// input and are validated here rather than trusted because a file said so (issue #56).
+	"agy-acp/src/session-store/records.ts",
 ]);
 
 function countJsonParseOutsideExecLib() {
@@ -558,8 +561,9 @@ function countStdioWrites() {
 
 // agy-acp's stdout is the protocol channel, not a console: only the transport may frame it, and
 // main.ts may answer --version/--help before serving. console.log is never legitimate in server
-// sources - it is exactly how a stray debug line corrupts the stream. bridge-hook.ts is the one
-// other writer: it is a separate child process (spawned by agy as a PreToolUse hook), and its
+// sources - it is exactly how a stray debug line corrupts the stream. hook-run.ts is the one
+// other writer: it is a separate child process (spawned by agy as a PreToolUse hook, script or
+// binary), and its
 // stdout is the hook's decision channel - the one JSON line agy reads, by design. flush-stdout.ts is
 // the third: it writes no frame at all, only the zero-length write that means "everything buffered
 // is out", because the exit path ends in process.exit() - a file of its own so the grant covers that
@@ -567,7 +571,7 @@ function countStdioWrites() {
 const AGY_STDOUT_ALLOWED = new Set([
 	"agy-acp/src/jsonrpc.ts",
 	"agy-acp/src/main.ts",
-	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
 	"agy-acp/src/flush-stdout.ts",
 ]);
 
@@ -646,16 +650,19 @@ function countUncappedInboundBuffers() {
  * session launched with its own environment was judged against this process's (F5).
  *
  * The doors: config.ts (the typed reader every knob goes through), launch.ts and main.ts (the argv/env
- * entry points), and bridge-hook.ts and bridge-server.ts (a hook child has no caller to be handed an
- * env by - its environment IS its input). Everywhere else takes `NodeJS.ProcessEnv` as a parameter.
- * Mentions in comments do not count; the two remaining reads (a session env defaulting to this
- * process's, in spawn-agy.ts and agy/process.ts) are ratcheted so a third cannot appear quietly.
+ * entry points), and bridge-hook.ts, hook-run.ts and bridge-server.ts (a hook child has no caller to be
+ * handed an env by - its environment IS its input; hook-run.ts joined the list when the SEA packaging
+ * moved the hook's body out of bridge-hook.ts, which is now the script-mode entry that calls it).
+ * Everywhere else takes `NodeJS.ProcessEnv` as a parameter. Mentions in comments do not count; the
+ * remaining reads (a session or store env defaulting to this process's, in spawn-agy.ts, agy/process.ts
+ * and session-store/paths.ts) are ratcheted so one more cannot appear quietly.
  */
 const ENV_DOORS = new Set([
 	"agy-acp/src/config.ts",
 	"agy-acp/src/launch.ts",
 	"agy-acp/src/main.ts",
 	"agy-acp/src/bridge-hook.ts",
+	"agy-acp/src/hook-run.ts",
 	"agy-acp/src/bridge-server.ts",
 ]);
 
@@ -995,7 +1002,8 @@ const INVARIANTS = [
 	},
 	{
 		name: "agyStdoutFramesOnly",
-		description: "in agy-acp/**, only jsonrpc.ts (frames) and main.ts (--version/--help) may write stdout; console.log never",
+		description:
+			"in agy-acp/**, only the transport (jsonrpc.ts), main.ts (--version/--help), the hook's own writer (hook-run.ts) and the flush may write stdout; console.log never",
 		measure: countAgyStdoutViolations,
 	},
 	{
@@ -1010,7 +1018,7 @@ const INVARIANTS = [
 	},
 	{
 		name: "envAccessLocation",
-		description: "process.env is read only in agy-acp/src config.ts, launch.ts, main.ts, bridge-hook.ts, bridge-server.ts",
+		description: "process.env is read only in agy-acp/src config.ts, launch.ts, main.ts, bridge-hook.ts, hook-run.ts, bridge-server.ts",
 		measure: countEnvAccessOutsideDoors,
 	},
 	{
