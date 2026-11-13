@@ -18,6 +18,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import {
+	absolutePathOr,
 	firstExisting,
 	getStatePath,
 	isStorageSafeId,
@@ -69,6 +70,11 @@ export function normalizeMeta(raw: unknown): SessionMeta | null {
 		status,
 		mode: typeof m.mode === "string" ? m.mode : "dangerous",
 		createWorktree: m.createWorktree === true,
+		// Both are used as a spawn cwd and `sessionCwd` additionally as a `session/resume` param, so they get
+		// the suspicion the id gets: a record naming a relative path is dropped instead of resolved against
+		// whichever directory pi runs in, and the session falls back to the runtime's base.
+		sessionCwd: absolutePathOr(m.sessionCwd),
+		worktreePath: absolutePathOr(m.worktreePath),
 	};
 }
 

@@ -29,6 +29,15 @@ export function isStorageSafeId(id: string): boolean {
 	);
 }
 
+/**
+ * A recorded directory, or nothing when the record does not name an absolute path: the counterpart to
+ * `isStorageSafeId` for the fields that are not ids. Both go on to be a spawn cwd, and a relative value
+ * would resolve against whichever directory pi runs in. Absolute is not trusted to exist, only to be a path.
+ */
+export function absolutePathOr(value: unknown): string | undefined {
+	return typeof value === "string" && value && path.isAbsolute(value) ? value : undefined;
+}
+
 export function getStorageDir(piSessionId: string, root: string = STORAGE_ROOT): string {
 	return path.join(os.homedir(), ".pi", "agent", root, piSessionId);
 }

@@ -288,9 +288,9 @@ installDrainer(drainQueue);
  * Continue a session with another prompt, on its live connection if there is one.
  *
  * No re-spawn when the process is alive: a second `devin acp` for a live session id would fork the
- * agent's view of its own work. When the connection is gone the caller must use `delegate_restart`
- * (which starts a new session in the same worktree) — this function says so rather than doing it
- * silently, because a restarted session has a new id and the caller needs to know that.
+ * agent's view of its own work. When it is gone `reattachSession` spawns a fresh one and restores the
+ * conversation for a driver with a `resumeHandshake`; one without is prompted with the recorded id, as
+ * Devin's server takes it. A conversation the agent will not give back is reported, naming `delegate_restart`.
  */
 export async function followUp(
 	rt: DelegateRuntime,

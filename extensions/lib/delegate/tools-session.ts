@@ -45,7 +45,8 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 			label: "Delegate Message",
 			description:
 				"Sends a follow-up prompt to a delegated session and returns immediately. The session must be idle: " +
-				"a running session is still working, and a session whose process died must be restarted (delegate_restart).",
+				"a running session is still working, and one whose process died is continued where the agent can " +
+				"restore its conversation, and otherwise restarted (delegate_restart).",
 			parameters: Type.Object({
 				session_id: SESSION_ID,
 				message: Type.String({ description: "Follow-up instruction for the session" }),

@@ -24,7 +24,7 @@
     "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
-    "biome.suspicious/noExplicitAny": 162,
+    "biome.suspicious/noExplicitAny": 158,
     "biome.suspicious/noConsole": 8
   },
   "files": {
@@ -35,28 +35,29 @@
     "extensions/lib/delegate/compat.ts": 154,
     "extensions/lib/delegate/dashboard.ts": 202,
     "extensions/lib/delegate/diagnostics.ts": 69,
-    "extensions/lib/delegate/drivers/agy.ts": 307,
+    "extensions/lib/delegate/drivers/agy.ts": 313,
     "extensions/lib/delegate/drivers/claude.ts": 280,
     "extensions/lib/delegate/drivers/devin.ts": 195,
     "extensions/lib/delegate/events.ts": 245,
     "extensions/lib/delegate/framing.ts": 114,
+    "extensions/lib/delegate/handshake.ts": 175,
     "extensions/lib/delegate/liveness.ts": 51,
     "extensions/lib/delegate/permissions.ts": 251,
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
     "extensions/lib/delegate/queue.ts": 453,
-    "extensions/lib/delegate/recovery.ts": 318,
+    "extensions/lib/delegate/recovery.ts": 324,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 556,
-    "extensions/lib/delegate/session.ts": 522,
+    "extensions/lib/delegate/session.ts": 484,
     "extensions/lib/delegate/slots.ts": 81,
-    "extensions/lib/delegate/storage.ts": 122,
-    "extensions/lib/delegate/tools-session.ts": 357,
+    "extensions/lib/delegate/storage.ts": 131,
+    "extensions/lib/delegate/tools-session.ts": 358,
     "extensions/lib/delegate/tools.ts": 289,
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 447,
-    "extensions/lib/delegate/types.ts": 317,
+    "extensions/lib/delegate/types.ts": 320,
     "extensions/lib/delegate/worktree.ts": 201,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
@@ -670,8 +671,27 @@
         "agy-acp/src/session-store/store.ts: 301 lines > baseline 289 (files may only shrink)",
         "agy-acp/src/session.ts: 467 lines > baseline 443 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "the resume handshake: a driver hook, the workspace a conversation was created in, and the tool text saying it",
+      "changes": [
+        "extensions/lib/delegate/drivers/agy.ts: 313 lines > baseline 307 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 358 lines > baseline 357 (files may only shrink)",
+        "extensions/lib/delegate/types.ts: 320 lines > baseline 317 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "Review round added restored-mode correction and validation of recorded workspace paths.",
+      "changes": [
+        "extensions/lib/delegate/handshake.ts: 175 lines > baseline 169 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 324 lines > baseline 318 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 484 lines > baseline 478 (files may only shrink)",
+        "extensions/lib/delegate/storage.ts: 131 lines > baseline 122 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "509f94b",
+  "generatedFrom": "c2f31f3",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

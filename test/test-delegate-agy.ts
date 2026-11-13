@@ -9,6 +9,7 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { admit, agentDescription, describeAgents, findAgent, guardedClis, modelDescription } from "../extensions/lib/delegate/registry.ts";
 import { driverCli } from "../extensions/lib/delegate/process.ts";
 import {
@@ -30,6 +31,16 @@ import { CANONICAL_MODES } from "../extensions/lib/delegate/permissions.ts";
 // The matcher patterns live at module scope: biome's useTopLevelRegex rule counts a literal
 // recompiled per call, and every one of these runs inside a test body.
 const NO_RESUME_RE = /no-resume/;
+const RESUME_RE = /resume/;
+// `agy-acp` is a separate package, so its wire facts are mirrored here rather than imported by the driver.
+// These reads are what make the mirror safe: an adapter that stopped advertising resume, or that changed
+// what `session/resume` needs, fails a test instead of breaking a follow-up at the moment it is sent.
+const LOAD_SESSION_RE = /loadSession:\s*true/;
+// One level of nested braces tolerated: the advertised shape is `{ list: {}, resume: {} }`, and a `[^}]*`
+// walk stops at the first inner `}` — which reads as "the adapter stopped advertising resume".
+const RESUME_CAPABILITY_RE = /sessionCapabilities:\s*\{(?:[^{}]|\{[^{}]*\})*\bresume\b/;
+const RESTORE_READS_PARAMS_RE = /const sessionId = typeof p\.sessionId[\s\S]{0,200}const cwd = typeof p\.cwd/;
+const REGISTER_RESUME_RE = /registerMethod\("session\/resume"/;
 const BLOCKS_ACP_AGY_CLI_RE = /blocks-agy-acp\+agy-cli/;
 const AGY_ACP_ALLOW_BYPASS_RE = /AGY_ACP_ALLOW_BYPASS/;
 const ACCEPT_EDITS_RE = /accept-edits/;
@@ -54,6 +65,11 @@ const AGY_OPTIONS = [
 	{ optionId: "allow_always", kind: "allow_always", name: "Always allow" },
 	{ optionId: "reject_once", kind: "reject_once", name: "Reject" },
 ];
+
+/** The adapter's own source, for the reads that keep the mirrored wire facts honest. */
+function readAdapter(rel: string): string {
+	return fs.readFileSync(path.join(fileURLToPath(new URL("../agy-acp/", import.meta.url)), rel), "utf8");
+}
 
 /** A PATH holding stub binaries, so the install check can be run against a machine that does not have agy. */
 function fakeBin(files: Record<string, string>): string {
@@ -100,7 +116,8 @@ test("agy is a registered agent, and the tool text says so", () => {
 	const line = describeAgents().find((l) => l.startsWith("agy"));
 	assert.ok(line, `/delegate agents lists it: ${describeAgents().join(" | ")}`);
 	// The capability line is what a human reads before choosing, so the two limits that matter most are here.
-	assert.match(line, NO_RESUME_RE);
+	assert.match(line, RESUME_RE);
+	assert.doesNotMatch(line, NO_RESUME_RE, "the adapter keeps its own session store: a dead process is not the end of the conversation");
 	assert.match(line, BLOCKS_ACP_AGY_CLI_RE);
 });
 
@@ -359,6 +376,18 @@ test("every mode this driver resolves to is a mode agy-acp advertises", async ()
 	assert.ok(AGY_ACP_MODE_IDS.includes(agyDriver.defaultMode()), "the default mode must be a real one");
 });
 
+test("the resume handshake is the call the adapter answers, with the params it reads", () => {
+	const handshake = agyDriver.resumeHandshake?.("conv-1", "/work/checkout");
+	assert.ok(handshake, "a driver that claims resume has to offer the call that makes it true");
+	assert.strictEqual(handshake.method, "session/resume");
+	// `session/load` is the other half of the adapter's pair, and it is the wrong one here: it replays the
+	// stored transcript as `session/update` frames, and our event log is the file `delegate_status` reads,
+	// so every follow-up would append a second copy of the conversation it already had.
+	assert.deepStrictEqual(Object.keys(handshake.params).sort(), ["cwd", "sessionId"]);
+	assert.strictEqual(handshake.params.sessionId, "conv-1");
+	assert.strictEqual(handshake.params.cwd, "/work/checkout", "the store refuses to move a conversation between workspaces");
+});
+
 test("the guarded CLI list covers the CLI and the adapter, and not the host's own CLI", () => {
 	const guarded = guardedClis();
 	assert.ok(guarded.includes("agy"), "agy itself cannot be run around the queue");
@@ -382,10 +411,21 @@ test("the pid-recycle guard is given the binary the spawned process actually is"
 
 test("the capability claims that a wire feature would have to earn", () => {
 	const caps = agyDriver.capabilities();
-	// `agy-acp` answers session/load only from sub-issue #56 (on `dev`), and this engine's reattach is
-	// "prompt the recorded id", which its registry refuses. Claiming resume would let a follow-up promise
-	// a continuation nothing restores.
-	assert.strictEqual(caps.resume, false);
+	// `resume: true` is a claim about the wire and the engine both: the adapter must advertise the lifecycle
+	// method, must still want the two params the handshake sends, and the engine must make that call before
+	// it prompts an id the new process never minted (proved by test-delegate-resume.ts on a real child).
+	assert.strictEqual(caps.resume, true);
+	const server = readAdapter("src/server.ts");
+	assert.match(server, LOAD_SESSION_RE, "the adapter stopped advertising session persistence");
+	assert.match(server, RESUME_CAPABILITY_RE, "the adapter stopped advertising session/resume");
+	// The connection's half registers the method; the restore's half reads the params. Both are read here
+	// because the driver's claim spans the two: a method nobody registers is a `-32601` on every follow-up.
+	assert.match(server, REGISTER_RESUME_RE, "nothing registers session/resume any more");
+	assert.match(
+		readAdapter("src/session-restore.ts"),
+		RESTORE_READS_PARAMS_RE,
+		"the restore stopped reading the sessionId/cwd pair the handshake sends",
+	);
 	assert.strictEqual(caps.plans, false, "agy-acp emits no plan update");
 	assert.strictEqual(caps.cancel, true);
 	assert.strictEqual(caps.permissions, true);

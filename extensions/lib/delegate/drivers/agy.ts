@@ -230,11 +230,10 @@ export const agyDriver: AgentDriver = {
 		return {
 			thinking: true,
 			thinkingLevels: () => AGY_EFFORT_LEVELS,
-			// `agy-acp` answers `session/load` and `session/resume` only from sub-issue #56, which is on
-			// `dev`, and this engine's reattach is "spawn, then prompt the recorded id" — which its registry
-			// refuses (an id it did not create in this process). Declaring `true` would let `delegate_message`
-			// promise the continuation of a conversation nothing restores.
-			resume: false,
+			// `agy-acp` keeps its own session store (#56) and adopts a recorded conversation lazily: no `agy`
+			// starts until the next prompt, which pays the resume with `--conversation`. `session/load` would
+			// replay the stored transcript into the log `delegate_status` reads, so the handshake below resumes.
+			resume: true,
 			cancel: true,
 			permissions: true,
 			// The adapter emits message chunks, tool calls and usage; no `plan` update exists in
@@ -262,6 +261,13 @@ export const agyDriver: AgentDriver = {
 	// No `applySelection`, deliberately, and not because there is no in-band channel: `session/set_model`
 	// and `session/set_config_option(model|effort)` both exist. The launch flag refuses a bad id earlier
 	// and records the choice where a queue entry can show it.
+
+	// The other half of `resume`. A fresh `agy-acp` process knows nothing about the id this engine recorded,
+	// and minting a new one would silently drop the context the caller was writing into — so the handshake
+	// names the id and the workspace its record holds, which the store refuses to move a conversation from.
+	resumeHandshake(sessionId, cwd) {
+		return { method: "session/resume", params: { sessionId, cwd } };
+	},
 
 	resolveMode(mode) {
 		const res = agyModeResolver(mode);

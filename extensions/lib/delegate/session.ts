@@ -13,7 +13,8 @@
 
 import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
-import { getEventsLogPath, isStorageSafeId } from "./storage.ts";
+import { getEventsLogPath } from "./storage.ts";
+import { createSession, restoreSession, seedOptions, type RestoredSession } from "./handshake.ts";
 import { eventLogPath } from "./persist.ts";
 import { defaultMapUpdate, eventToLogEntries, stopReasonPhrase, normalizeStopReason } from "./events.ts";
 import { detectPullRequest } from "./pr-detect.ts";
@@ -22,7 +23,7 @@ import type { DelegateTransport } from "./transport.ts";
 import { parsePermissionRequest, quoteCommand, type PermissionRequest } from "./permissions.ts";
 import type { AgentDriver, Selection, SelectionContext, SessionMeta, DelegateEvent } from "./types.ts";
 
-/** How long a `session/new` / selection call may take before the start is considered failed. */
+/** How long a session handshake or a selection call may take before the start is considered failed. */
 const SETUP_TIMEOUT_MS = 60_000;
 
 export interface TurnHandle {
@@ -311,9 +312,9 @@ export interface StartResult {
  * selection and starts the first turn — keeping those steps apart is what lets a queued task be
  * reported as queued before it starts, and a restart reuse a worktree it already has.
  *
- * There is deliberately no "attach to an existing agent session id" path: `delegate_restart` re-runs the
- * prompt in the same worktree under a new id, because that is the behavior the tool has always had and
- * a second `acp` process pointed at a live session id forks the agent's view of its own work.
+ * Nothing here attaches to a session that is still **live**: a second `acp` process pointed at a running
+ * session id forks the agent's view of its own work, so `delegate_restart` re-runs the prompt under a new
+ * id. Continuing a conversation whose process *died* is the other case, and that one is `reattachSession`.
  */
 export async function spawnSession(
 	rt: DelegateRuntime,
@@ -348,6 +349,7 @@ export async function spawnSession(
 			thinking: selection.thinking,
 			mode: selection.mode,
 			status: "running",
+			sessionCwd: opts.cwd,
 			createdAt: Date.now(),
 			startedAt: Date.now(),
 			lastMessageTime: Date.now(),
@@ -356,14 +358,7 @@ export async function spawnSession(
 		};
 		const registered = meta;
 		attach(rt, client, registered);
-		// Seed what `session/new` advertised into the per-session catalogue `configureSession` reads. Order
-		// matters: `attach` installs the map, this fills it, and the driver's selection runs after both.
-		const catalogue = rt.configOptions.get(sessionId);
-		if (catalogue) {
-			for (const [id, values] of Object.entries(advertised)) {
-				catalogue.set(id, values);
-			}
-		}
+		seedOptions(rt, sessionId, advertised);
 		client.logEvent("session_started", { sessionId, configOptions: advertised });
 		rt.sessions.set(sessionId, registered);
 		rt.activeClients.set(sessionId, client);
@@ -376,64 +371,6 @@ export async function spawnSession(
 		client.dispose();
 		throw err;
 	}
-}
-
-interface NewSession {
-	sessionId: string;
-	/**
-	 * What the session advertises about itself at creation: every select-style config option with its
-	 * value list, under its option id (`mode`, `model`, `effort`, …), plus `modes`/`models` when the agent
-	 * still speaks the pre-config-option shape.
-	 *
-	 * This is the only place the vocabulary is available. The installed adapter answers `session/new` with
-	 * it and sends a `config_option_update` *only when something changes*, so a reader that waited for the
-	 * notification had a permanently empty picture of a session it was about to configure — every
-	 * "this model offers no such effort" pre-check was dead code, and every refusal message that wanted
-	 * to list the valid values had none to list.
-	 */
-	options: Record<string, string[]>;
-}
-
-/** The value list of one select-style config option, in whatever shape this agent sent it. */
-function optionValues(option: any): string[] {
-	const raw = option?.options ?? option?.values ?? [];
-	const list = Array.isArray(raw) ? raw : [];
-	return list
-		.map((o: any) => (typeof o === "string" ? o : (o?.value ?? o?.id)))
-		.filter((v: unknown): v is string => typeof v === "string" && v.length > 0);
-}
-
-async function createSession(client: DelegateTransport, label: string, cwd: string): Promise<NewSession> {
-	const res: any = await client.request("session/new", { cwd, mcpServers: [] }, SETUP_TIMEOUT_MS);
-	const sessionId = res?.sessionId;
-	if (typeof sessionId !== "string" || !sessionId) {
-		throw new Error(`${label} answered session/new without a sessionId`);
-	}
-	// The id is the agent's, the directory is ours. It is used to build paths we write to and to name records
-	// that later code deletes, so an id like `../../elsewhere` is not a curiosity — it is the extension
-	// writing outside the tree it owns. Refusing here costs one session; accepting it costs the boundary.
-	if (!isStorageSafeId(sessionId)) {
-		throw new Error(
-			`${label} returned the session id ${JSON.stringify(sessionId)}, which cannot be a storage path segment; refusing to register it`,
-		);
-	}
-	const options: Record<string, string[]> = {};
-	for (const opt of Array.isArray(res?.configOptions) ? res.configOptions : []) {
-		const id = typeof opt?.id === "string" ? opt.id : "";
-		if (id) {
-			options[id] = optionValues(opt);
-		}
-	}
-	// The older shape, for an agent that has not moved to config options yet.
-	const modes = Array.isArray(res?.modes?.availableModes) ? res.modes.availableModes : [];
-	if (modes.length && !options.mode) {
-		options.mode = modes.map((m: any) => m?.id).filter((v: unknown): v is string => typeof v === "string");
-	}
-	const models = Array.isArray(res?.models?.availableModels) ? res.models.availableModels : [];
-	if (models.length && !options.model) {
-		options.model = models.map((m: any) => m?.id).filter((v: unknown): v is string => typeof v === "string");
-	}
-	return { sessionId, options };
 }
 
 function logPathFor(rt: DelegateRuntime, sessionId: string): string {
@@ -454,12 +391,22 @@ function logPathFor(rt: DelegateRuntime, sessionId: string): string {
  * The slot is the caller's business (see `followUp`): this spawns, it does not reserve.
  */
 export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
-	const cwd = meta.worktreePath ?? rt.baseDir;
+	// The workspace the conversation was created in, not the one this pi process happens to be sitting in:
+	// an agent with its own store refuses to move a session, and after a restart in another folder the two
+	// are not the same answer. Older records have no `sessionCwd` and get the old expression.
+	const cwd = meta.sessionCwd ?? meta.worktreePath ?? rt.baseDir;
 	const selection: Selection = { model: meta.model, thinking: meta.thinking, mode: meta.mode };
 	const client = rt.makeTransport(cwd, driver.launchPlan(selection, cwd));
+	let restored: RestoredSession | undefined;
 	try {
 		await client.start();
 		client.setLogFilePath(eventLogPath(rt, meta));
+		// A recorded id means nothing to a process that did not mint it, unless the agent keeps the
+		// conversation itself: the driver's handshake is the call that brings it back (handshake.ts).
+		// Devin declares none and must not be asked — its registry answers the recorded id on the prompt.
+		if (driver.resumeHandshake) {
+			restored = await restoreSession(client, driver, meta.sessionId, cwd);
+		}
 	} catch (err) {
 		client.dispose();
 		throw err;
@@ -467,6 +414,21 @@ export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, 
 	// The wiring a live session has: updates, permission requests, the exit path that reports an interrupted
 	// turn. `attach` owns the session's config-option catalogue from here.
 	attach(rt, client, meta);
+	if (restored) {
+		seedOptions(rt, meta.sessionId, restored.options);
+		// A mode the adapter corrected on the way in is the lie `mode.changed` exists to prevent:
+		// `delegate_status` reads `meta.mode`, and a conversation restored into `default` must not keep being
+		// reported as the `accept-edits` one that was asked for. Nothing else says so; a wire id resolves again.
+		if (restored.currentModeId && restored.currentModeId !== meta.mode) {
+			meta.mode = restored.currentModeId;
+		}
+		client.logEvent("session_resumed", { sessionId: meta.sessionId, cwd, ...restored });
+		// What the agent corrected on the way in belongs in the operator's log as well as the session's:
+		// a stored mode this process cannot honour is a session that is not in the mode its record claims.
+		for (const note of restored.notes) {
+			rt.logWarn(`session ${meta.sessionId} resumed: ${note}`);
+		}
+	}
 	rt.activeClients.set(meta.sessionId, client);
 	meta.pid = client.pid;
 	rt.persistSessionMeta(meta, true);

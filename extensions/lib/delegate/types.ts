@@ -52,12 +52,9 @@ export interface LaunchPlan {
 export interface DriverCapabilities {
 	/** false ⇒ `delegate_task` refuses `thinking` for this agent rather than ignoring it. */
 	thinking: boolean;
-	/**
-	 * A recorded session id can be prompted again after its process is gone, **and this engine implements the
-	 * way back in** (`reattachSession`: spawn, then prompt the recorded id). An agent that merely advertises
-	 * `loadSession` is not enough — the adapter call would have to be made, so such a driver declares false
-	 * until there is a loader behind it. `followUp` refuses to continue a session whose driver says false.
-	 */
+	/** A recorded id can be prompted again after its process is gone, **and this engine implements the way
+	 *  back in**: `reattachSession` spawns, makes the driver's `resumeHandshake` where one exists, then
+	 *  prompts the recorded id. `followUp` refuses a session whose driver says false. */
 	resume: boolean;
 
 	/**
@@ -190,6 +187,9 @@ export interface AgentDriver {
 	 * `session/set_config_option(model)` answers `-32602` for ids outside its vocabulary.
 	 */
 	applySelection?(ctx: SelectionContext, sel: Selection): Promise<string[]>;
+	/** The call that brings a recorded conversation into a *fresh* agent process before its first prompt
+	 *  (handshake.ts reads the answer). Absent: the agent takes the recorded id with no handshake, as Devin's does. */
+	resumeHandshake?(sessionId: string, cwd: string): { method: string; params: Record<string, unknown> };
 	/** The wire mode id, or an error naming the ids this agent accepts. */
 	resolveMode(mode: string): { ok: true; modeId: string } | { ok: false; error: string };
 	/** Model catalogue for validation and tool text. `values` may be empty (unknown), which warns never. */
@@ -265,6 +265,9 @@ export interface SessionMeta {
 	thinking?: ThinkingLevel;
 	mode: string;
 	createWorktree: boolean;
+	/** The workspace the conversation was created in. `worktreePath ?? baseDir` computes it today, and a
+	 *  resume has to ask in the folder the agent's own record names: a store never moves a session. */
+	sessionCwd?: string;
 	worktreePath?: string;
 	worktreeBranch?: string;
 	worktreeId?: string;
