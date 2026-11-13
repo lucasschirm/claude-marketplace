@@ -20,8 +20,8 @@
     "biome.performance/noNamespaceImport": 212,
     "biome.style/useBlockStatements": 953,
     "biome.performance/useTopLevelRegex": 617,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noShadow": 78,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
     "biome.suspicious/noExplicitAny": 158,
@@ -50,7 +50,7 @@
     "extensions/lib/delegate/recovery.ts": 324,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 558,
-    "extensions/lib/delegate/session.ts": 513,
+    "extensions/lib/delegate/session.ts": 523,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
     "extensions/lib/delegate/tools-session.ts": 358,
@@ -708,8 +708,15 @@
         "extensions/lib/delegate/queue.ts: 474 lines > baseline 453 (files may only shrink)",
         "extensions/lib/delegate/session.ts: 513 lines > baseline 511 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "Round four refused a reattach that arrives after its session was restarted or closed.",
+      "changes": [
+        "extensions/lib/delegate/session.ts: 523 lines > baseline 513 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "dacf7a4",
+  "generatedFrom": "a02c624",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

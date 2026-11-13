@@ -371,7 +371,7 @@ export async function followUp(
 				ok: false,
 				code: "BUSY",
 				error:
-					`another follow-up re-attached this session and started a turn while yours was waiting for the connection. ` +
+					`another follow-up started a turn on this session while yours was waiting for the connection. ` +
 					`Wait for it, or delegate_cancel to stop it, and send the message again.`,
 			};
 		}

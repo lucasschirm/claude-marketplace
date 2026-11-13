@@ -412,6 +412,14 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 		client.dispose();
 		throw err;
 	}
+	// A spawn and a handshake take a moment, and the session may not have waited: `delegate_restart` replaces
+	// this record, and a `/new` or a shutdown empties the map it lives in. Registering anyway hands a live
+	// agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — while the child keeps
+	// the agent's conversation until the next cleanup. Refusing it is the only honest answer left.
+	if (rt.sessions.get(meta.sessionId) !== meta) {
+		client.dispose();
+		throw new Error("the session was restarted, or this pi closed it, while its agent was starting; nothing was prompted");
+	}
 	// The wiring a live session has: updates, permission requests, the exit path that reports an interrupted
 	// turn. `attach` owns the session's config-option catalogue from here.
 	attach(rt, client, meta);
@@ -434,7 +442,9 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 		// A record older than this field learns the workspace from the store that just vouched for it, so the
 		// next restart does not fall back to an expression and get a mismatch it could have avoided.
 		meta.sessionCwd ??= restored.cwd;
-		client.logEvent("session_resumed", { sessionId: meta.sessionId, cwd, ...restored });
+		// `cwd` last: the workspace the store vouched for is the better fact, but a restore that named none
+		// must not leave the event without one, and a spread of an absent field is exactly that.
+		client.logEvent("session_resumed", { sessionId: meta.sessionId, ...restored, cwd: restored.cwd ?? cwd });
 		// What the agent corrected on the way in belongs in the operator's log as well as the session's:
 		// a stored mode this process cannot honour is a session that is not in the mode its record claims.
 		for (const note of restored.notes) {

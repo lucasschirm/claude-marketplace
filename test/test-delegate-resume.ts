@@ -48,6 +48,7 @@ const BELONGS_TO_RE = /belongs to \/work\/other/;
 const DIFFERENT_ID_RE = /different session id/;
 const NOT_IN_STORE_RE = /not a conversation this store has/;
 const NO_SESSION_ID_RE = /without a session id/;
+const STARTED_ORPHANED_RE = /while its agent was starting/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
 function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number } } = {}) {
@@ -174,7 +175,16 @@ test("Devin is prompted with no handshake, because asking it would be a method n
 test("the vocabulary the restore answers with is the one the session configures against", async () => {
 	const { rt, restoreHome } = makeStub();
 	const stub = stubTransport({
-		resume: { result: { sessionId: "conv-1", configOptions: [{ id: "model", options: ["gemini-3", "gemini-3-flash"] }] } },
+		resume: {
+			result: {
+				sessionId: "conv-1",
+				configOptions: [{ id: "model", options: ["gemini-3", "gemini-3-flash"] }],
+				// `agy-acp`'s configOptions carry `model` and `effort` only: the `mode` vocabulary reaches us
+				// solely through `modes.availableModes`, so a reader that dropped that fallback would leave every
+				// refused `session/set_mode` saying "valid:" with nothing after it.
+				modes: { currentModeId: "default", availableModes: [{ id: "default" }, { id: "accept-edits" }] },
+			},
+		},
 	});
 	rt.makeTransport = () => stub.transport;
 	try {
@@ -182,6 +192,7 @@ test("the vocabulary the restore answers with is the one the session configures 
 		// `attach` installs an empty map and the handshake fills it: a session that came back with fewer
 		// options than it advertised is a session whose stored selection was quietly not honoured.
 		assert.deepStrictEqual(rt.configOptions.get("conv-1")?.get("model"), ["gemini-3", "gemini-3-flash"]);
+		assert.deepStrictEqual(rt.configOptions.get("conv-1")?.get("mode"), ["default", "accept-edits"]);
 	} finally {
 		restoreHome();
 	}
@@ -259,6 +270,28 @@ test("what the agent corrected on the way in is recorded and said out loud", asy
 			notifications.some((n) => n[0].includes("resumed")),
 			"a session that is not in the mode its record claims is an operator's problem, not a footnote",
 		);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a reattach that lands after its session was restarted registers nothing", async () => {
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ resume: { delayMs: 80 } });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		const waiting = followUp(rt, meta, "next");
+		// Mid-spawn, mid-handshake: `delegate_restart` replaces the record, and a `/new` or a shutdown empties
+		// the map. Either way the connection being made belongs to a session nothing tracks — and the child
+		// would still hold the agent's conversation, invisibly to `delegate_status` and `delegate_cancel`.
+		await new Promise((done) => setTimeout(done, 20));
+		rt.sessions.delete("conv-1");
+		const res = failure(await waiting);
+		assert.match(res.error, STARTED_ORPHANED_RE);
+		assert.strictEqual(rt.activeClients.get("conv-1"), undefined, "an orphan connection is not installed");
+		assert.strictEqual(stub.disposed(), 1, "and the agent that was spawned for nothing is disposed");
+		assert.strictEqual(meta.status, "completed", "the record nobody owns is left as it was found");
 	} finally {
 		restoreHome();
 	}

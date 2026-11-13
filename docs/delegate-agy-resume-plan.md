@@ -71,6 +71,11 @@ no `sessionCwd` and fall back to the old expression — and once a resume succee
 named in `_meta.restored.cwd` is written into the record, so the next restart asks in the folder the store
 vouched for instead of falling back again.
 
+The recorded folder wins over the current one even for an agent with no store to disagree, and that is a
+choice with a cost: a follow-up whose creation folder has since been deleted fails with an `ENOENT` naming
+the path, where re-parenting it onto whatever pi is running in now would have kept going. A conversation
+continued in a workspace nothing else about it belongs to is the worse of the two.
+
 Both recorded directories are re-checked on the way back in, by `absolutePathOr` beside `isStorageSafeId`:
 a state file is read after a crash with whatever it names, and these two values become a spawn cwd. A
 relative path is dropped, so a planted record sends a session to the runtime's base rather than somewhere
@@ -81,8 +86,9 @@ resolved against pi's own directory.
 `followUp` answers `REATTACH_FAILED` and releases the slot it reserved, and the store's refusals arrive in
 its own words rather than translated. Of `OpenFailure`'s five kinds, three are the ones a caller can act
 on: no such conversation, a conversation belonging to another workspace — where the recorded path *is* the
-fix — and a conversation another process still holds. The other two, this adapter already having it open
-and a record it could not read, are still quoted rather than turned into one code.
+fix — and a conversation another process still holds. The other two are still quoted rather than turned into
+one code: this adapter already having the conversation open, and the store itself being unusable (its root
+or its lock — a record that will not decode is `unknown`, the first kind, not this one).
 
 One spawn serves a window. `activeClients` is filled at the **end** of a reattach and a session is not
 `running` until its turn starts, so two follow-ups arriving together would each spawn an agent and each ask
@@ -116,6 +122,7 @@ await and answers `BUSY`, telling the caller to send it again.
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
+| a reattach that lands after its session was restarted or closed installs nothing and disposes its child | same |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
