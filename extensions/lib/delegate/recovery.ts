@@ -18,6 +18,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import {
+	absolutePathOr,
 	firstExisting,
 	getStatePath,
 	isStorageSafeId,
@@ -28,6 +29,7 @@ import {
 } from "./storage.ts";
 import type { PersistedState, QueuedTask, SessionMeta, SessionStatus } from "./types.ts";
 import { drainQueue } from "./queue.ts";
+import { clearSuperseded } from "./session.ts";
 
 /** Pre-rename records are Devin records; anything else would be inventing history. */
 const LEGACY_AGENT = "devin";
@@ -69,11 +71,61 @@ export function normalizeMeta(raw: unknown): SessionMeta | null {
 		status,
 		mode: typeof m.mode === "string" ? m.mode : "dangerous",
 		createWorktree: m.createWorktree === true,
+		// Both are used as a spawn cwd and `sessionCwd` additionally as a `session/resume` param, so they get
+		// the suspicion the id gets: a record naming a relative path is dropped instead of resolved against
+		// whichever directory pi runs in, and the session falls back to the runtime's base.
+		sessionCwd: absolutePathOr(m.sessionCwd),
+		supersededBy: supersededPointerOf(m.supersededBy),
+		worktreePath: absolutePathOr(m.worktreePath),
+		// A pid is a claim that ends in `kill(-pid)`, so it is checked before anything reads it: `0` would
+		// signal pi's own process group and `1` would broadcast to the user's, and neither is stopped by the
+		// recycle guard (there is no `/proc/0/cmdline` to compare against). See `isKillablePid`.
+		pid: pidOr(m.pid),
 	};
 }
 
+/** A recorded pid, or nothing. `process.pid` is excluded: a record must never describe the reader. */
+function pidOr(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 1 && value !== process.pid ? value : undefined;
+}
+
+/** A recorded counter, or 0. A JSON value is not a number: `"3"`, `true`, `1.5` and `1e999` are all storable. */
+function countOr(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_QUEUE_ID ? value : 0;
+}
+
+/**
+ * A slot ceiling as read from disk: an integer within range, or nothing. `maxRunsTotal` is the one value
+ * where a permissive read is worse than ignoring the file — `"3"`, `true` and `1.5` are all storable JSON and
+ * all compare greater than zero, and `1e999` is `Infinity`, which makes the total ceiling stop binding
+ * entirely so only the per-agent limit is left holding the line.
+ */
+function isPositiveLimit(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_QUEUE_ID;
+}
+
+/** The restart pointer as read back: an object naming a session, a queue entry, both, or neither. */
+function supersededPointerOf(value: unknown): SessionMeta["supersededBy"] {
+	if (!value || typeof value !== "object") {
+		return undefined;
+	}
+	const raw = value as Record<string, unknown>;
+	const sessionId = typeof raw.sessionId === "string" && raw.sessionId ? raw.sessionId : undefined;
+	const queueId = typeof raw.queueId === "string" && raw.queueId ? raw.queueId : undefined;
+	// Only the keys that are set. A round-tripped pointer has to compare equal to the one that was written,
+	// and `{ sessionId: undefined, queueId: "q-7" }` does not strictly equal `{ queueId: "q-7" }`.
+	const pointer: { sessionId?: string; queueId?: string } = {};
+	if (sessionId) {
+		pointer.sessionId = sessionId;
+	}
+	if (queueId) {
+		pointer.queueId = queueId;
+	}
+	return pointer.sessionId || pointer.queueId ? pointer : undefined;
+}
+
 /** A queued task as it was written to `state.json`. Needs the runtime only to mint a missing id. */
-export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): QueuedTask | null {
+export function normalizeTask(raw: unknown): QueuedTask | null {
 	if (!raw || typeof raw !== "object") {
 		return null;
 	}
@@ -97,9 +149,21 @@ export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): Queu
 		mode: typeof t.mode === "string" ? t.mode : "dangerous",
 		createWorktree: t.createWorktree === true,
 		enqueuedAt: typeof t.enqueuedAt === "number" ? t.enqueuedAt : Date.now(),
-		// Minted by the caller (`queue.ts`), and preserved: a caller that was told `q-7` must still be
-		// able to cancel `q-7` after a restart. A record with no id at all gets the next one.
-		queueId: typeof t.queueId === "string" && t.queueId ? t.queueId : `q-${(rt?.totalInvoked ?? 0) + 1}`,
+		// Preserved verbatim: a caller told `q-7` must still cancel `q-7` after a restart. Empty means no id
+		// was recorded, and recovery mints one. This function must not hand one out: reading `totalInvoked`
+		// without incrementing it gave two id-less records the same id, and gave recovery's uniqueness pass a
+		// candidate it had already accepted — the collision it exists to remove, arriving by a different door.
+		queueId: typeof t.queueId === "string" && t.queueId ? t.queueId : "",
+		// The worktree fields are the two most dangerous strings a queue record can hold: `worktreePath` becomes
+		// the agent's spawn cwd, and a folder is deleted by whatever selector it is handed. A relative path would
+		// be resolved against whichever folder pi happens to run in, so it is dropped rather than guessed at — the
+		// same rule `normalizeMeta` applies to the same fields. The ids are carried for provenance and for orca's
+		// own bookkeeping: no deletion path selects by a stored id any more (`releaseWorktreeNow`, and the two
+		// cleanup sites in this file's own queue, all select `path:` of the folder they looked at).
+		worktreePath: absolutePathOr(t.worktreePath),
+		worktreeBranch: typeof t.worktreeBranch === "string" ? t.worktreeBranch : undefined,
+		worktreeId: typeof t.worktreeId === "string" && t.worktreeId ? t.worktreeId : undefined,
+		parentWorktreeId: typeof t.parentWorktreeId === "string" && t.parentWorktreeId ? t.parentWorktreeId : undefined,
 	};
 }
 
@@ -117,6 +181,9 @@ export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): Queu
  * so a session may still be resolving when the pass reports. It counts what recovery *found*, which is
  * what a boot notice and a test both want; it is not a settlement count.
  */
+/** A lookup id, as `queue.ts` mints it. */
+const QUEUE_ID_RE = /^q-(\d+)$/;
+
 export interface RecoveryReport {
 	recovered: number;
 	orphanProcessesKilled: number;
@@ -152,7 +219,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 		if (!Number.isNaN(parsed) && parsed > 0) {
 			rt.maxRuns = parsed;
 		}
-	} else if (state.maxRuns && state.maxRuns > 0) {
+	} else if (isPositiveLimit(state.maxRuns)) {
 		rt.maxRuns = state.maxRuns;
 	}
 	// The total is never below the per-agent limit, here or at startup. Reading a persisted 3 back over a
@@ -163,14 +230,25 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 		if (!Number.isNaN(parsed) && parsed > 0) {
 			rt.maxRunsTotal = Math.max(parsed, rt.maxRuns);
 		}
-	} else if (state.maxRunsTotal && state.maxRunsTotal > 0) {
+	} else if (isPositiveLimit(state.maxRunsTotal)) {
 		rt.maxRunsTotal = Math.max(state.maxRunsTotal, rt.maxRuns);
 	}
 
-	rt.totalInvoked = state.totalInvoked || 0;
-	rt.totalCompleted = state.totalCompleted || 0;
-	for (const [id, dir] of Object.entries(state.sessionDirs ?? {})) {
-		rt.sessionDirs.set(id, dir);
+	// A JSON value like every other one here: a non-number would make every mint for this boot `q-NaN`, and
+	// a value past the reachable range would stall the generator, so neither counts as a counter at all.
+	rt.totalInvoked =
+		Number.isSafeInteger(state.totalInvoked) && state.totalInvoked > 0 && state.totalInvoked <= MAX_QUEUE_ID ? state.totalInvoked : 0;
+	rt.totalCompleted = countOr(state.totalCompleted);
+	for (const [id, recorded] of Object.entries(state.sessionDirs ?? {})) {
+		// Both halves become path segments: the id names a session directory, the value is the *pi session id*
+		// the record was written under and heads every later candidate list. A non-string throws inside
+		// `path.join` partway through the session loop below — after the queue is restored, with the remaining
+		// sessions never read and `persistState`/`drainQueue` skipped — and a `..`-bearing one reads or appends
+		// outside the tree this extension owns. `normalizeMeta` guards its own fields; nothing guarded the
+		// container's, and a hand-edited or half-written `state.json` reaches this line first.
+		if (isStorageSafeId(id) && isStorageSafeId(recorded)) {
+			rt.sessionDirs.set(id, recorded);
+		}
 	}
 
 	// The queue is restored before any session is read, and the counters before that. The budget for this
@@ -180,11 +258,28 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	// already in memory by the time anything can be interrupted.
 	if (Array.isArray(state.queue)) {
 		rt.queue.length = 0;
+		// Unique by the time anything reads them: a `{queueId}` pointer is matched by id, so two entries sharing
+		// one make a dead restart look like it is still waiting, and `delegate_cancel` would free only the first
+		// twin. This is the only pass that sees the whole queue, so it is the only place that hands ids out.
+		// `totalInvoked` is the id generator, so it has to start above every id already on disk: a restored
+		// `q-50` and a future `q-${++totalInvoked}` are the same lookup key, and that key is what a restart
+		// pointer is matched by and what `delegate_cancel` takes.
+		rt.totalInvoked = Math.max(rt.totalInvoked, highestQueueId(state.queue));
+		const restoredIds = new Set<string>();
 		for (const t of state.queue) {
-			const task = normalizeTask(t, rt);
-			if (task) {
-				rt.queue.push(task);
+			const task = normalizeTask(t);
+			if (!task) {
+				continue;
 			}
+			// Unique by one mint, never a retry: the counter has been cleared above every id on disk and only
+			// climbs, so the first candidate is already free. A `while` here would have no escape — a
+			// synchronous spin inside recovery cannot even be timed out by a test, because the timer needs the
+			// event loop the loop is holding, and every tool path awaits this pass.
+			if (!task.queueId || restoredIds.has(task.queueId)) {
+				task.queueId = `q-${++rt.totalInvoked}`;
+			}
+			restoredIds.add(task.queueId);
+			rt.queue.push(task);
 		}
 	}
 	// An aborted pass has read enough to know what was there and not enough to say what is. Writing the
@@ -199,14 +294,40 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			if (signal?.aborted) {
 				return report;
 			}
-			const meta = await readMeta(rt, piSessionId, sessionId, state.sessionDirs?.[sessionId]);
+			// An id from the list is a directory name before it is anything else, so it is checked the way every
+			// other stored id is: `normalizeMeta` cannot vouch for a value that never reaches it.
+			if (typeof sessionId !== "string" || !isStorageSafeId(sessionId)) {
+				continue;
+			}
+			// The validated map, never the container: reading `state.sessionDirs` again here would hand the raw
+			// value straight to `path.join` inside `sessionFileCandidates`, which is the exact failure the pass
+			// above exists to prevent — a non-string throws mid-loop (queue restored, later sessions unread,
+			// pointer reconciliation, `persistState` and the drain all skipped, and because recovery is floated
+			// the rejection is swallowed and every later tool runs on the partial state), and a `..`-bearing
+			// string probes for a plantable `meta.json` outside the storage tree.
+			const meta = await readMeta(rt, piSessionId, sessionId, rt.sessionDirs.get(sessionId));
 			if (!meta) {
 				continue;
 			}
 			if (meta.status === "running" || meta.status === "stalled") {
 				reconcileInFlight(rt, meta, report);
 			}
-			rt.sessions.set(sessionId, meta);
+			// Keyed by what the record says, not by the list: the map key is what `persistState` writes back as a
+			// session id and what every lookup answers to, so a list entry and a record that disagree would leave
+			// a session whose key, `meta.json` and transcript candidates are three different answers — and the
+			// next save would write that split forward.
+			rt.sessions.set(meta.sessionId, meta);
+			if (meta.sessionId !== sessionId) {
+				// Carry the recorded root across the rename, or lose it: `persistState` keys `sessionDirs` by
+				// session key, so an entry left under the list id is dropped on the next save and the record
+				// then resolves under *this* pi session id — where its files are not — and disappears on the
+				// second boot.
+				const recorded = rt.sessionDirs.get(sessionId);
+				if (recorded) {
+					rt.sessionDirs.set(meta.sessionId, recorded);
+					rt.sessionDirs.delete(sessionId);
+				}
+			}
 			report.recovered++;
 			// No unconditional re-anchor here. A recovered record is written again when something about it
 			// changed — `reconcileInFlight` and the backfill both persist what they mutate — and copying every
@@ -220,6 +341,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	if (signal?.aborted) {
 		return report;
 	}
+	reconcileRestartPointers(rt);
 	rt.persistState();
 	rt.updateStatusUI();
 	drainQueue(rt);
@@ -314,4 +436,116 @@ function reconcileInFlight(rt: DelegateRuntime, meta: SessionMeta, report: Recov
 		rt.updateStatusUI();
 		drainQueue(rt);
 	});
+}
+
+/**
+ * The largest queue-id suffix a generator could actually reach, so a corrupt one cannot freeze it.
+ *
+ * `q-999999999999999999999` parses to 1e21, where `++` is absorbed and every mint is the same string
+ * forever — and the minted `q-1e+21` no longer matches `QUEUE_ID_RE`, so the next boot cannot even see the
+ * value that stalled it. A queue a billion deep is corrupt data, not a queue.
+ */
+const MAX_QUEUE_ID = 1_000_000_000;
+
+/** The highest numeric queue id in a restored queue, so the generator can start above it. */
+function highestQueueId(entries: unknown[]): number {
+	let highest = 0;
+	for (const raw of entries) {
+		const id = (raw as { queueId?: unknown } | null)?.queueId;
+		const match = typeof id === "string" ? QUEUE_ID_RE.exec(id) : null;
+		if (!match) {
+			continue;
+		}
+		const n = Number.parseInt(match[1], 10);
+		if (Number.isSafeInteger(n) && n <= MAX_QUEUE_ID) {
+			highest = Math.max(highest, n);
+		}
+	}
+	return highest;
+}
+
+/**
+ * Make the restart pointers agree with what actually came back.
+ *
+ * A `supersededBy` pointer is a promise about the future, and a pi that died part-way through a restart
+ * leaves promises that no longer match the records on disk. Two reconciliations, in this order and for a
+ * reason:
+ *
+ *  - **a successor that came back takes the conversation.** `delegate_restart` is the only writer of
+ *    `parentSessionId`, on the session *and* on the queued task carrying it, so either naming a parent *is*
+ *    that restart — even when the crash beat the restart's own call to `markSuperseded`. Without the pointer
+ *    both records are addressable and both name the folder the restart reused: the hazard it exists to prevent.
+ *  - **a pointer naming nothing is handed back.** Absent means no successor with provenance came back. The
+ *    crash can land after `drainQueue` popped the entry and before `resolveQueuedRestart` rewrote the pointer,
+ *    which leaves a `{queueId}` with nothing queued — and possibly a record on disk that never got its
+ *    `parentSessionId`, which no derivation can see. Whatever the history, a pointer to an absent target sends
+ *    every caller somewhere they cannot act on, permanently, while each worktree path skips the record; handing
+ *    the conversation back makes it messageable again and its folder reclaimable.
+ *
+ * Deriving first is what makes the second safe: a pointer derived from something that came back is not cleared.
+ *
+ */
+/** Does following this session's restart chain reach `target`? Used to refuse a derived pointer that would
+ * close a cycle — a cycle would refuse every conversation inside it, permanently. */
+function restartsA(rt: DelegateRuntime, fromSessionId: string, target: string): boolean {
+	let current = rt.sessions.get(fromSessionId);
+	for (let hops = 0; current && hops < 32; hops++) {
+		const next = current.supersededBy?.sessionId;
+		if (!next) {
+			return false;
+		}
+		if (next === target) {
+			return true;
+		}
+		current = rt.sessions.get(next);
+	}
+	return true;
+}
+
+function reconcileRestartPointers(rt: DelegateRuntime): void {
+	for (const meta of rt.sessions.values()) {
+		if (!meta.parentSessionId) {
+			continue;
+		}
+		const parent = rt.sessions.get(meta.parentSessionId);
+		// `restartsA` guards the two-node cycle: provenance from disk can say A restarted B and B restarted
+		// A, and deriving both pointers leaves every conversation in the loop refused as superseded, with no
+		// way out but editing `state.json`. Legit writers only point backwards in creation order.
+		if (parent && parent !== meta && !parent.supersededBy && !restartsA(rt, meta.sessionId, parent.sessionId)) {
+			parent.supersededBy = { sessionId: meta.sessionId };
+			rt.persistSessionMeta(parent, true);
+			rt.logWarn(`recovered the restart pointer of ${parent.sessionId}: ${meta.sessionId} came back as its restarted session`);
+		}
+	}
+	for (const task of rt.queue) {
+		if (!task.parentSessionId) {
+			continue;
+		}
+		const parent = rt.sessions.get(task.parentSessionId);
+		if (parent && !parent.supersededBy) {
+			parent.supersededBy = { queueId: task.queueId };
+			rt.persistSessionMeta(parent, true);
+			rt.logWarn(`recovered the restart pointer of ${parent.sessionId}: ${task.queueId} came back waiting to restart it`);
+		}
+	}
+	const queueIds = new Set(rt.queue.map((t) => t.queueId));
+	for (const meta of rt.sessions.values()) {
+		const pointer = meta.supersededBy;
+		if (!pointer) {
+			continue;
+		}
+		const named = pointer.sessionId ?? `queue entry ${pointer.queueId ?? "?"}`;
+		// Either half is enough. The shape allows both keys, and a pointer whose session half is dead but whose
+		// queued restart is alive still has somewhere to send a caller.
+		const alive =
+			(pointer.sessionId !== undefined && rt.sessions.has(pointer.sessionId)) ||
+			(pointer.queueId !== undefined && queueIds.has(pointer.queueId));
+		if (alive) {
+			continue;
+		}
+		clearSuperseded(rt, meta);
+		rt.logWarn(
+			`dropped the restart pointer of ${meta.sessionId} (${named}): nothing came back for it, so its conversation is its own again`,
+		);
+	}
 }

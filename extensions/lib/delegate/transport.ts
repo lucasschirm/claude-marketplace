@@ -111,12 +111,21 @@ export class DelegateTransport {
 		});
 
 		this.child.on("error", (err) => {
-			this.logEvent("error", { message: err.message });
+			// Node reports every spawn failure as `spawn <command> ENOENT`, naming the binary whether the command
+			// is missing or the working directory is — and a reattach follows a conversation to the folder it was
+			// created in, where folders get deleted. The two look identical and are fixed differently, so name both.
+			const failure =
+				(err as NodeJS.ErrnoException).code === "ENOENT"
+					? Object.assign(new Error(`${err.message} — the command, or the working directory ${this.cwd}, is missing`, { cause: err }), {
+							code: "ENOENT",
+						})
+					: err;
+			this.logEvent("error", { message: failure.message });
 			for (const req of this.pendingRequests.values()) {
 				if (req.timer) {
 					clearTimeout(req.timer);
 				}
-				req.reject(err);
+				req.reject(failure);
 			}
 			this.pendingRequests.clear();
 			if (!this.isDisposed && this.onExitCallback) {
@@ -179,7 +188,10 @@ export class DelegateTransport {
 				if (req.timer) {
 					clearTimeout(req.timer);
 				}
-				req.reject(new Error(`${this.plan.label} exited with code ${code}`));
+				// Tagged, because the caller has to know who ended the turn. A rejection that says "the process
+				// died" belongs to `onExit`'s interruption record; treating it as an ordinary failed request makes
+				// the outcome depend on whether `exit` or `close` wins the race.
+				req.reject(Object.assign(new Error(`${this.plan.label} exited with code ${code}`), { agentExited: true }));
 			}
 			this.pendingRequests.clear();
 			if (this.streamsClosed) {
@@ -251,6 +263,23 @@ export class DelegateTransport {
 			}
 			if (!this.child?.stdin || this.child.killed) {
 				return reject(new Error(`${this.plan.label} process is not running`));
+			}
+			if (this.exitInfo) {
+				// The child is gone but the pipe object is not: `child.stdin` stays non-null and `child.killed`
+				// stays false after a natural exit, so the guard above lets a request through that nothing will
+				// ever answer — the handler that rejects pending requests already ran. A `session/prompt` sent
+				// with `timeoutMs = 0` would then pend forever, holding its slot. Tagged, because the caller has
+				// to know the agent died rather than broke.
+				//
+				// `agentExitedBeforeSend` says more than `agentExited` does. The other tagged rejection (in the
+				// exit handler) is a request the agent received and outlived, which is a turn that happened; this
+				// one never reached the pipe, so whoever armed a turn has nothing to charge.
+				return reject(
+					Object.assign(new Error(`${this.plan.label} exited with code ${this.exitInfo.code}`), {
+						agentExited: true,
+						agentExitedBeforeSend: true,
+					}),
+				);
 			}
 			const id = this.nextRpcId++;
 			const req: AcpMessage = { jsonrpc: "2.0", id, method, params };

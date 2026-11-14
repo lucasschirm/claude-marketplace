@@ -22,6 +22,10 @@ console.warn = (...args: unknown[]) => {
 	consoleWarns.push(args.join(" "));
 };
 
+// Which PR or branch a recorded `gh pr view` line was about — see the T3 pacing assertion, which measures
+// each watcher's own cadence rather than the phase between two watchers.
+const PR_VIEW_TARGET = /^pr view (\S+)/;
+
 export default function (pi: any) {
 	const tools: Record<string, any> = {};
 	const commands: Record<string, any> = {};
@@ -183,6 +187,21 @@ exit 0
 		return new Promise((r) => setTimeout(r, ms));
 	}
 
+	/**
+	 * Gaps between recorded `gh` timestamps, in the order they happened.
+	 *
+	 * `gh-calls.log` is appended to by whatever `gh` processes are alive at the moment, so lines arrive in
+	 * completion order, not start order: two attempts a second apart can be written the other way round and
+	 * the gap comes out negative. Sorting says when the calls happened; a genuinely unpaced retry still shows
+	 * up, because the millisecond floor the assertions care about is far larger than the reordering.
+	 */
+	function sortedGaps(timestamps: number[]): number[] {
+		const ordered = [...timestamps].sort((a, b) => a - b);
+		const gaps: number[] = [];
+		for (let i = 1; i < ordered.length; i++) gaps.push(ordered[i] - ordered[i - 1]);
+		return gaps;
+	}
+
 	async function waitFor(pred: () => boolean, timeoutMs: number, what: string): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() < deadline) {
@@ -255,10 +274,21 @@ exit 0
 				.split("\n")
 				.filter((l) => l.includes(" pr view "));
 			const outageStartTs = Number.parseInt(allLines.find((l) => l.includes("pr view 202"))?.slice(0, 13) ?? "0", 10);
-			const pvTs = allLines.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10)).filter((ts) => ts >= outageStartTs);
-			assert(pvTs.length >= 5, `T3: expected >= 5 paced 'pr view' attempts, got ${pvTs.length}`);
-			const gaps: number[] = [];
-			for (let i = 1; i < pvTs.length; i++) gaps.push(pvTs[i] - pvTs[i - 1]);
+			// Pacing is a property of one watcher, so the series is grouped by the target each call named
+			// (`101`, `202`, a branch). Merged, two independently-cadenced watchers can legitimately land
+			// inside 800 ms of each other and the assertion would be measuring their phase, not a retry loop.
+			const attempts = allLines
+				.map((l) => ({ ts: Number.parseInt(l.slice(0, l.indexOf(" ")), 10), args: l.slice(l.indexOf(" ") + 1) }))
+				.filter((a) => Number.isFinite(a.ts) && a.ts >= outageStartTs);
+			const byTarget = new Map<string, number[]>();
+			for (const a of attempts) {
+				const target = PR_VIEW_TARGET.exec(a.args)?.[1] ?? "this repo";
+				byTarget.set(target, [...(byTarget.get(target) ?? []), a.ts]);
+			}
+			const attemptCount = [...byTarget.values()].reduce((n, ts) => n + ts.length, 0);
+			assert(attemptCount >= 5, `T3: expected >= 5 paced 'pr view' attempts, got ${attemptCount}`);
+			const gaps = [...byTarget.values()].flatMap(sortedGaps);
+			assert(gaps.length > 0, "T3: no watcher made more than one attempt, so nothing was paced to measure");
 			const minGap = Math.min(...gaps);
 			assert(minGap >= 800, `T3: calls were not paced (min gap ${minGap} ms < 800 ms)`);
 			const fastGaps = gaps.filter((g) => g >= 800 && g < 4000);
@@ -268,7 +298,7 @@ exit 0
 			const maxGap = Math.max(...gaps);
 			assert(maxGap >= 5000, `T3: expected a slow-cadence gap (8 s) after 5 fast failures, max gap was ${maxGap} ms`);
 			console.log(
-				`✓ T3: gh calls paced — ${pvTs.length} attempts, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`,
+				`✓ T3: gh calls paced — ${attemptCount} attempts across ${byTarget.size} targets, min gap ${minGap} ms, ${fastGaps.length} fast gaps, max gap ${maxGap} ms`,
 			);
 
 			// T4: recovery — outage ends, the pending observe_pr(202) must auto-start
@@ -339,8 +369,7 @@ exit 0
 				.map((l) => Number.parseInt(l.slice(0, l.indexOf(" ")), 10))
 				.filter((ts) => ts >= ciFailTs - 2000);
 			assert(watchSpawns.length >= 2, `T5: expected the checks watcher to keep cycling, got ${watchSpawns.length} spawns`);
-			const wGaps: number[] = [];
-			for (let i = 1; i < watchSpawns.length; i++) wGaps.push(watchSpawns[i] - watchSpawns[i - 1]);
+			const wGaps = sortedGaps(watchSpawns);
 			const wMinGap = Math.min(...wGaps);
 			assert(
 				wMinGap >= 1500,

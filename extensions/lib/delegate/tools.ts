@@ -17,6 +17,7 @@ import type { DelegateRuntime } from "./runtime.ts";
 import { delegate, type QueueReason } from "./queue.ts";
 import { commandForCaller } from "./permissions.ts";
 import { readFullTranscript, readLastMessages } from "./transcript.ts";
+import { supersededPointerText } from "./session.ts";
 import type { SessionMeta } from "./types.ts";
 import { capList } from "../tool-result.ts";
 
@@ -67,6 +68,11 @@ function sessionLine(s: SessionMeta): string {
 	}
 	if (s.worktreePath) {
 		bits.push(s.worktreePath);
+	}
+	if (s.supersededBy) {
+		// Otherwise the overview shows a restarted conversation's record as an ordinary settled session, and
+		// the only way to learn where it went is to send it a message and be refused.
+		bits.push(supersededPointerText(s));
 	}
 	if (s.error) {
 		bits.push(`error: ${s.error}`);
@@ -142,6 +148,9 @@ function sessionReport(rt: DelegateRuntime, meta: SessionMeta, full: boolean, li
 	}
 	if (meta.detectedPrNumber) {
 		facts.push(`PR #${meta.detectedPrNumber}`);
+	}
+	if (meta.supersededBy) {
+		facts.push(supersededPointerText(meta));
 	}
 	if (meta.worktreePath) {
 		facts.push(`worktree ${meta.worktreePath} (${meta.worktreeStatus ?? "active"})`);

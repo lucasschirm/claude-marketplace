@@ -188,10 +188,11 @@ export function defaultMapUpdate(frame: AcpUpdateFrame): DelegateEvent[] {
 		case "available_commands_update":
 			return [{ kind: "ignored", reason: "available_commands_update" }];
 		case "heartbeat": {
-			// An adapter's beat (`agy-acp`, see drivers/agy.ts): the payload is `_meta.heartbeat`, and the
-			// distinction it carries is the one a watchdog acts on — waiting on a human is not a stall. It is
-			// mapped rather than ignored so the state exists in the engine, and it writes no transcript line
-			// (see `eventToLogEntries`): a beat every 15 s over a long turn is not history.
+			// An adapter's beat (`agy-acp`, see drivers/agy.ts): the payload is `_meta.heartbeat`. Mapping it
+			// keeps a beat every 15 s out of the transcript (see `eventToLogEntries`), which is the whole of
+			// what it does today: every frame already restarts the stall clock, and nothing reads the parsed
+			// fields — `liveness.ts` decides from the silence alone. A watchdog that treats "waiting on a
+			// human" as different from "stalled" would start with these, and does not exist yet.
 			const beat = ((u._meta ?? {}) as Record<string, unknown>).heartbeat as Record<string, unknown> | undefined;
 			return [
 				{

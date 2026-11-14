@@ -17,7 +17,7 @@ The `delegate_*` tools run another agent's session in the background over its Ag
 | :--- | :--- |
 | `delegate_task` | Start a task. Params: `prompt` (required), `agent`, `model`, `thinking`, `mode`, `create_worktree`. |
 | `delegate_status` | Check sessions. No args: every session and the queue. `session_id`: state plus recent messages; `full: true` for the whole transcript. |
-| `delegate_message` | Send a follow-up to an idle session (`session_id`, `message`). It is a turn of work: it holds a slot, or queues. A session whose process died is continued when the agent re-accepts its id (Devin), and refused with a pointer to `delegate_restart` when it does not (Claude) — a new conversation wearing an old id is not a follow-up. |
+| `delegate_message` | Send a follow-up to an idle session (`session_id`, `message`). It is a turn of work: it holds a slot, or queues. A session whose process died is continued when the agent can restore its id (Devin keeps it server-side; Antigravity through `agy-acp`'s own session store), and refused with a pointer to `delegate_restart` when it cannot (Claude) — a new conversation wearing an old id is not a follow-up. |
 | `delegate_cancel` | Cancel a running, queued or blocked session (session id or queue id). A session that already finished is an error, not a cancellation — it holds no slot, and its result stands. |
 | `delegate_permission` | Answer a session's pending permission request (`session_id`, `decision`: `allow`, `allow_session` or `reject`; `request_id` when several are pending). |
 | `delegate_restart` | Resume a failed, interrupted or stopped session in its original worktree. Optional new `prompt`, `agent`, `mode`. |
@@ -37,7 +37,7 @@ Do not run an agent's own CLI through bash. The guarded agents (Devin, and Antig
 | :--- | :--- |
 | `devin` (default) | Default for coding, review and research runs. Models are picked per task class (table below). |
 | `claude` | You want Claude rather than Devin: a second opinion from a different model family, or work where Claude's own tooling and habits fit better. Defaults to `sonnet`, with effort through `thinking`. Its catalogue is the machine's — the adapter lists whatever that install allows — so pass `model` only when you know this one carries the value. |
-| `agy` | You want Antigravity (Google's `agy`) rather than either of them. Needs the `agy-acp` adapter on `PATH` and a signed-in `agy`; `agy models` lists that account's ids, so pass `model` only when you know the id. Effort is `thinking` (`low`…`max`); it defaults to `accept-edits`, and `dangerous` needs the operator's `AGY_ACP_ALLOW_BYPASS=1`. It cannot be followed up after its process exits — use `delegate_restart`. |
+| `agy` | You want Antigravity (Google's `agy`) rather than either of them. Needs the `agy-acp` adapter on `PATH` and a signed-in `agy`; `agy models` lists that account's ids, so pass `model` only when you know the id. Effort is `thinking` (`low`…`max`); it defaults to `accept-edits`, and `dangerous` needs the operator's `AGY_ACP_ALLOW_BYPASS=1`. A follow-up after its process exits works: the adapter restores the conversation from its own store and respawns `agy` on it, in the workspace the session started in. When that is refused — the store is held by another run, or the workspace moved — use `delegate_restart`. |
 
 A second agent is a real second opinion, not a retry: when you ask for a review of work the first agent did, delegate to the *other* one. Capacity is limited per agent **and** in total, so a busy Devin does not block a Claude run.
 

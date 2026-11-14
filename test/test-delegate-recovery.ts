@@ -6,6 +6,7 @@ import path from "node:path";
 import { makeStub } from "./helpers/delegate-stub.ts";
 import { getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
 import { normalizeMeta, normalizeTask, recoverState } from "../extensions/lib/delegate/recovery.ts";
+import { abandonQueuedRestart } from "../extensions/lib/delegate/queue.ts";
 import { claudeDriver } from "../extensions/lib/delegate/drivers/claude.ts";
 import { must } from "./helpers/must.ts";
 
@@ -54,11 +55,12 @@ test("an unusable record is dropped instead of poisoning the load", () => {
 	assert.strictEqual(meta.status, "interrupted");
 });
 
-test("a queued task recovers with its agent and gets a lookup id back", () => {
+test("a queued task recovers with its agent, keeping the id it was given", () => {
 	// The id a caller was told has to survive the restart, or `delegate_cancel(q-…)` reports a task that
-	// is still about to run as gone. A record with no id gets the next one rather than an empty string.
-	const task = must(normalizeTask({ prompt: "p", agent: "claude", model: "sonnet", thinking: "high" }, { totalInvoked: 6 }), "recovers");
-	assert.strictEqual(task.queueId, "q-7");
+	// is still about to run as gone. A record with no id comes back with none: handing out ids belongs to the
+	// one pass that sees every id at once, below.
+	const task = must(normalizeTask({ prompt: "p", agent: "claude", model: "sonnet", thinking: "high" }), "recovers");
+	assert.strictEqual(task.queueId, "", "a record with no id is not given one here");
 	assert.strictEqual(task.agent, "claude");
 	assert.strictEqual(task.model, "sonnet");
 	assert.strictEqual(task.thinking, "high");
@@ -97,7 +99,7 @@ test("state and metadata are restored, and interrupted sessions are labelled", a
 		// The store read is deliberately not awaited (a sqlite probe must not hold boot open), so the
 		// final status lands after the pass reports. `flush` is the seam the scope exposes for exactly
 		// this: wait for quiescence instead of sleeping a guessed number of milliseconds.
-		await rt.tasks.flush(5_000);
+		await rt.stateWrites.drain(5_000);
 		const session = must(rt.sessions.get("s-old"), "the session is restored");
 		assert.strictEqual(session.agent, "devin");
 		assert.strictEqual(session.status, "interrupted");
@@ -174,7 +176,9 @@ test("a session whose process is still alive is killed, and the driver's CLI nam
 		"pi-test",
 		{ sessionIds: ["s-orphan"] },
 		{
-			"s-orphan": { sessionId: "s-orphan", agent: "claude", prompt: "p", status: "running", pid: process.pid },
+			// An alive pid that is not ours: a record may name a live process, and `normalizeMeta` refuses one
+			// that names the reader, so the fixture cannot either.
+			"s-orphan": { sessionId: "s-orphan", agent: "claude", prompt: "p", status: "running", pid: process.ppid },
 		},
 	);
 	const kills: Array<{ pid: number; cli?: string }> = [];
@@ -184,7 +188,7 @@ test("a session whose process is still alive is killed, and the driver's CLI nam
 	try {
 		const r = await recoverState(rt, "pi-test");
 		assert.strictEqual(r.orphanProcessesKilled, 1);
-		assert.deepStrictEqual(kills, [{ pid: process.pid, cli: "claude" }], "the agent recorded on the session decides the guard");
+		assert.deepStrictEqual(kills, [{ pid: process.ppid, cli: "claude" }], "the agent recorded on the session decides the guard");
 		assert.strictEqual(rt.sessions.get("s-orphan")?.status, "interrupted");
 	} finally {
 		restoreHome();
@@ -252,7 +256,7 @@ test("an interrupted session does not read another agent's store", async () => {
 	);
 	try {
 		const r = await recoverState(rt, "pi-test");
-		await rt.tasks.flush(5_000);
+		await rt.stateWrites.drain(5_000);
 		assert.strictEqual(r.backfilled, 0);
 		assert.strictEqual(rt.sessions.get("s-claude")?.status, "interrupted");
 		// The stronger fact: the Claude driver has no store reader at all, so there is no code path that
@@ -283,6 +287,417 @@ test("recovery writes the state it produced back to disk", async () => {
 		assert.deepStrictEqual(state.sessionIds, ["s-1"]);
 		assert.strictEqual(state.queue.length, 1);
 		assert.ok(fs.existsSync(getMetaPath("pi-test", "s-1")));
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a successor that came back takes the conversation its parent still claims", async () => {
+	// `markSuperseded` runs after `delegate()` returns, so a pi that died mid-restart can leave the restarted
+	// session on disk while its parent never learned. Both records would then be addressable and both would
+	// name the worktree the restart reused — the hazard the pointer exists to prevent. `parentSessionId` is
+	// written only by `delegate_restart`, so the child is the evidence recovery needs to rebuild the pointer.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{ sessionIds: ["old-1", "new-1"], queue: [] },
+		{
+			"old-1": { sessionId: "old-1", prompt: "p", status: "completed" },
+			"new-1": { sessionId: "new-1", prompt: "p", status: "completed", parentSessionId: "old-1" },
+		},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.deepStrictEqual(rt.sessions.get("old-1")?.supersededBy, { sessionId: "new-1" });
+		// In memory is not enough: a pointer that never reaches the file means the next pi reopens the race.
+		await rt.stateWrites.drain(5_000);
+		const onDisk = JSON.parse(fs.readFileSync(path.join(dirOf(home, "pi-test", "old-1"), "meta.json"), "utf8"));
+		assert.deepStrictEqual(onDisk.supersededBy, { sessionId: "new-1" });
+		// The successor is nobody's pointer target and stays addressable on its own.
+		assert.strictEqual(rt.sessions.get("new-1")?.supersededBy, undefined);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a restart pointer naming nothing is dropped, and one naming a queued restart is kept", async () => {
+	// A refusal is a promise the caller can act on. Pointing them at a queue entry that no longer exists (the
+	// entry was popped, then pi died before the successor's record was written) or at a session whose record
+	// could not be read strands the conversation permanently — and every worktree path skips a superseded
+	// record, so its folder becomes unreclaimable too. A `{queueId}` entry still in the queue is different:
+	// that restart is waiting for a slot, which is exactly what the pointer means.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{
+			sessionIds: ["gone-queue", "gone-session", "still-queued", "half-alive", "plain"],
+			queue: [{ prompt: "p", agent: "devin", queueId: "q-7" }],
+		},
+		{
+			"gone-queue": { sessionId: "gone-queue", prompt: "p", status: "completed", supersededBy: { queueId: "q-1" } },
+			"gone-session": { sessionId: "gone-session", prompt: "p", status: "completed", supersededBy: { sessionId: "never-restored" } },
+			"still-queued": { sessionId: "still-queued", prompt: "p", status: "completed", supersededBy: { queueId: "q-7" } },
+			"half-alive": {
+				sessionId: "half-alive",
+				prompt: "p",
+				status: "completed",
+				supersededBy: { sessionId: "never-restored", queueId: "q-7" },
+			},
+			plain: { sessionId: "plain", prompt: "p", status: "completed" },
+		},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.strictEqual(rt.sessions.get("gone-queue")?.supersededBy, undefined, "a queue entry that is gone cannot be where the work went");
+		assert.strictEqual(
+			rt.sessions.get("gone-session")?.supersededBy,
+			undefined,
+			"a successor that did not load cannot be addressed either",
+		);
+		assert.deepStrictEqual(
+			rt.sessions.get("still-queued")?.supersededBy,
+			{ queueId: "q-7" },
+			"a restart still waiting for a slot stays pointed",
+		);
+		// Both halves, one dead: the queued half is somewhere a caller can still go, so the pointer as a
+		// whole survives — clearing is for a pointer with nowhere to send anybody.
+		assert.deepStrictEqual(
+			rt.sessions.get("half-alive")?.supersededBy,
+			{ sessionId: "never-restored", queueId: "q-7" },
+			"a live queue half keeps a pointer whose session half is gone",
+		);
+		assert.strictEqual(rt.sessions.get("plain")?.supersededBy, undefined, "recovery invents pointers for nobody");
+		await rt.stateWrites.drain(5_000);
+		const onDisk = JSON.parse(fs.readFileSync(path.join(dirOf(home, "pi-test", "gone-queue"), "meta.json"), "utf8"));
+		assert.strictEqual(onDisk.supersededBy, undefined, "the dropped pointer has to be dropped on disk too");
+	} finally {
+		restoreHome();
+	}
+});
+
+/** A lookup id has to survive `delegate_cancel(q-N)`, restored or minted. */
+const QUEUE_ID_RE = /^q-\d+$/;
+
+/** Where a recovered session's `meta.json` lives. */
+function dirOf(home: string, piSessionId: string, sessionId: string): string {
+	return path.join(home, ".pi", "agent", "delegate_task", piSessionId, sessionId);
+}
+
+test("a queued restart that outlived its pointer still marks the parent", async () => {
+	// `delegate()` persists the queue entry long before a restart's tool call can write a pointer, so a crash
+	// in that gap leaves an entry saying "restart old-1" while old-1 still believes the conversation is its
+	// own. Reading only the sessions would miss it, and both ids would stay addressable in this pi — the pair
+	// sharing one worktree — until some later boot derived the pointer from the child.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{ sessionIds: ["old-1"], queue: [{ prompt: "again", agent: "devin", queueId: "q-4", parentSessionId: "old-1" }] },
+		{ "old-1": { sessionId: "old-1", prompt: "p", status: "completed" } },
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		// Pointed at the entry rather than a session: it is still waiting for a slot, which is what the caller
+		// needs to be told. And because the entry came back, the clearing pass leaves it alone.
+		assert.deepStrictEqual(rt.sessions.get("old-1")?.supersededBy, { queueId: "q-4" });
+		await rt.stateWrites.drain(5_000);
+		const onDisk = JSON.parse(fs.readFileSync(path.join(dirOf(home, "pi-test", "old-1"), "meta.json"), "utf8"));
+		assert.deepStrictEqual(onDisk.supersededBy, { queueId: "q-4" });
+	} finally {
+		restoreHome();
+	}
+});
+
+test("restored queue ids stay unique, because a pointer matches one by id", async () => {
+	// A pointer says "the restart waiting as q-N". Two entries reading back as q-N — the id-less fallback in
+	// `normalizeTask` cannot see its siblings — would make a dead pointer look alive and keep it past recovery.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{
+			sessionIds: [],
+			queue: [
+				{ prompt: "a", agent: "devin", queueId: "q-1" },
+				{ prompt: "b", agent: "devin", queueId: "q-1" },
+				{ prompt: "c", agent: "devin" },
+			],
+		},
+		{},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		const ids = rt.queue.map((task) => task.queueId);
+		assert.strictEqual(rt.queue.length, 3, "nothing is dropped to make ids unique");
+		assert.strictEqual(new Set(ids).size, 3, `queue ids collide: ${JSON.stringify(ids)}`);
+		assert.ok(
+			ids.every((id) => QUEUE_ID_RE.test(id ?? "")),
+			`a restored id is not a lookup id: ${JSON.stringify(ids)}`,
+		);
+	} finally {
+		restoreHome();
+	}
+});
+
+const queueShapes: Array<{ name: string; queue: Array<Record<string, unknown>> }> = [
+	{
+		name: "no ids at all",
+		queue: [
+			{ prompt: "a", agent: "devin" },
+			{ prompt: "b", agent: "devin" },
+		],
+	},
+	{
+		name: "a missing id ahead of a repeated one",
+		queue: [
+			{ prompt: "a", agent: "devin" },
+			{ prompt: "b", agent: "devin", queueId: "q-7" },
+			{ prompt: "c", agent: "devin", queueId: "q-7" },
+		],
+	},
+	{
+		name: "a repeated id ahead of a missing one",
+		queue: [
+			{ prompt: "a", agent: "devin", queueId: "q-7" },
+			{ prompt: "b", agent: "devin", queueId: "q-7" },
+			{ prompt: "c", agent: "devin" },
+		],
+	},
+	{
+		name: "a repeated id that is not numeric",
+		queue: [
+			{ prompt: "a", agent: "devin", queueId: "weird" },
+			{ prompt: "b", agent: "devin", queueId: "weird" },
+		],
+	},
+];
+
+// One test per shape, not one test looping over shapes: `recoverState` awaits, and `makeStub` redirects a
+// process-global HOME, so cases interleaved by `Promise.all` run their continuations after a sibling stub has
+// taken over — and those writes land in the sibling's home, same `pi-test` namespace, last writer wins.
+// (Before the pin in `delegate-stub.ts` they resolved the real `~/.pi`.) Sequential tests keep each case's
+// writes in its own stub's home, which is the point of the redirect.
+for (const shape of queueShapes) {
+	test(`a queue restored with ${shape.name} still ends up with one id per task`, async () => {
+		const { rt, home, restoreHome } = makeStub();
+		noCapacity(rt);
+		writeState(home, "delegate_task", "pi-test", { sessionIds: [], totalInvoked: 5, queue: shape.queue }, {});
+		try {
+			await recoverState(rt, "pi-test");
+			const ids = rt.queue.map((task) => task.queueId);
+			assert.strictEqual(rt.queue.length, shape.queue.length, `nothing is dropped: ${JSON.stringify(ids)}`);
+			assert.strictEqual(new Set(ids).size, ids.length, `queue ids collide: ${JSON.stringify(ids)}`);
+			for (const id of ids) {
+				assert.ok(id && id !== "q-NaN", `an unusable id reached the queue: ${JSON.stringify(ids)}`);
+			}
+		} finally {
+			restoreHome();
+		}
+	});
+}
+
+// A `state.json` counter that is not a counter, and a queue id past what a counter can reach. Round 10 found
+// both: `"abc"` propagated NaN through `Math.max` and made every mint `q-NaN`, while `q-999999999999999999999`
+// parsed to 1e21, where `++` is absorbed — every mint the same string, and one that no longer looks like a queue
+// id, so the next boot cannot see the value that stalled it.
+const poisonedCounters: unknown[] = ["abc", null, {}, -4, 1.5, 1e21];
+
+for (const totalInvoked of poisonedCounters) {
+	test(`a persisted counter of ${JSON.stringify(totalInvoked)} cannot freeze the id generator`, async () => {
+		const { rt, home, restoreHome } = makeStub();
+		noCapacity(rt);
+		writeState(
+			home,
+			"delegate_task",
+			"pi-test",
+			{
+				sessionIds: [],
+				totalInvoked,
+				queue: [
+					{ prompt: "a", agent: "devin", queueId: "q-999999999999999999999" },
+					{ prompt: "b", agent: "devin", queueId: "q-999999999999999999999" },
+					{ prompt: "c", agent: "devin" },
+				],
+			},
+			{},
+		);
+		try {
+			await recoverState(rt, "pi-test");
+			const ids = rt.queue.map((task) => task.queueId);
+			assert.strictEqual(new Set(ids).size, ids.length, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
+			for (const id of ids) {
+				assert.match(id, QUEUE_ID_RE, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
+			}
+			assert.ok(rt.totalInvoked <= 1_000_000_000, `the generator was frozen at ${rt.totalInvoked}`);
+		} finally {
+			restoreHome();
+		}
+	});
+}
+
+test("a hostile session id in the container cannot stop recovery or leave the tree", async () => {
+	// `normalizeMeta` guards the fields of a record, and `isStorageSafeId` guards ids that arrive from the wire.
+	// Nothing guarded the values of `state.json` itself — which is the file a hand-edit, a half-written save, or
+	// another process can reach. A non-string reaches `path.join` and throws partway through the session loop,
+	// after the queue has been restored and before the sessions later in the list are read, with `persistState`
+	// and the drain skipped; a `..`-bearing one reads and appends outside the delegate's own directory.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	const good = must(normalizeMeta({ sessionId: "good-1", agent: "devin", prompt: "p", status: "settled" }), "a record the loader accepts");
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{ sessionIds: [42, null, {}, "../escape", "..", "good-1"], totalInvoked: 0, queue: [] },
+		{ "good-1": good },
+	);
+	try {
+		const r = await recoverState(rt, "pi-test");
+		assert.strictEqual(r.recovered, 1, "the valid record still loads");
+		assert.deepStrictEqual([...rt.sessions.keys()], ["good-1"]);
+		assert.strictEqual(fs.existsSync(path.join(home, "escape")), false, "nothing was read or written outside");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a recorded root is kept only when both halves of it are ids", async () => {
+	// The map is `sessionId -> the pi session id the record was written under`, and both sides become path
+	// segments in every later candidate list — including the one `appendEvent` resolves before appending.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	const good = must(normalizeMeta({ sessionId: "good-1", agent: "devin", prompt: "p", status: "settled" }), "a record the loader accepts");
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{
+			sessionIds: ["good-1"],
+			sessionDirs: { "good-1": "other-pi", "../evil": "/tmp/x", "bad-value": 42, "also-bad": { a: 1 } },
+			totalInvoked: 0,
+			queue: [],
+		},
+		{ "good-1": good },
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.deepStrictEqual([...rt.sessionDirs.entries()], [["good-1", "other-pi"]], "one pair survives, the rest were never ids");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a session is keyed by what its record says, not by what the list said", async () => {
+	// The map key is what the next `persistState` writes back as a session id. Keyed by the list entry, a
+	// record whose own id disagrees would have a key, a `meta.json` and a transcript path that are three
+	// different answers — and the split would be written forward on the next save.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	const renamed = must(
+		normalizeMeta({ sessionId: "record-id", agent: "devin", prompt: "p", status: "settled" }),
+		"a record the loader accepts",
+	);
+	writeState(home, "delegate_task", "pi-test", { sessionIds: ["listed-id"], totalInvoked: 0, queue: [] }, { "listed-id": renamed });
+	try {
+		await recoverState(rt, "pi-test");
+		assert.deepStrictEqual([...rt.sessions.keys()], ["record-id"]);
+		assert.strictEqual(rt.sessions.get("record-id")?.sessionId, "record-id", "key and record agree");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("abandoning a queued restart hands the conversation back, unless a live successor owns it", () => {
+	// The `{queueId}` half named an entry that will never start. A session half that names something live is
+	// kept, because the caller still has somewhere to go; a half that names something dead must not be promoted
+	// to the whole story — a both-halves pointer only ever arrives from disk, where a dead half can sit next to
+	// a live one — or the parent is refused as "restarted as <id>" with nothing behind the id.
+	const meta = (over: Record<string, unknown>) =>
+		must(normalizeMeta({ sessionId: "old-1", agent: "devin", prompt: "p", status: "settled", ...over }), "a record the loader accepts");
+
+	// Two stubs, restored newest-first in the end: `makeStub` redirects a process-global HOME, so a test that
+	// leaves one up points `HOME` at a temp directory for every later test in this file, and the two runtimes'
+	// writes resolve the same `pi-test` namespace and merge. Restoring in reverse creation order hands the
+	// environment back the way it was taken.
+	const dead = makeStub();
+	noCapacity(dead.rt);
+	const deadParent = meta({ supersededBy: { sessionId: "gone", queueId: "q-4" } });
+	dead.rt.sessions.set("old-1", deadParent);
+	abandonQueuedRestart(dead.rt, { parentSessionId: "old-1", queueId: "q-4" } as never);
+	assert.strictEqual(deadParent.supersededBy, undefined, "a dead half must not become the whole pointer");
+
+	let alive: ReturnType<typeof makeStub> | undefined;
+	try {
+		alive = makeStub();
+		noCapacity(alive.rt);
+		alive.rt.sessions.set("young-2", meta({ sessionId: "young-2", supersededBy: undefined }));
+		const aliveParent = meta({ supersededBy: { sessionId: "young-2", queueId: "q-4" } });
+		alive.rt.sessions.set("old-1", aliveParent);
+		abandonQueuedRestart(alive.rt, { parentSessionId: "old-1", queueId: "q-4" } as never);
+		assert.deepEqual(aliveParent.supersededBy, { sessionId: "young-2" }, "a live successor keeps its claim");
+	} finally {
+		alive?.restoreHome();
+		dead.restoreHome();
+	}
+});
+
+test("a duplicate restored queue id terminates recovery instead of spinning forever", { timeout: 30_000 }, async () => {
+	// The timeout is the assertion. Round 8 built its replacement id from values the `while` loop never
+	// changed — an offset over a counter fixed at boot — so a candidate that was already taken repeated
+	// forever, inside `recoverState`, which every tool path awaits. `totalInvoked: 5` with two entries named
+	// `q-7` is the smallest shape that reaches it, and a half-written `state.json` is the same shape.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{
+			sessionIds: [],
+			totalInvoked: 5,
+			queue: [
+				{ prompt: "a", agent: "devin", queueId: "q-7" },
+				{ prompt: "b", agent: "devin", queueId: "q-7" },
+			],
+		},
+		{},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		const ids = rt.queue.map((task) => task.queueId);
+		assert.strictEqual(rt.queue.length, 2, "nothing is dropped to make ids unique");
+		assert.strictEqual(new Set(ids).size, 2, `queue ids collide: ${JSON.stringify(ids)}`);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("the queue-id generator starts above every id restored from disk", async () => {
+	// `totalInvoked` is what `delegate()` mints from. A restored `q-9` with the counter still at 2 means the
+	// ninth delegation gets `q-9` too — one lookup key, two tasks, and a restart pointer matched by that key.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{ sessionIds: [], totalInvoked: 2, queue: [{ prompt: "a", agent: "devin", queueId: "q-9" }] },
+		{},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.strictEqual(rt.queue.length, 1);
+		assert.ok(rt.totalInvoked >= 9, `the id generator sits under an id already on disk: ${rt.totalInvoked}`);
 	} finally {
 		restoreHome();
 	}

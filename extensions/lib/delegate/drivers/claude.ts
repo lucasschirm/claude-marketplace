@@ -153,10 +153,10 @@ export const claudeDriver: AgentDriver = {
 	capabilities(): DriverCapabilities {
 		return {
 			thinking: true,
-			// The adapter advertises `loadSession` (and fork/resume/list), but this engine has no loader: what
-			// re-attaching does here is "spawn, then prompt the recorded id", which is what Devin's server
-			// supports and has not been shown to work against this one. Declaring `true` would let
-			// `delegate_message` promise the continuation of a conversation nothing restores.
+			// The adapter advertises `loadSession` (and fork/resume/list), and the engine now has a loader —
+			// `resumeHandshake` — but nothing has run it against *this* agent. Declaring `true` on the strength
+			// of an advertisement is how `delegate_message` comes to promise the continuation of a conversation
+			// nothing brings back; the claim to earn is a `session/resume` that answers.
 			resume: false,
 			// The effort vocabulary this install advertises, minus `default` (which means "whatever the model
 			// picks" — what omitting `thinking` already does). No Claude model here offers `off` or `minimal`, so

@@ -29,15 +29,47 @@ export interface Stub {
 }
 
 /**
+ * The last temp home this process made, and every home it has made.
+ *
+ * `storage.ts` resolves `os.homedir()` when a write happens, and a write can happen after the test that caused
+ * it has finished — a debounced meta persist, a continuation of `recoverState`, a turn's flush on process exit.
+ * Restoring HOME at the end of each test handed those writes the developer's real `~/.pi/agent/delegate_task/`,
+ * which is the one thing the redirect exists to prevent. So the pin stays: a finished test's home keeps
+ * answering `os.homedir()` until the next stub takes over, and every home goes when the process does.
+ */
+const stubHomes: string[] = [];
+let realHomedir: (() => string) | undefined;
+
+function pinHome(home: string): void {
+	if (!realHomedir) {
+		realHomedir = os.homedir;
+		process.on("exit", () => {
+			os.homedir = realHomedir as () => string;
+			for (const dir of stubHomes) {
+				try {
+					fs.rmSync(dir, { recursive: true, force: true });
+				} catch {
+					// A temp directory that outlives the run is a nuisance; a throw in an exit hook is worse.
+				}
+			}
+		});
+	}
+	stubHomes.push(home);
+	os.homedir = () => stubHomes[stubHomes.length - 1] as string;
+}
+
+/**
  * A runtime whose storage points at a temp directory.
  *
- * HOME is redirected because every path in `storage.ts` hangs off `os.homedir()`; leaving it alone would
- * have the tests read and write the real `~/.pi/agent/delegate_task/` of whoever runs them.
+ * HOME is redirected because every path in `storage.ts` hangs off `os.homedir()`; leaving it alone would have
+ * the tests read and write the real `~/.pi/agent/delegate_task/` of whoever runs them. `restoreHome` restores
+ * the environment but keeps the directory, for the writes described above.
  */
 export function makeStub(flags: Record<string, string | boolean | undefined> = {}): Stub {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "delegate-test-"));
 	const previousHome = process.env.HOME;
 	process.env.HOME = home;
+	pinHome(home);
 	const sent: string[] = [];
 	const notifications: Array<[string, string | undefined]> = [];
 	const statuses: Array<[string, string | undefined]> = [];
@@ -64,8 +96,15 @@ export function makeStub(flags: Record<string, string | boolean | undefined> = {
 		ui,
 		home,
 		restoreHome: () => {
+			// The env goes back so nothing outside a stub believes a temp path; the directory stays, because a
+			// write still in flight belongs somewhere and that somewhere must not be the real home. The exit
+			// hook above reclaims it.
 			process.env.HOME = previousHome;
-			fs.rmSync(home, { recursive: true, force: true });
+			if (stubHomes[stubHomes.length - 1] === home) {
+				// Nothing is pinned here any more; the next `os.homedir()` before the next stub is this test's
+				// late write, and its own directory is the honest answer.
+				os.homedir = () => home;
+			}
 		},
 	};
 }

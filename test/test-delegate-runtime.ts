@@ -2,8 +2,12 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { fakeClient, makeStub, metaFor } from "./helpers/delegate-stub.ts";
+import { cancelSession } from "../extensions/lib/delegate/queue.ts";
+import { attach, startTurn } from "../extensions/lib/delegate/session.ts";
+import { unregisterStart } from "../extensions/lib/delegate/queue.ts";
 import { getEventsLogPath, getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
 import { must } from "./helpers/must.ts";
 
@@ -253,6 +257,211 @@ test("state and metadata persist under the new root, and drain on demand", async
 		assert.ok(getEventsLogPath("pi-test", "s-1").startsWith(home), "everything is inside the temp home");
 	} finally {
 		restoreHome();
+	}
+});
+
+test("cancelling a parked agent is not a second completed turn", async () => {
+	// An idle session keeps its agent between turns, and cancelling one is how a caller puts it away. Its turn
+	// was counted when it settled; `cancelSession` accepting a settled+connected session (round 11) then
+	// incremented again, so every idle cancel drifted a persisted counter that the status line reports.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "idle" });
+		rt.sessions.set("s-1", meta);
+		rt.activeClients.set("s-1", fakeClient() as never);
+		const before = rt.totalCompleted;
+		assert.strictEqual(await cancelSession(rt, "s-1"), "session");
+		assert.strictEqual(rt.totalCompleted, before, "one turn, one completion");
+		assert.strictEqual(meta.status, "cancelled", "the caller did stop it");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("cancelling a turn that is running is the completion", async () => {
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.turnInFlight.add("s-1");
+		const before = rt.totalCompleted;
+		assert.strictEqual(await cancelSession(rt, "s-1"), "session");
+		assert.strictEqual(rt.totalCompleted, before + 1, "a turn that was stopped did not finish on its own");
+		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "and the marker went with it, so settle cannot charge it twice");
+	} finally {
+		restoreHome();
+	}
+});
+
+/** A client that hands its exit callback to the test, so a process death can be replayed without a process. */
+function exitClient(
+	captured: { onExit?: (code: number | null) => void },
+	opts: { diesWhilePrompting?: boolean; diesBeforeSend?: boolean } = {},
+) {
+	const base = fakeClient() as Record<string, unknown>;
+	return {
+		...base,
+		pid: 4242,
+		start: async () => {},
+		request: async (method: string) => {
+			if (opts.diesWhilePrompting && method === "session/prompt") {
+				// Exactly what the transport does when the child exits with a request outstanding.
+				throw Object.assign(new Error("agy-acp exited with code 1"), { agentExited: true });
+			}
+			if (opts.diesBeforeSend && method === "session/prompt") {
+				// What it does when the child is already gone: the request refuses before it reaches the pipe.
+				throw Object.assign(new Error("agy-acp exited with code 1"), {
+					agentExited: true,
+					agentExitedBeforeSend: true,
+				});
+			}
+			return {};
+		},
+		setLogFilePath: () => {},
+		setOnUpdate: () => {},
+		setOnRequest: () => {},
+		setOnExit: (fn: (code: number | null) => void) => {
+			captured.onExit = fn;
+		},
+	} as never;
+}
+
+test("an agent that dies before it was ever prompted is not a completed turn", async () => {
+	// `spawnSession` records `running` to hold the slot before any `session/prompt` exists. A child that dies in
+	// that window used to satisfy `onExit`'s status test and increment the completion counter for a turn that
+	// was never sent — a number the status line reports to the operator.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		const captured: { onExit?: (code: number | null) => void } = {};
+		attach(rt, exitClient(captured), meta);
+		const before = rt.totalCompleted;
+		captured.onExit?.(1);
+		assert.strictEqual(rt.totalCompleted, before, "no prompt, no completion");
+		assert.strictEqual(meta.status, "interrupted", "but the caller still hears the agent went away");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a death mid-turn is an interruption whether the rejection or the exit lands first", async () => {
+	// The transport rejects an in-flight prompt on the child's `exit` and delivers the exit callback on `close`,
+	// so the rejection usually wins. Until round 18 that meant the same death read `failed` with no completion
+	// when `exit` won, and `interrupted` with one when `close` did — the caller's history depended on a race.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.turnInFlight.add("s-1");
+		const captured: { onExit?: (code: number | null) => void } = {};
+		const client = exitClient(captured, { diesWhilePrompting: true });
+		// Attached first: without a client on the session there is no exit callback to fire, and the assertion
+		// below would be measuring nothing.
+		attach(rt, client as never, meta);
+		const before = rt.totalCompleted;
+		startTurn(rt, meta, client as never, "go");
+		await new Promise((done) => setImmediate(done));
+		assert.strictEqual(meta.status, "running", "the rejection alone does not decide the verdict");
+		captured.onExit?.(1);
+		assert.strictEqual(meta.status, "interrupted", "the exit does");
+		assert.strictEqual(rt.totalCompleted, before + 1, "one completion, whichever came first");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a prompt refused before it reached the pipe is not a completed turn", async () => {
+	// The guard at the end of the configure window catches most deaths there, but a child whose pipes stay open
+	// delays `close` — and `onExit` with it — past that check, so the turn is armed and the transport then refuses
+	// the write. The agent died without ever receiving a turn: the death must be recorded, not charged.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		const captured: { onExit?: (code: number | null) => void } = {};
+		const client = exitClient(captured, { diesBeforeSend: true });
+		attach(rt, client as never, meta);
+		const before = rt.totalCompleted;
+		startTurn(rt, meta, client as never, "go");
+		await new Promise((done) => setImmediate(done));
+		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "the armed turn is taken back");
+		captured.onExit?.(1);
+		assert.strictEqual(meta.status, "interrupted", "the death is still the verdict");
+		assert.strictEqual(rt.totalCompleted, before, "and no completion is charged for a prompt never sent");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("an agent that dies mid-turn is one completion, not two", async () => {
+	// The mirror case: with a prompt in flight the marker is there, and `onExit` is the path that charges it.
+	// The rejection that follows the same exit deletes an already-empty marker, so nothing double-counts.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.turnInFlight.add("s-1");
+		const captured: { onExit?: (code: number | null) => void } = {};
+		attach(rt, exitClient(captured), meta);
+		const before = rt.totalCompleted;
+		captured.onExit?.(2);
+		assert.strictEqual(rt.totalCompleted, before + 1, "a turn that was cut short still ended once");
+		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "and the marker went with it");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("abandoning a start cancels the record write its updates armed", async () => {
+	// A `current_mode_update` answering `session/set_mode` is normal ACP behaviour, and every update persists
+	// the session on a three-second debounce. An abandoned start that left the timer armed writes a record for
+	// the session it is unregistering — into whatever namespace answers when the timer fires.
+	const { rt, home, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.assistantBuffers.set("s-1", "half an answer");
+		rt.thoughtBuffers.set("s-1", "half a thought");
+		rt.persistSessionMeta(meta, false);
+		assert.ok(rt.pendingMetaSaves.has("s-1"), "the debounced write is armed");
+		unregisterStart(rt, meta, exitClient({}) as never);
+		assert.strictEqual(rt.pendingMetaSaves.has("s-1"), false, "abandoning it disarms the write");
+		assert.strictEqual(rt.assistantBuffers.size, 0, "and the half-written buffers go with it");
+		assert.strictEqual(rt.thoughtBuffers.size, 0);
+		await new Promise((done) => setTimeout(done, 3_600));
+		assert.strictEqual(
+			fs.existsSync(path.join(home, ".pi", "agent", "delegate_task", "pi-test", "s-1", "meta.json")),
+			false,
+			"nothing was persisted after the session was taken back",
+		);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a debounced record write lands where it was scheduled, not where its timer fired", { timeout: 30_000 }, async () => {
+	// The save is deferred three seconds and the storage root is resolved per call, so a path computed inside
+	// the timer is answered by whatever the process thinks the home is by then. For a test that is a sibling
+	// stub's home; for anything else it is a record that moved out from under the session it describes.
+	const first = makeStub();
+	let second: ReturnType<typeof makeStub> | undefined;
+	try {
+		const meta = metaFor("s-1");
+		first.rt.sessions.set("s-1", meta);
+		// Scheduled while the first stub still owns the process-global home...
+		first.rt.persistSessionMeta(meta, false);
+		// ...and only then superseded, so the timer fires into a process that now answers a different home.
+		second = makeStub();
+		await new Promise((done) => setTimeout(done, 3_400));
+		await first.rt.stateWrites.drain(3_000);
+		const scheduled = path.join(first.home, ".pi", "agent", "delegate_task", "pi-test", "s-1", "meta.json");
+		const elsewhere = path.join(second.home, ".pi", "agent", "delegate_task", "pi-test", "s-1", "meta.json");
+		assert.ok(fs.existsSync(scheduled), `the record stayed in the home it was scheduled in: ${scheduled}`);
+		assert.strictEqual(fs.existsSync(elsewhere), false, "and did not follow the current stub's home");
+	} finally {
+		second?.restoreHome();
+		first.restoreHome();
 	}
 });
 

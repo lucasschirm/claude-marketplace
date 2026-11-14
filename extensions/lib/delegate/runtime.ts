@@ -37,6 +37,56 @@ const FLUSH_THRESHOLD_CHARS = 2000;
 export class DelegateRuntime {
 	readonly sessions = new Map<string, SessionMeta>();
 	readonly activeClients = new Map<string, DelegateTransport>();
+	/** A reattach in flight, so a second follow-up waits for it instead of spawning a rival agent. */
+	readonly reattaching = new Map<string, Promise<DelegateTransport>>();
+	/**
+	 * Session ids whose `delegate_restart` is in flight. In flight is process-local by definition — after a
+	 * pi restart nothing is pending — so this is a set and never a record on disk, where a crashed restart
+	 * would dead-end a conversation that nothing took over. It exists because a restart spawns, handshakes
+	 * and prompts before it can write its pointer, and a follow-up landing inside that window would
+	 * reattach the same conversation beside the sibling the restart is starting.
+	 */
+	readonly restarting = new Set<string>();
+	/**
+	 * Worktree paths whose `releaseWorktree` is in flight.
+	 *
+	 * A release spends seconds in a safety check and an orca removal, and `worktreeStatus` cannot say "active
+	 * but on its way out" without a new state in every reader: the folder is still there, still looks reusable,
+	 * and is about not to be. `delegate_restart` asks exactly that question, and `delegate_cancel` followed by
+	 * `delegate_restart` is the documented recovery flow, so the transitional state gets a place of its own —
+	 * published by the primitive, so no caller can forget to.
+	 *
+	 * Counted rather than a set, because two releases of one folder are reachable — a cancel's unawaited release
+	 * overlapping `delegate_clean_worktree` or a PR-close event: whichever finished first would clear the marker
+	 * while the other was still inside the removal, and the folder would look reusable again.
+	 */
+	readonly releasingWorktrees = new Map<string, number>();
+	/**
+	 * How many times a cancel has been answered for each session id in this process.
+	 *
+	 * `meta.status` cannot express a cancel: a session that arrived already `cancelled` is a conversation the
+	 * caller may still continue — that is what reattach exists for — and it answers `cancelled` to a *new*
+	 * cancel as well, so "was it cancelled before?" and "was it cancelled just now?" are the same question.
+	 * A reattach compares this count across its own await, which tells the two apart.
+	 */
+	readonly cancels = new Map<string, number>();
+	/**
+	 * Sessions with a turn actually running.
+	 *
+	 * `totalCompleted` counts turns, and `cancelSession` used to increment it whenever it was called on a
+	 * session it accepted — which, since round 11, includes an *idle* session that keeps its agent between
+	 * turns. Every idle cancel therefore charged a completion the settle path had already charged. The marker
+	 * is set by `startTurn` and cleared by whichever path ends the turn, so a cancel can tell "stop this turn"
+	 * from "put the parked agent away".
+	 */
+	readonly turnInFlight = new Set<string>();
+	/**
+	 * Bumped by `shutdown()`. A start that was floated rather than awaited (`drainQueue` fires `startNow` and
+	 * forgets it) survives `session_shutdown` otherwise: it registers into a runtime that has been cleared,
+	 * persists under whatever pi session id answers next, and leaves an agent running for a session nobody owns.
+	 * Such a start captures the epoch and stops when it no longer matches.
+	 */
+	epoch = 0;
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();
@@ -131,6 +181,11 @@ export class DelegateRuntime {
 	 *  bug test/test-devin-tui-safety.ts guards (see its note on the worktree failure path). */
 	private safe(message: string): string {
 		return stripAnsi(message).replace(/\s+/g, " ").trim().slice(0, 500);
+	}
+
+	/** How many cancels this conversation has been answered in this process. */
+	cancelCount(sessionId: string): number {
+		return this.cancels.get(sessionId) ?? 0;
 	}
 
 	logWarn(message: string): void {
@@ -521,6 +576,7 @@ export class DelegateRuntime {
 	 * cannot be relied on). On-disk state is untouched — recovery re-anchors it.
 	 */
 	shutdown(): void {
+		this.epoch++;
 		for (const t of this.stallTimers.values()) {
 			clearInterval(t);
 		}
@@ -537,6 +593,8 @@ export class DelegateRuntime {
 		this.pendingPermissions.clear();
 		this.cleanupClients();
 		this.sessions.clear();
+		this.turnInFlight.clear();
+		this.cancels.clear();
 		this.queue.length = 0;
 		this.configOptions.clear();
 		this.sessionDirs.clear();
