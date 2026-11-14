@@ -524,6 +524,12 @@ function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta): string | undef
 	if (rt.restarting.has(meta.sessionId)) {
 		return "a delegate_restart of this session is in flight and owns its conversation now; nothing was prompted here";
 	}
+	if (meta.status === "cancelled") {
+		// `delegate_cancel` can reach a session mid-reattach even though nothing is running yet: the record is
+		// settled, no client is registered, and the process answering is still in `session/resume`. Cancelling
+		// has to mean the prompt never fires, or "cancelled" is a message the caller gets to watch fail.
+		return "this session was cancelled while its agent was starting; nothing was prompted";
+	}
 	if (rt.sessions.get(meta.sessionId) !== meta) {
 		return "this pi closed the session while its agent was starting; nothing was prompted";
 	}

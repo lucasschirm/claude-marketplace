@@ -365,7 +365,7 @@ function conversationTakenElsewhere(rt: DelegateRuntime, meta: SessionMeta): { c
 			code: "RESTARTING",
 			error:
 				`a delegate_restart of this session is in flight, and the session it starts will own this conversation. ` +
-				`Wait for it, or delegate_cancel first; nothing was prompted here.`,
+				`Wait for it — there is nothing here to cancel yet — and nothing was prompted.`,
 		};
 	}
 	return undefined;
@@ -499,7 +499,11 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	if (!meta) {
 		return "not_found";
 	}
-	if (meta.status !== "running" && meta.status !== "stalled" && !rt.activeClients.has(targetId)) {
+	// A follow-up mid-reattach looks finished — settled, no client — but it is about to spawn an agent and
+	// prompt it, so "nothing to cancel" would be answered while a turn started anyway. The reattach itself is
+	// what makes this conversation cancellable; `reattachRefusal` stops the prompt on the way through.
+	const reattaching = rt.reattaching.has(targetId);
+	if (meta.status !== "running" && meta.status !== "stalled" && !rt.activeClients.has(targetId) && !reattaching) {
 		// Already finished. Cancelling it used to rewrite `failed` as `cancelled`, count a second completion
 		// for one turn, run the worktree release a settled session already ran, and tell the caller "the slot
 		// is free" when no slot was held.
@@ -515,11 +519,16 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 		client.notify("session/cancel", { sessionId: targetId });
 		client.dispose();
 		rt.activeClients.delete(targetId);
-	} else if (meta.pid) {
-		// The pid kill is PID-recycle-guarded by the driver's CLI name, so it comes from the driver.
+	} else if (meta.pid && !reattaching) {
+		// The pid kill is PID-recycle-guarded by the driver's CLI name, so it comes from the driver. During a
+		// reattach the recorded pid is the dead process's, and the live child is not registered yet: killing
+		// that stale number could reach whatever recycled it, while the child is disposed by the reattach instead.
 		rt.killProcessGroup(meta.pid, rt.driverCli(meta.agent));
 	}
-	rt.totalCompleted++;
+	// A reattach has no turn to complete, and the turn that already ended counted this session once.
+	if (!reattaching) {
+		rt.totalCompleted++;
+	}
 	rt.persistSessionMeta(meta, true);
 	rt.persistState();
 	rt.updateStatusUI();

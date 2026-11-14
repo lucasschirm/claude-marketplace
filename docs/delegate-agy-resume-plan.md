@@ -148,6 +148,7 @@ await and answers `BUSY`, telling the caller to send it again.
 | missing, repeated and id-less queue records still end up one id per task | same |
 | a poisoned counter or an unreachable suffix cannot freeze the id generator | same |
 | abandoning a queued restart does not promote a session half that is dead | same |
+| a cancel that lands mid-reattach stops the prompt instead of denying there is anything to cancel | `test/test-delegate-resume.ts` |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -341,6 +342,35 @@ The same round caught the abandoned-queue pointer promoting whatever session hal
 only arrives from disk — live writers emit one half each — and a disk half can name a session that died, which
 would refuse the parent as "restarted as `<gone>`" with nothing behind the id until the next boot reconciled it.
 The half is checked against `rt.sessions` now, and a pointer naming nothing is dropped rather than inherited.
+
+
+### §7.6 Cancelling a session that is still connecting, and where a test's writes actually land (round 11)
+
+**A follow-up mid-reattach looked finished to `delegate_cancel`.** The gate asked for `running`/`stalled` or an
+`activeClients` entry, and during `await reattachSession` the record is settled and no client is registered —
+`reattachOnce` registers one only after the spawn and the resume handshake. So `delegate_cancel` answered
+"nothing to cancel" while the reattach went on to spawn an agent and prompt it: the caller was told there was
+nothing to stop, and then watched a turn start. The window is the whole handshake, and the path is new in this
+PR — before it, a dead connection got `NO_CONNECTION` without spawning anything. Three changes, all in the shape
+the spawn path already used (`startNow` refuses to start a session that was cancelled during `configureSession`):
+the gate also treats `rt.reattaching` as cancellable; `reattachRefusal` refuses a record that was cancelled while
+its agent was starting, disposing the child it just spawned; and that branch neither kills the recorded pid (a
+recycled number belonging to something else — the live child is not registered yet) nor counts a completion for
+a turn that never ran.
+
+**The delegate test suite was writing into the developer's real `~/.pi`.** `makeStub` redirects `HOME`, and
+`storage.ts` resolves `os.homedir()` *when a write happens*, so any write still in flight after `restoreHome`
+resolved the real home. Round 11 found the receipts: `~/.pi/agent/delegate_task/pi-test/state.json`, mtime equal
+to the last run, holding this suite's prompts and reminted queue ids, alongside `meta.json` litter from four
+different test files — some of it older than this branch. Round 10's `Promise.all` made it systematic (every
+case's continuation ran after a sibling had restored the environment), so the case tables are sequential tests
+again; the helper fix is what makes the class go away. A finished stub now keeps its directory answering
+`os.homedir()` until the next stub takes over, and every directory a run created is reclaimed when the process
+exits. A late write belongs somewhere, and that somewhere must not be whoever ran the tests.
+
+**Two refusals prescribed a `delegate_cancel` that could not work.** During an in-flight restart there is nothing
+cancelable at the old id — the record is settled and the successor is not registered yet — so the `RESTARTING`
+text no longer suggests it. The mid-reattach one does, and after the change above it is true.
 
 
 ## 8. Out of scope

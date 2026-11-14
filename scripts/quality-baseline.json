@@ -19,9 +19,9 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
+    "biome.suspicious/noShadow": 78,
     "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
-    "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 59,
     "biome.suspicious/noExplicitAny": 158,
@@ -46,11 +46,11 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 579,
+    "extensions/lib/delegate/queue.ts": 588,
     "extensions/lib/delegate/recovery.ts": 464,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 580,
-    "extensions/lib/delegate/session.ts": 589,
+    "extensions/lib/delegate/session.ts": 595,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
     "extensions/lib/delegate/tools-session.ts": 428,
@@ -799,8 +799,16 @@
         "extensions/lib/delegate/queue.ts: 579 lines > baseline 577 (files may only shrink)",
         "extensions/lib/delegate/recovery.ts: 464 lines > baseline 446 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round eleven made a mid-reattach cancel real and stopped tests writing to the real home.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 588 lines > baseline 579 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 595 lines > baseline 589 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "e53a921",
+  "generatedFrom": "e4387e8",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

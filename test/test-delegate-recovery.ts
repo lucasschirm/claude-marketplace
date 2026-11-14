@@ -447,93 +447,100 @@ test("restored queue ids stay unique, because a pointer matches one by id", asyn
 	}
 });
 
-test("a queue restored without ids, or with repeats, ends up with one id per task", async () => {
-	// Both ways a duplicate arrives: records that never had an id, and records that repeat one. Round 9 fixed
-	// the loop that could not terminate and left this open — `normalizeTask` minted from `totalInvoked` without
-	// advancing it, so two id-less records got the same id, and a record reminted later got that id again.
-	// Uniqueness is load-bearing: a `{queueId}` pointer, `delegate_cancel` and `abandonQueuedRestart` all match
-	// on it, so twins make one dead restart look like it is still waiting.
-	const cases: Array<Array<Record<string, unknown>>> = [
-		[
+const queueShapes: Array<{ name: string; queue: Array<Record<string, unknown>> }> = [
+	{
+		name: "no ids at all",
+		queue: [
 			{ prompt: "a", agent: "devin" },
 			{ prompt: "b", agent: "devin" },
 		],
-		[
+	},
+	{
+		name: "a missing id ahead of a repeated one",
+		queue: [
 			{ prompt: "a", agent: "devin" },
 			{ prompt: "b", agent: "devin", queueId: "q-7" },
 			{ prompt: "c", agent: "devin", queueId: "q-7" },
 		],
-		[
+	},
+	{
+		name: "a repeated id ahead of a missing one",
+		queue: [
 			{ prompt: "a", agent: "devin", queueId: "q-7" },
 			{ prompt: "b", agent: "devin", queueId: "q-7" },
 			{ prompt: "c", agent: "devin" },
 		],
-		[
+	},
+	{
+		name: "a repeated id that is not numeric",
+		queue: [
 			{ prompt: "a", agent: "devin", queueId: "weird" },
 			{ prompt: "b", agent: "devin", queueId: "weird" },
 		],
-	];
-	// One pass per shape, in parallel: `recoverState` is awaited once outside the loop, both because a boot is
-	// a sequence and because the gate that counts awaits inside loops should stay where it is.
-	await Promise.all(
-		cases.map(async (queue) => {
-			const { rt, home, restoreHome } = makeStub();
-			noCapacity(rt);
-			writeState(home, "delegate_task", "pi-test", { sessionIds: [], totalInvoked: 5, queue }, {});
-			try {
-				await recoverState(rt, "pi-test");
-				const ids = rt.queue.map((task) => task.queueId);
-				assert.strictEqual(rt.queue.length, queue.length, `nothing is dropped: ${JSON.stringify(ids)}`);
-				assert.strictEqual(new Set(ids).size, ids.length, `queue ids collide: ${JSON.stringify(ids)}`);
-				for (const id of ids) {
-					assert.ok(id && id !== "q-NaN", `an unusable id reached the queue: ${JSON.stringify(ids)}`);
-				}
-			} finally {
-				restoreHome();
-			}
-		}),
-	);
-});
+	},
+];
 
-test("a counter that is not a counter, and a suffix no counter reaches, both cost nothing", async () => {
-	// `state.json` is the file this code base itself calls plantable. `totalInvoked: "abc"` used to make every
-	// mint for the boot `q-NaN` (`Math.max` propagates NaN), and a `q-999999999999999999999` on disk parses to
-	// 1e21, where `++` is absorbed and every mint is the same string forever — one that no longer looks like a
-	// queue id, so the next boot cannot see the value that stalled it either.
-	const poisoned = ["abc", null, {}, -4, 1.5, 1e21];
-	await Promise.all(
-		poisoned.map(async (totalInvoked) => {
-			const { rt, home, restoreHome } = makeStub();
-			noCapacity(rt);
-			writeState(
-				home,
-				"delegate_task",
-				"pi-test",
-				{
-					sessionIds: [],
-					totalInvoked,
-					queue: [
-						{ prompt: "a", agent: "devin", queueId: "q-999999999999999999999" },
-						{ prompt: "b", agent: "devin", queueId: "q-999999999999999999999" },
-						{ prompt: "c", agent: "devin" },
-					],
-				},
-				{},
-			);
-			try {
-				await recoverState(rt, "pi-test");
-				const ids = rt.queue.map((task) => task.queueId);
-				assert.strictEqual(new Set(ids).size, ids.length, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
-				for (const id of ids) {
-					assert.match(id, QUEUE_ID_RE, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
-				}
-				assert.ok(rt.totalInvoked <= 1_000_000_000, `the generator was frozen at ${rt.totalInvoked}`);
-			} finally {
-				restoreHome();
+// One test per shape, not one test looping over shapes: `recoverState` awaits, and `makeStub` redirects a
+// process-global HOME, so cases interleaved by `Promise.all` run their continuations after a sibling has
+// restored the environment — and the writes those continuations make then resolve the real `~/.pi`. Sequential
+// tests keep HOME wherever their own stub put it, which is the whole point of the redirect.
+for (const shape of queueShapes) {
+	test(`a queue restored with ${shape.name} still ends up with one id per task`, async () => {
+		const { rt, home, restoreHome } = makeStub();
+		noCapacity(rt);
+		writeState(home, "delegate_task", "pi-test", { sessionIds: [], totalInvoked: 5, queue: shape.queue }, {});
+		try {
+			await recoverState(rt, "pi-test");
+			const ids = rt.queue.map((task) => task.queueId);
+			assert.strictEqual(rt.queue.length, shape.queue.length, `nothing is dropped: ${JSON.stringify(ids)}`);
+			assert.strictEqual(new Set(ids).size, ids.length, `queue ids collide: ${JSON.stringify(ids)}`);
+			for (const id of ids) {
+				assert.ok(id && id !== "q-NaN", `an unusable id reached the queue: ${JSON.stringify(ids)}`);
 			}
-		}),
-	);
-});
+		} finally {
+			restoreHome();
+		}
+	});
+}
+
+// A `state.json` counter that is not a counter, and a queue id past what a counter can reach. Round 10 found
+// both: `"abc"` propagated NaN through `Math.max` and made every mint `q-NaN`, while `q-999999999999999999999`
+// parsed to 1e21, where `++` is absorbed — every mint the same string, and one that no longer looks like a queue
+// id, so the next boot cannot see the value that stalled it.
+const poisonedCounters: unknown[] = ["abc", null, {}, -4, 1.5, 1e21];
+
+for (const totalInvoked of poisonedCounters) {
+	test(`a persisted counter of ${JSON.stringify(totalInvoked)} cannot freeze the id generator`, async () => {
+		const { rt, home, restoreHome } = makeStub();
+		noCapacity(rt);
+		writeState(
+			home,
+			"delegate_task",
+			"pi-test",
+			{
+				sessionIds: [],
+				totalInvoked,
+				queue: [
+					{ prompt: "a", agent: "devin", queueId: "q-999999999999999999999" },
+					{ prompt: "b", agent: "devin", queueId: "q-999999999999999999999" },
+					{ prompt: "c", agent: "devin" },
+				],
+			},
+			{},
+		);
+		try {
+			await recoverState(rt, "pi-test");
+			const ids = rt.queue.map((task) => task.queueId);
+			assert.strictEqual(new Set(ids).size, ids.length, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
+			for (const id of ids) {
+				assert.match(id, QUEUE_ID_RE, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
+			}
+			assert.ok(rt.totalInvoked <= 1_000_000_000, `the generator was frozen at ${rt.totalInvoked}`);
+		} finally {
+			restoreHome();
+		}
+	});
+}
 
 test("abandoning a queued restart hands the conversation back, unless a live successor owns it", () => {
 	// The `{queueId}` half named an entry that will never start. A session half that names something live is

@@ -21,7 +21,7 @@ import { DelegateTransport } from "../extensions/lib/delegate/transport.ts";
 import { agyDriver } from "../extensions/lib/delegate/drivers/agy.ts";
 import { devinDriver } from "../extensions/lib/delegate/drivers/devin.ts";
 import { markSuperseded, spawnSession, startTurn } from "../extensions/lib/delegate/session.ts";
-import { followUp } from "../extensions/lib/delegate/queue.ts";
+import { cancelSession, followUp } from "../extensions/lib/delegate/queue.ts";
 import { getEventsLogPath } from "../extensions/lib/delegate/storage.ts";
 import { normalizeMeta } from "../extensions/lib/delegate/recovery.ts";
 import { makeStub, metaFor } from "./helpers/delegate-stub.ts";
@@ -50,6 +50,7 @@ const NOT_IN_STORE_RE = /not a conversation this store has/;
 const NO_SESSION_ID_RE = /without a session id/;
 const STARTED_ORPHANED_RE = /while its agent was starting/;
 const NEW_SESSION_ID_RE = /brave-walrus/;
+const CANCELLED_MID_REATTACH_RE = /cancelled while its agent was starting/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
 function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number } } = {}) {
@@ -352,6 +353,36 @@ test("a restart that lands mid-reattach stops the prompt", async () => {
 		assert.match(res.error, NEW_SESSION_ID_RE, "the refusal says which session owns the conversation now");
 		assert.strictEqual(rt.activeClients.get("conv-1"), undefined, "the sibling's agent is not installed");
 		assert.strictEqual(stub.disposed(), 1, "and the child spawned for it is disposed");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a cancel that lands mid-reattach stops the prompt instead of saying there is nothing to cancel", async () => {
+	// A follow-up that is reconnecting looks finished to `delegate_cancel`: settled status, no client, and the
+	// process still inside `session/resume`. Answering "nothing to cancel" while the prompt fires anyway is the
+	// bug; the cancel has to reach the record, and the reattach has to refuse to prompt it.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ resume: { delayMs: 80 } });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		const completedBefore = rt.totalCompleted;
+		const waiting = followUp(rt, meta, "next");
+		await new Promise((done) => setTimeout(done, 20));
+		assert.strictEqual(rt.reattaching.has("conv-1"), true, "the reattach is in flight when the cancel lands");
+		assert.strictEqual(await cancelSession(rt, "conv-1"), "session", "a conversation mid-reattach is cancellable");
+		const res = failure(await waiting);
+		assert.strictEqual(res.code, "REATTACH_FAILED");
+		assert.match(res.error, CANCELLED_MID_REATTACH_RE);
+		assert.strictEqual(
+			stub.calls.some((c) => c.method === "session/prompt"),
+			false,
+			"a cancelled conversation is not prompted after the cancel answered",
+		);
+		assert.strictEqual(stub.disposed(), 1, "and the child spawned for it is disposed");
+		assert.strictEqual(meta.status, "cancelled");
+		assert.strictEqual(rt.totalCompleted, completedBefore, "a turn that never ran is not a completion");
 	} finally {
 		restoreHome();
 	}
