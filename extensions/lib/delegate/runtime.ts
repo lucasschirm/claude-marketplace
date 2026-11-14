@@ -55,8 +55,12 @@ export class DelegateRuntime {
 	 * and is about not to be. `delegate_restart` asks exactly that question, and `delegate_cancel` followed by
 	 * `delegate_restart` is the documented recovery flow, so the transitional state gets a place of its own —
 	 * published by the primitive, so no caller can forget to.
+	 *
+	 * Counted rather than a set, because two releases of one folder are reachable — a cancel's unawaited release
+	 * overlapping `delegate_clean_worktree` or a PR-close event: whichever finished first would clear the marker
+	 * while the other was still inside the removal, and the folder would look reusable again.
 	 */
-	readonly releasingWorktrees = new Set<string>();
+	readonly releasingWorktrees = new Map<string, number>();
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();

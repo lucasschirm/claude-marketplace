@@ -16,7 +16,6 @@ import { detectPullRequest } from "./pr-detect.ts";
 import { agentTitle, findAgent } from "./registry.ts";
 import { commandForCaller } from "./permissions.ts";
 import {
-	clearSuperseded,
 	configureSession,
 	installDrainer,
 	markSuperseded,
@@ -146,9 +145,15 @@ function abandonQueuedRestart(rt: DelegateRuntime, task: QueuedTask): void {
 		return;
 	}
 	const parent = rt.sessions.get(task.parentSessionId);
-	if (parent?.supersededBy?.queueId === task.queueId) {
-		clearSuperseded(rt, parent);
+	const pointer = parent?.supersededBy;
+	if (!parent || !pointer || pointer.queueId !== task.queueId) {
+		return;
 	}
+	// Only the half this entry was: a pointer that also names a session still has somewhere to send a caller,
+	// so dropping the whole thing would strand the successor's parent too.
+	parent.supersededBy = pointer.sessionId ? { sessionId: pointer.sessionId } : undefined;
+	rt.persistSessionMeta(parent, true);
+	rt.persistState();
 }
 
 /**
@@ -202,20 +207,21 @@ async function startNow(
 
 		started.queueId = task.queueId;
 		started.parentSessionId = task.parentSessionId;
-		resolveQueuedRestart(rt, task, started.sessionId);
 		started.worktreePath = task.worktreePath;
 		started.worktreeBranch = task.worktreeBranch;
 		started.worktreeId = task.worktreeId;
 		started.parentWorktreeId = task.parentWorktreeId;
 		started.worktreeStatus = task.worktreePath ? "active" : undefined;
-		// Provenance before anything else is awaitable, and never without the folder it belongs to: a record
-		// that says "I am the restarted one" but names no worktree lets recovery point the parent at a session
-		// that cannot claim the directory, and the folder is then orphaned for good — every cleanup path skips
-		// a superseded record. Recovery rebuilds the parent's pointer from exactly this field, so the earlier
-		// it lands the narrower the window it cannot close, but a half-written claim is worse than a later one.
-		if (task.parentSessionId) {
+		// The successor's own record before anything that points at it, and before the next await. Two reasons,
+		// both about a crash landing between these writes: a claim naming no worktree orphans the folder (every
+		// cleanup path skips a superseded parent, and this record would have nothing to release), and a parent
+		// already pointing here would be a pointer to a session with no provenance — one recovery keeps, because
+		// the session exists, and cannot rebuild. Written first, the residual heals: recovery derives the
+		// pointer from this record. A plain task gets the same write for the first reason alone.
+		if (task.parentSessionId || started.worktreePath) {
 			rt.persistSessionMeta(started, true);
 		}
+		resolveQueuedRestart(rt, task, started.sessionId);
 
 		const warnings = await configureSession(rt, driver, started, client, selection);
 		if (started.status === "cancelled") {
@@ -517,9 +523,11 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	rt.updateStatusUI();
 	void drainQueue(rt);
 
-	// A superseded record's worktree belongs to the session that took its conversation, which may be working
-	// in that folder right now; the safety check in `releaseWorktree` catches uncommitted work, not that.
-	if (meta.worktreePath && meta.worktreeStatus === "active" && !meta.supersededBy) {
+	// A restart owns this folder — its pointer written, or the restart still spawning. The gate above lets a
+	// settled session through when something still holds a client for it, which is how a cancel racing a
+	// restart reaches here at all, and the safety check inside `releaseWorktree` looks at uncommitted work,
+	// not at who the folder belongs to.
+	if (meta.worktreePath && meta.worktreeStatus === "active" && !restartClaimsWorktree(rt, meta)) {
 		void releaseWorktree(rt, meta).catch((err) => rt.logError(`worktree release failed for ${meta.sessionId}: ${extractCliError(err)}`));
 	}
 	return "session";

@@ -1,7 +1,7 @@
 {
   "metrics": {
     "execLocation": 2,
-    "execTimeout": 5,
+    "execTimeout": 4,
     "mutationResultChecked": 0,
     "globalThisOwnership": 33,
     "jsonParseLocation": 8,
@@ -16,11 +16,11 @@
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
-    "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
+    "biome.performance/noAwaitInLoops": 107,
     "biome.performance/useTopLevelRegex": 617,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 59,
@@ -46,10 +46,10 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 569,
-    "extensions/lib/delegate/recovery.ts": 422,
+    "extensions/lib/delegate/queue.ts": 577,
+    "extensions/lib/delegate/recovery.ts": 446,
     "extensions/lib/delegate/registry.ts": 238,
-    "extensions/lib/delegate/runtime.ts": 576,
+    "extensions/lib/delegate/runtime.ts": 580,
     "extensions/lib/delegate/session.ts": 589,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
@@ -58,7 +58,7 @@
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 456,
     "extensions/lib/delegate/types.ts": 332,
-    "extensions/lib/delegate/worktree.ts": 233,
+    "extensions/lib/delegate/worktree.ts": 248,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
@@ -67,7 +67,7 @@
     "extensions/lib/github-review-threads.ts": 638,
     "extensions/lib/mergeability.ts": 49,
     "extensions/lib/nonblocking.ts": 494,
-    "extensions/lib/orca-client.ts": 615,
+    "extensions/lib/orca-client.ts": 618,
     "extensions/lib/pr-tasks-manager.ts": 849,
     "extensions/lib/tool-result.ts": 60,
     "extensions/observe-pr.ts": 2192,
@@ -780,8 +780,19 @@
         "extensions/lib/delegate/types.ts: 332 lines > baseline 328 (files may only shrink)",
         "extensions/lib/delegate/worktree.ts: 233 lines > baseline 201 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round nine fixed the crash and restart seams: counted releases, id generator, folder guard.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 577 lines > baseline 569 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 446 lines > baseline 422 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 580 lines > baseline 576 (files may only shrink)",
+        "extensions/lib/delegate/worktree.ts: 248 lines > baseline 233 (files may only shrink)",
+        "extensions/lib/orca-client.ts: 618 lines > baseline 615 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "f081f0b",
+  "generatedFrom": "2a05945",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

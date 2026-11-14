@@ -9,8 +9,14 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { makeStub } from "./helpers/delegate-stub.ts";
-import { createWorktree, releaseWorktree, worktreeIsReusable } from "../extensions/lib/delegate/worktree.ts";
-import { onPrClosed } from "../extensions/lib/delegate/queue.ts";
+import {
+	createWorktree,
+	markWorktreeReleasing,
+	releaseWorktree,
+	unmarkWorktreeReleasing,
+	worktreeIsReusable,
+} from "../extensions/lib/delegate/worktree.ts";
+import { cancelSession, onPrClosed } from "../extensions/lib/delegate/queue.ts";
 import { metaFor } from "./helpers/delegate-stub.ts";
 
 /** A committed repo on `feature`, with an origin so "pushed" has a meaning. */
@@ -179,6 +185,57 @@ test("a folder that is on its way out cannot take a restarted agent", async () =
 
 		await releasing;
 		assert.ok(!stub.rt.releasingWorktrees.has(made.worktreePath), "a release unregisters whatever the outcome");
+	} finally {
+		stub.restoreHome();
+		fs.rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("two releases of one folder keep it off-limits until the last one finishes", () => {
+	// A cancel's release is unawaited and `delegate_clean_worktree` or a PR-close event can start another on
+	// the same path, so "is this folder being removed" has to survive one of them finishing. As a set, the
+	// first `finally` cleared the marker while the other release was still inside the removal, and a restart
+	// in that window reused a directory that was about to disappear.
+	const stub = makeStub();
+	try {
+		const folder = "/tmp/one-folder-two-releases";
+		markWorktreeReleasing(stub.rt, folder);
+		markWorktreeReleasing(stub.rt, folder);
+		unmarkWorktreeReleasing(stub.rt, folder);
+		assert.ok(stub.rt.releasingWorktrees.has(folder), "one release finishing must not clear the other's claim");
+		unmarkWorktreeReleasing(stub.rt, folder);
+		assert.ok(!stub.rt.releasingWorktrees.has(folder), "the last release has to lift it");
+	} finally {
+		stub.restoreHome();
+	}
+});
+
+test("a cancel that overlaps a restart leaves the folder the successor is spawning into", async () => {
+	// §7.2 used to claim `cancelSession` could not reach a mid-handover folder because a restart has moved its
+	// parent out of a cancellable status. Its own gate lets a settled session through while something still
+	// holds a client for it — the sub-second case of a child whose pid is gone but whose exit event has not
+	// been delivered — so the guard is the predicate the other two call sites use.
+	const stub = makeStub();
+	const repo = makeRepo();
+	withoutOrca(stub.rt);
+	try {
+		const made = await createWorktree(stub.rt, repo);
+		const parent = metaFor("old-9", {
+			status: "idle",
+			worktreePath: made.worktreePath,
+			worktreeBranch: made.worktreeBranch,
+			worktreeStatus: "active",
+		});
+		stub.rt.sessions.set("old-9", parent);
+		stub.rt.activeClients.set("old-9", { dispose: () => {}, notify: () => {} } as never);
+		stub.rt.restarting.add("old-9");
+
+		const outcome = await cancelSession(stub.rt, "old-9");
+
+		assert.strictEqual(outcome, "session", "the cancel still cancels the session");
+		// The release is fired unawaited, so `worktreeStatus` would say "active" whether or not it started.
+		// What cannot lie is the marker: a release that began registers the path before its first await.
+		assert.ok(!stub.rt.releasingWorktrees.has(made.worktreePath), "a cancel that overlaps a restart fired a release on the folder anyway");
 	} finally {
 		stub.restoreHome();
 		fs.rmSync(repo, { recursive: true, force: true });

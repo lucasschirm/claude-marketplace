@@ -444,3 +444,55 @@ test("restored queue ids stay unique, because a pointer matches one by id", asyn
 		restoreHome();
 	}
 });
+
+test("a duplicate restored queue id terminates recovery instead of spinning forever", { timeout: 30_000 }, async () => {
+	// The timeout is the assertion. Round 8 built its replacement id from values the `while` loop never
+	// changed — an offset over a counter fixed at boot — so a candidate that was already taken repeated
+	// forever, inside `recoverState`, which every tool path awaits. `totalInvoked: 5` with two entries named
+	// `q-7` is the smallest shape that reaches it, and a half-written `state.json` is the same shape.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{
+			sessionIds: [],
+			totalInvoked: 5,
+			queue: [
+				{ prompt: "a", agent: "devin", queueId: "q-7" },
+				{ prompt: "b", agent: "devin", queueId: "q-7" },
+			],
+		},
+		{},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		const ids = rt.queue.map((task) => task.queueId);
+		assert.strictEqual(rt.queue.length, 2, "nothing is dropped to make ids unique");
+		assert.strictEqual(new Set(ids).size, 2, `queue ids collide: ${JSON.stringify(ids)}`);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("the queue-id generator starts above every id restored from disk", async () => {
+	// `totalInvoked` is what `delegate()` mints from. A restored `q-9` with the counter still at 2 means the
+	// ninth delegation gets `q-9` too — one lookup key, two tasks, and a restart pointer matched by that key.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{ sessionIds: [], totalInvoked: 2, queue: [{ prompt: "a", agent: "devin", queueId: "q-9" }] },
+		{},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.strictEqual(rt.queue.length, 1);
+		assert.ok(rt.totalInvoked >= 9, `the id generator sits under an id already on disk: ${rt.totalInvoked}`);
+	} finally {
+		restoreHome();
+	}
+});

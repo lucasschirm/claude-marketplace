@@ -160,6 +160,21 @@ function worktreeFolder(repo: string, branch: string): string {
  * or left uncommitted edits, and only the first two are recoverable after `rm -rf`. An unknown answer
  * keeps the folder.
  */
+/** Publish a folder as mid-release. Counted: see `DelegateRuntime.releasingWorktrees`. */
+export function markWorktreeReleasing(rt: DelegateRuntime, worktreePath: string): void {
+	rt.releasingWorktrees.set(worktreePath, (rt.releasingWorktrees.get(worktreePath) ?? 0) + 1);
+}
+
+/** Retire one publication; the folder stops being off-limits only when the last one goes. */
+export function unmarkWorktreeReleasing(rt: DelegateRuntime, worktreePath: string): void {
+	const left = (rt.releasingWorktrees.get(worktreePath) ?? 1) - 1;
+	if (left > 0) {
+		rt.releasingWorktrees.set(worktreePath, left);
+	} else {
+		rt.releasingWorktrees.delete(worktreePath);
+	}
+}
+
 /** Whether this record's folder can take a restarted agent: there, not released, not on its way out. */
 export function worktreeIsReusable(rt: DelegateRuntime, meta: SessionMeta): boolean {
 	if (!meta.worktreePath) {
@@ -184,11 +199,11 @@ export async function releaseWorktree(
 	if (!meta.worktreePath || meta.worktreeStatus === "released") {
 		return releaseWorktreeNow(rt, meta, opts);
 	}
-	rt.releasingWorktrees.add(meta.worktreePath);
+	markWorktreeReleasing(rt, meta.worktreePath);
 	try {
 		return await releaseWorktreeNow(rt, meta, opts);
 	} finally {
-		rt.releasingWorktrees.delete(meta.worktreePath);
+		unmarkWorktreeReleasing(rt, meta.worktreePath);
 	}
 }
 

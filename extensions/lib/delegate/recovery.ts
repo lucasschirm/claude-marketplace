@@ -145,6 +145,9 @@ export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): Queu
  * so a session may still be resolving when the pass reports. It counts what recovery *found*, which is
  * what a boot notice and a test both want; it is not a settlement count.
  */
+/** A lookup id, as `queue.ts` mints it. */
+const QUEUE_ID_RE = /^q-(\d+)$/;
+
 export interface RecoveryReport {
 	recovered: number;
 	orphanProcessesKilled: number;
@@ -211,14 +214,22 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 		// Unique by the time anything reads them. A `{queueId}` pointer is matched by id, so two entries sharing
 		// one make a dead restart look like it is still waiting; `normalizeTask` mints a missing id without
 		// seeing its siblings, so this pass — the one that has the whole queue — fixes collisions.
+		// `totalInvoked` is the id generator, so it has to start above every id already on disk: a restored
+		// `q-50` and a future `q-${++totalInvoked}` are the same lookup key, and that key is what a restart
+		// pointer is matched by and what `delegate_cancel` takes.
+		rt.totalInvoked = Math.max(rt.totalInvoked, highestQueueId(state.queue));
 		const restoredIds = new Set<string>();
 		for (const t of state.queue) {
 			const task = normalizeTask(t, rt);
 			if (!task) {
 				continue;
 			}
-			while (!task.queueId || restoredIds.has(task.queueId)) {
-				task.queueId = `q-${rt.totalInvoked + restoredIds.size + 1}`;
+			// Unique by one mint, never a retry: the counter has been cleared above every id on disk and only
+			// climbs, so the first candidate is already free. A `while` here would have no escape — a
+			// synchronous spin inside recovery cannot even be timed out by a test, because the timer needs the
+			// event loop the loop is holding, and every tool path awaits this pass.
+			if (task.queueId === undefined || restoredIds.has(task.queueId)) {
+				task.queueId = `q-${++rt.totalInvoked}`;
 			}
 			restoredIds.add(task.queueId);
 			rt.queue.push(task);
@@ -375,6 +386,19 @@ function reconcileInFlight(rt: DelegateRuntime, meta: SessionMeta, report: Recov
  * Deriving first is what makes the second safe: a pointer derived from something that came back is not cleared.
  *
  */
+/** The highest numeric queue id in a restored queue, so the generator can start above it. */
+function highestQueueId(entries: unknown[]): number {
+	let highest = 0;
+	for (const raw of entries) {
+		const id = (raw as { queueId?: unknown } | null)?.queueId;
+		const match = typeof id === "string" ? QUEUE_ID_RE.exec(id) : null;
+		if (match) {
+			highest = Math.max(highest, Number.parseInt(match[1], 10));
+		}
+	}
+	return highest;
+}
+
 function reconcileRestartPointers(rt: DelegateRuntime): void {
 	for (const meta of rt.sessions.values()) {
 		if (!meta.parentSessionId) {

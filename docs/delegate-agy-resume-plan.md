@@ -140,7 +140,10 @@ await and answers `BUSY`, telling the caller to send it again.
 | a pointer naming nothing is dropped, one naming a restart still queued is kept | same |
 | a queued task naming its parent marks the parent too, in the boot that restores it | same |
 | restored queue ids are unique, so a pointer cannot match a task that is not its restart | same |
-| a folder mid-release is not reusable, and the release publishes itself before its first await | `test/test-delegate-worktree.ts` |
+| a folder mid-release is not reusable, and the release publishes itself before its first await | same |
+| two overlapping releases of one folder keep it off-limits until the last one finishes | same |
+| a cancel that overlaps a restart does not release the folder the successor is spawning into | same |
+| a duplicate restored queue id terminates recovery and mints above every id on disk | `test/test-delegate-recovery.ts` |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -207,19 +210,21 @@ promises that may not match the records on disk. Recovery now reads them back:
   the folder the restart reused: the exact hazard §7.1 exists to prevent, arriving through a crash instead of
   through a race. The provenance write now happens the moment `parentSessionId` is assigned in `startNow`,
   because the narrower that window, the less recovery has to infer.
-* **A pointer naming nothing is handed back.** A `{queueId}` entry absent from the restored queue can only
-  mean the restart never produced a session — `resolveQueuedRestart` rewrites to `{sessionId}` before a
-  successor can exist — and a `{sessionId}` whose record could not be read names a ghost either way. The
-  refusal would send every caller to something that does not exist, permanently, while every worktree path
-  skips the record, so the folder became unreclaimable too. Recovery clears it and logs what it dropped.
-  Deriving first is what makes this safe: a pointer derived from a live successor is never cleared after.
+* **A pointer naming nothing is handed back.** Absent means no successor **with provenance** came back. It does
+  not mean the restart never happened: `drainQueue` pops and persists the entry before the successor is
+  spawned, so a crash there leaves a `{queueId}` with nothing queued and possibly a record on disk that never
+  got its `parentSessionId` — a session existed, and nothing says whose it was. Whatever the history, a pointer
+  to an absent target sends every caller somewhere they cannot act on, permanently, while each worktree path
+  skips the record and the folder stops being reclaimable. Recovery clears it and logs what it dropped. Deriving
+  first is what makes this safe: a pointer derived from something that came back is not cleared after.
 * **The in-flight claim covers the folder too.** Through a restart's spawn window the parent is settled and
   unmarked, and `releaseWorktree`'s safety check looks at uncommitted work, not ownership: a
   `delegate_clean_worktree` sweep or a PR closed in that window deleted the directory the successor was about
   to start in. That sweep and the PR-closed cleanup now ask `restartClaimsWorktree` — the pointer check plus
-  `rt.restarting` — and naming a session to `delegate_clean_worktree` refuses on either. `cancelSession` needs
-  no such guard: by the time a restart is in flight it has already moved its parent out of a cancellable
-  status, so its release cannot run for the folder mid-handover.
+  `rt.restarting` — and naming a session to `delegate_clean_worktree` refuses on either. `cancelSession` asks
+  the same predicate: its gate lets a *settled* session through when something still holds a client for it, so
+  a cancel that overlaps a restart really can reach the release — and the sub-second case (child pid gone, exit
+  event not yet delivered, stale client entry) is exactly the moment the folder is mid-handover.
 
 One detail is load-bearing in the tests rather than in the code: `normalizeMeta` rebuilds a pointer with
 **exactly the keys that were set**, so a `{ queueId }` round-trips into `{ queueId }`. Growing an
@@ -264,6 +269,47 @@ claim that an absent `{queueId}` "can only mean the restart never produced a ses
 holds: the crash can land after the entry was popped, leaving a successor that never got its provenance. The
 decision to hand the conversation back is unchanged; the reason is that no successor *with provenance* came
 back, which is what the code can actually know.
+
+Round 8's commit message said that second sentence had been rewritten. It had rewritten the comment in
+`recovery.ts` and not the sentence in this document, and round 9 caught §7.2 still contradicting §7.3. The fix
+is in §7.2 now. A correction that lands in the summary of a change and not in the thing being corrected is not
+a correction — which is worth writing down, because the commit message is what nobody re-reads.
+
+### §7.4 What round 9 found in round 8's own fixes
+
+* **A dedupe loop that could not terminate.** The replacement id round 8 minted was
+  `q-${rt.totalInvoked + restoredIds.size + 1}`, and both terms are fixed for the duration of one task's
+  `while`: when the candidate was already taken the loop spun forever inside `recoverState`, which every tool
+  path awaits. Crafted state reaches it in one line (`totalInvoked: 5` with two entries named `q-7`), and a
+  half-written or hand-edited `state.json` is not far away. Recovery now raises `totalInvoked` above the
+  highest numeric id on disk, and a duplicate is replaced by a single `++rt.totalInvoked` rather than by a
+  retry: the counter has been cleared above everything on disk and only climbs, so the first candidate is
+  already free. That also closes the finding's second half: `totalInvoked` *is* the id generator, so ids restored from disk
+  have to sit below the next mint — otherwise a restored `q-50` and a future `q-50` are one lookup key, and
+  the ambiguity the dedupe exists to remove comes back through the counter. The retry loop is gone rather than
+  bounded, because a synchronous spin in recovery cannot even be timed out — a test hung on it while the
+  harness waited for an event loop the spin was holding.
+* **The marker was a set, and two releases overlap.** `cancelSession` fires its release unawaited, and
+  `delegate_clean_worktree` or a PR-close event can start another on the same path. Both added the same
+  element; whichever finished first deleted it while the other was still inside `removeOrcaWorktree`, and the
+  folder looked reusable again. It is a count now (`markWorktreeReleasing` / `unmarkWorktreeReleasing`), and
+  the last publication is what lifts it.
+* **Write the record, then the pointer that names it.** Round 8 moved the worktree fields ahead of the
+  successor's write but left `resolveQueuedRestart` — which writes the parent's `{sessionId}` pointer — before
+  that write. Crashed between the two, the parent pointed at a successor with no provenance and no folder:
+  recovery keeps a pointer whose session exists, so nothing healed and the folder leaked. The successor's own
+  record going first makes the residual self-healing, because recovery derives pointers from it.
+* **The same leak for a session that never restarted.** The early persist was gated on `parentSessionId`, so an
+  ordinary task assigned its worktree fields without a write: die during `configureSession` and a provisioned
+  folder belongs to a record that does not know it exists. Pre-existing on `main`; the gate is
+  `parentSessionId || worktreePath` now.
+* **`cancelSession` needed the folder guard after all**, for the reason §7.2 had dismissed: its settled-session
+  gate passes while a client is still registered, so a cancel can overlap a restart. One line, the same
+  predicate as the other two call sites.
+* **Two smaller truths.** Abandoning a queued restart clears only the `{queueId}` half of a pointer, leaving a
+  session half that still names somewhere to go; and the `git worktree remove` fallback behind
+  `removeOrcaWorktree` got the mutation timeout its sibling calls already carried, because a hung git there
+  would pin a folder's release marker forever.
 
 ## 8. Out of scope
 
