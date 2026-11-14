@@ -18,6 +18,14 @@
 //   FAKE_NEW_FAIL_FILE if this file exists, the first session/new to claim it (atomic rename) fails
 //   FAKE_STOP_REASON   the stopReason answered for session/prompt (default "end_turn"). A truncating
 //                      agent is the case the extension must not report as success.
+//   FAKE_STORE_DIR     a directory standing in for an agent that keeps its OWN session store across
+//                      processes (`agy-acp`, issue #56). With it set, a conversation outlives the process
+//                      that created it and `session/prompt` for one this process did not create is refused
+//                      until `session/resume` adopts it — which is the difference between "the engine
+//                      prompts the recorded id" and "the engine prompts the recorded id after asking".
+//                      Every call also appends to `<store>/<id>.calls`, so a test reads the order the wire
+//                      actually had rather than trusting a mock.
+//   FAKE_RESUME_NOTES  comma-separated notes the restore answer reports (a mode the agent corrected).
 //
 // It mimics real `devin acp` behavior that matters to the extension:
 //  - streams session/update events (agent_message_chunk, tool_call, usage_update)
@@ -45,6 +53,44 @@ const permissionCount = parseInt(process.env.FAKE_PERMISSION_COUNT || "1", 10);
 const permissionCommand = process.env.FAKE_PERMISSION_COMMAND || "rg -l table-access-policy backend/test/help/";
 const newFailFile = process.env.FAKE_NEW_FAIL_FILE || "";
 const stopReason = process.env.FAKE_STOP_REASON || "end_turn";
+const storeDir = process.env.FAKE_STORE_DIR || "";
+const resumeNotes = (process.env.FAKE_RESUME_NOTES || "")
+	.split(",")
+	.map((s) => s.trim())
+	.filter(Boolean);
+
+// The store is the agent's, not the extension's: it is the only thing here that survives the process, so
+// "the conversation is still there" and "this process knows about it" are two different facts.
+function storeWrite(id, suffix, content) {
+	if (!storeDir) {
+		return;
+	}
+	try {
+		fs.mkdirSync(storeDir, { recursive: true });
+		fs.writeFileSync(`${storeDir}/${id}.${suffix}`, content);
+	} catch {}
+}
+
+function storeRead(id, suffix) {
+	if (!storeDir) {
+		return "";
+	}
+	try {
+		return fs.readFileSync(`${storeDir}/${id}.${suffix}`, "utf8");
+	} catch {
+		return "";
+	}
+}
+
+function recordCall(id, name) {
+	if (!storeDir || !id) {
+		return;
+	}
+	try {
+		fs.mkdirSync(storeDir, { recursive: true });
+		fs.appendFileSync(`${storeDir}/${id}.calls`, `${name}\n`);
+	} catch {}
+}
 
 // Claim the one-shot failure: rename is atomic, so of several concurrent spawns exactly one fails.
 function claimNewFailure() {
@@ -91,6 +137,14 @@ const asOptions = (values) => values.map((value) => ({ value, name: value }));
 
 let sessionId = null;
 let pendingPromptId = null;
+/** The conversation this process may prompt: one it created, or one `session/resume` adopted. */
+let adopted = null;
+
+const configOptions = () => [
+	{ id: "mode", name: "Mode", options: asOptions(MODE_VOCAB) },
+	{ id: "model", name: "Model", options: asOptions(MODEL_VOCAB) },
+	{ id: "thought_level", name: "Thought", options: asOptions(["medium", "high", "max"]) },
+];
 
 // Requests this server sent, waiting for the client's response: id -> handler(response)
 const outgoing = new Map();
@@ -127,15 +181,11 @@ function finishTurn(promptId, text) {
 
 function answerSessionNew(msg) {
 	sessionId = `fake-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	adopted = sessionId;
+	storeWrite(sessionId, "created", msg.params?.cwd ?? "");
+	recordCall(sessionId, `new ${process.pid}`);
 	send({ jsonrpc: "2.0", id: msg.id, result: { sessionId } });
-	update(sessionId, {
-		sessionUpdate: "config_option_update",
-		configOptions: [
-			{ id: "mode", name: "Mode", options: asOptions(MODE_VOCAB) },
-			{ id: "model", name: "Model", options: asOptions(MODEL_VOCAB) },
-			{ id: "thought_level", name: "Thought", options: asOptions(["medium", "high", "max"]) },
-		],
-	});
+	update(sessionId, { sessionUpdate: "config_option_update", configOptions: configOptions() });
 	if (sendUnknownRequest) requestClient("unknown-1", "fs/read_text_file", { sessionId, path: "/etc/hostname" }, () => {});
 }
 
@@ -199,7 +249,45 @@ rl.on("line", (line) => {
 		} else {
 			send({ jsonrpc: "2.0", id: msg.id, result: {} });
 		}
+	} else if (m === "session/resume") {
+		// The shape `agy-acp` answers with (session-restore.ts): both params or nothing, the store's own
+		// refusals, and the same selection state `session/new` gave — no replay, which is the whole point.
+		const id = typeof msg.params?.sessionId === "string" ? msg.params.sessionId : "";
+		const cwd = typeof msg.params?.cwd === "string" ? msg.params.cwd : "";
+		if (!id || !cwd) {
+			send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "session/resume requires a sessionId and a cwd" } });
+			return;
+		}
+		const recordedCwd = storeRead(id, "created");
+		if (!recordedCwd) {
+			recordCall(id, `resume-unknown ${process.pid}`);
+			send({ jsonrpc: "2.0", id: msg.id, error: { code: -32002, message: `session ${id} is not a conversation this store has` } });
+			return;
+		}
+		if (recordedCwd !== cwd) {
+			recordCall(id, `resume-cwd-mismatch ${process.pid}`);
+			send({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: `session ${id} belongs to ${recordedCwd}, not ${cwd}` } });
+			return;
+		}
+		sessionId = id;
+		adopted = id;
+		recordCall(id, `resume ${process.pid}`);
+		send({
+			jsonrpc: "2.0",
+			id: msg.id,
+			result: { sessionId: id, configOptions: configOptions(), _meta: { restored: { cwd, notes: resumeNotes, turns: 1 } } },
+		});
 	} else if (m === "session/prompt") {
+		if (storeDir && adopted !== msg.params?.sessionId) {
+			recordCall(msg.params?.sessionId, `prompt-refused ${process.pid}`);
+			send({
+				jsonrpc: "2.0",
+				id: msg.id,
+				error: { code: -32002, message: `session/prompt for unknown session ${msg.params?.sessionId}` },
+			});
+			return;
+		}
+		recordCall(msg.params?.sessionId, `prompt ${process.pid}`);
 		const promptId = msg.id;
 		pendingPromptId = promptId;
 		marker(turnMarker);

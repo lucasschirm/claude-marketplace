@@ -160,7 +160,54 @@ function worktreeFolder(repo: string, branch: string): string {
  * or left uncommitted edits, and only the first two are recoverable after `rm -rf`. An unknown answer
  * keeps the folder.
  */
+/** Publish a folder as mid-release. Counted: see `DelegateRuntime.releasingWorktrees`. */
+export function markWorktreeReleasing(rt: DelegateRuntime, worktreePath: string): void {
+	rt.releasingWorktrees.set(worktreePath, (rt.releasingWorktrees.get(worktreePath) ?? 0) + 1);
+}
+
+/** Retire one publication; the folder stops being off-limits only when the last one goes. */
+export function unmarkWorktreeReleasing(rt: DelegateRuntime, worktreePath: string): void {
+	const left = (rt.releasingWorktrees.get(worktreePath) ?? 1) - 1;
+	if (left > 0) {
+		rt.releasingWorktrees.set(worktreePath, left);
+	} else {
+		rt.releasingWorktrees.delete(worktreePath);
+	}
+}
+
+/** Whether this record's folder can take a restarted agent: there, not released, not on its way out. */
+export function worktreeIsReusable(rt: DelegateRuntime, meta: SessionMeta): boolean {
+	if (!meta.worktreePath) {
+		return false;
+	}
+	return meta.worktreeStatus !== "released" && !rt.releasingWorktrees.has(meta.worktreePath) && fs.existsSync(meta.worktreePath);
+}
+
+/**
+ * Release a worktree, published as in flight for as long as it takes.
+ *
+ * The seconds between "asked" and "gone" are the hazard: `worktreeStatus` stays "active" through the safety
+ * check and the removal, so `delegate_restart` — whose own documented flow is "cancel it first" — reads the
+ * folder as reusable and starts an agent in a directory that is about to be deleted. Only the primitive knows
+ * when a release is running, so the primitive says so.
+ */
 export async function releaseWorktree(
+	rt: DelegateRuntime,
+	meta: SessionMeta,
+	opts: { force?: boolean } = {},
+): Promise<{ removed: boolean; note: string }> {
+	if (!meta.worktreePath || meta.worktreeStatus === "released") {
+		return releaseWorktreeNow(rt, meta, opts);
+	}
+	markWorktreeReleasing(rt, meta.worktreePath);
+	try {
+		return await releaseWorktreeNow(rt, meta, opts);
+	} finally {
+		unmarkWorktreeReleasing(rt, meta.worktreePath);
+	}
+}
+
+async function releaseWorktreeNow(
 	rt: DelegateRuntime,
 	meta: SessionMeta,
 	opts: { force?: boolean } = {},
@@ -187,9 +234,12 @@ export async function releaseWorktree(
 		rt.logWarn(`force-releasing the worktree ${meta.worktreePath} of ${meta.sessionId} without the safety check`);
 	}
 
-	// orca addresses a worktree by its id when it has one, and by path otherwise. `force` is safe here
-	// only because the check above already established there is nothing to lose.
-	const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+	// Always by path, never by the recorded id. The safety check above is a statement about *this directory* —
+	// its uncommitted and unpushed work — and orca would happily delete whatever other worktree a stored id
+	// names: a record pairing a clean path with a borrowed id gets the borrowed one removed past the check, and
+	// a stored id is exactly as trustworthy as the file it was read from. If orca cannot resolve the path the
+	// removal fails and says so, which is the right failure shape.
+	const selector = `path:${meta.worktreePath}`;
 	const rm = await removeOrcaWorktree(selector, { force: true });
 	if (!rm.ok) {
 		return { removed: false, note: `could not remove ${meta.worktreePath}: ${stripAnsi(rm.error?.message ?? "orca worktree rm failed")}` };

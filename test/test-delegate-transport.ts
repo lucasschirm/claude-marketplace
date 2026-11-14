@@ -21,6 +21,8 @@ const SERVER = path.join(import.meta.dirname, "fake-acp-server.mjs");
 // Every transport this file creates, so a failing assertion cannot leave an agent process behind with
 // its stdout pipe open — which is how a test suite hangs instead of reporting.
 const launched: DelegateTransport[] = [];
+const MISSING_WORKSPACE_RE = /definitely-not-a-workspace/;
+const EXITED_WITH_CODE_3 = /exited with code 3/;
 after(() => {
 	for (const t of launched) {
 		try {
@@ -68,6 +70,31 @@ async function connected(env: Record<string, string> = {}): Promise<{
 		},
 	};
 }
+
+test("a request written after the agent died is refused at once, not held forever", async () => {
+	// A natural exit leaves `child.stdin` non-null and `child.killed` false, and the handler that rejects
+	// pending requests has already run — so a request written afterwards was accepted into a map nobody would
+	// ever resolve. With `timeoutMs = 0` (how a turn is sent) that is a turn that never ends, holding its slot.
+	const t = makeTransport({
+		...plan(),
+		args: ["-e", "process.exit(3)"],
+	});
+	await assert.rejects(async () => t.start(), "the child dies during the handshake");
+	await waitFor(() => !isPidAlive(t.pid ?? -1), "the child to exit");
+	// Raced, not awaited: unfixed, the request would never settle and the suite would hang rather than report.
+	const settled = await Promise.race([
+		t.request("session/prompt", { sessionId: "x", prompt: [] }, 0).then(
+			() => "resolved",
+			(err: Error) => err,
+		),
+		new Promise((done) => setTimeout(() => done("hung"), 3_000)),
+	]);
+	assert.ok(settled instanceof Error, `expected a rejection, got ${String(settled)}`);
+	assert.match(settled.message, EXITED_WITH_CODE_3);
+	assert.strictEqual((settled as Error & { agentExited?: boolean }).agentExited, true, "tagged as the agent's death");
+	// The pre-write distinction matters to the caller's counter: a request the agent never received is not a turn.
+	assert.strictEqual((settled as Error & { agentExitedBeforeSend?: boolean }).agentExitedBeforeSend, true, "and tagged as never sent");
+});
 
 test("the handshake keeps what the agent advertised, because that is the honest answer to what it can do", async () => {
 	const t = makeTransport(plan({ FAKE_AGENT_NAME: "fake-claude" }));
@@ -237,5 +264,15 @@ test("a spawn of a command that does not exist fails the start, not the next too
 		clientInfo: { name: "t", version: "1" },
 	});
 	await assert.rejects(() => t.start(), /ghost acp|ENOENT|not running/);
+	t.dispose();
+});
+
+test("a spawn that failed because the workspace is gone names the workspace", async () => {
+	// Node blames the command whichever of the two went missing, and a reattach follows a conversation to the
+	// folder it was created in — where folders get deleted. Without the path in the text the operator goes
+	// hunting for a missing binary, and `agy-acp --help` tells them it is there.
+	const t = new DelegateTransport("/definitely-not-a-workspace", plan());
+	launched.push(t);
+	await assert.rejects(() => t.start(), MISSING_WORKSPACE_RE);
 	t.dispose();
 });

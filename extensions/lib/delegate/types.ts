@@ -52,12 +52,9 @@ export interface LaunchPlan {
 export interface DriverCapabilities {
 	/** false ⇒ `delegate_task` refuses `thinking` for this agent rather than ignoring it. */
 	thinking: boolean;
-	/**
-	 * A recorded session id can be prompted again after its process is gone, **and this engine implements the
-	 * way back in** (`reattachSession`: spawn, then prompt the recorded id). An agent that merely advertises
-	 * `loadSession` is not enough — the adapter call would have to be made, so such a driver declares false
-	 * until there is a loader behind it. `followUp` refuses to continue a session whose driver says false.
-	 */
+	/** A recorded id can be prompted again after its process is gone, **and this engine implements the way
+	 *  back in**: `reattachSession` spawns, makes the driver's `resumeHandshake` where one exists, then
+	 *  prompts the recorded id. `followUp` refuses a session whose driver says false. */
 	resume: boolean;
 
 	/**
@@ -144,9 +141,9 @@ export type DelegateEvent =
 	| { kind: "selection.updated"; options: Record<string, string[]> }
 	| { kind: "mode.changed"; modeId: string }
 	/** What the agent says it is doing while it says nothing. `agy-acp` beats during a turn because agy
-	 *  goes silent when a hook blocks, carrying the state a watchdog acts on. Liveness, not content: any
-	 *  frame already restarts the stall clock, so what this kind adds is a held fact about *why* a session
-	 *  is quiet — and a beat every 15 s must never reach the transcript as text. */
+	 *  goes silent when a hook blocks. Mapping it is how a beat every 15 s stays out of the transcript;
+	 *  the fields are parsed but unread for now — any frame already restarts the stall clock, and
+	 *  `liveness.ts` decides from silence alone, so no verdict consumes a `state` yet. */
 	| { kind: "liveness"; state?: string; pendingPermissions?: number; turnMs?: number; seq?: number }
 	| { kind: "ignored"; reason: string };
 
@@ -190,6 +187,9 @@ export interface AgentDriver {
 	 * `session/set_config_option(model)` answers `-32602` for ids outside its vocabulary.
 	 */
 	applySelection?(ctx: SelectionContext, sel: Selection): Promise<string[]>;
+	/** The call that brings a recorded conversation into a *fresh* agent process before its first prompt
+	 *  (handshake.ts reads the answer). Absent: the agent takes the recorded id with no handshake, as Devin's does. */
+	resumeHandshake?(sessionId: string, cwd: string): { method: string; params: Record<string, unknown> };
 	/** The wire mode id, or an error naming the ids this agent accepts. */
 	resolveMode(mode: string): { ok: true; modeId: string } | { ok: false; error: string };
 	/** Model catalogue for validation and tool text. `values` may be empty (unknown), which warns never. */
@@ -247,10 +247,13 @@ export interface QueuedTask {
 export interface SessionMeta {
 	sessionId: string;
 	/**
-	 * The session this one was delegated from, when the caller was itself a delegated session.
+	 * The session whose conversation this one took over: written only by `delegate_restart`, on the task it
+	 * enqueues and on the session that starts from it.
 	 *
-	 * Recorded on the session, not only on the queued task that carried it, so a transcript or a status
-	 * report can still say whose child this after the queue entry is gone.
+	 * That exclusivity is load-bearing, not bookkeeping. A restart writes its pointer after the successor
+	 * exists, so a pi that died mid-restart leaves none — recovery reads these records instead, and treats a
+	 * restored child naming a parent as proof the parent's conversation moved. Recording it for any other
+	 * relationship would make recovery mark sessions that were never restarted.
 	 */
 	parentSessionId?: string;
 	queueId?: string;
@@ -265,6 +268,9 @@ export interface SessionMeta {
 	thinking?: ThinkingLevel;
 	mode: string;
 	createWorktree: boolean;
+	/** The workspace the conversation was created in. `worktreePath ?? baseDir` computes it today, and a
+	 *  resume has to ask in the folder the agent's own record names: a store never moves a session. */
+	sessionCwd?: string;
 	worktreePath?: string;
 	worktreeBranch?: string;
 	worktreeId?: string;
@@ -278,6 +284,15 @@ export interface SessionMeta {
 	lastMessageTime?: number;
 	turnStartedAt?: number;
 	turnCompletedAt?: number;
+	/**
+	 * Set when `delegate_restart` took this conversation over. A restart mints a *new* session id and leaves
+	 * this record alone, so nothing else tells a follow-up that its conversation has moved on — and the
+	 * restarted sibling reuses this session's worktree, so reattaching the old one would run two live agents
+	 * of one conversation in one checkout. Nothing a caller does clears it. Two things in here do, each for a
+	 * pointer that cannot be honoured: `abandonQueuedRestart`, when the queued restart it pointed at is
+	 * cancelled or fails to start, and `reconcileRestartPointers`, when recovery finds nothing behind it.
+	 */
+	supersededBy?: { sessionId?: string; queueId?: string };
 	pid?: number;
 	dbBackfilled?: boolean;
 	error?: string;

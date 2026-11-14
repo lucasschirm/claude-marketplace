@@ -11,9 +11,11 @@
 //  * The client is dropped from `activeClients` on every exit, including a clean one between turns: a
 //    stale entry lets the next `delegate_message` write to a destroyed stdin.
 
+import fs from "node:fs";
 import { extractCliError } from "./diagnostics.ts";
 import { findAgent } from "./registry.ts";
-import { getEventsLogPath, isStorageSafeId } from "./storage.ts";
+import { getEventsLogPath } from "./storage.ts";
+import { createSession, restoreSession, seedOptions, type RestoredSession } from "./handshake.ts";
 import { eventLogPath } from "./persist.ts";
 import { defaultMapUpdate, eventToLogEntries, stopReasonPhrase, normalizeStopReason } from "./events.ts";
 import { detectPullRequest } from "./pr-detect.ts";
@@ -22,8 +24,11 @@ import type { DelegateTransport } from "./transport.ts";
 import { parsePermissionRequest, quoteCommand, type PermissionRequest } from "./permissions.ts";
 import type { AgentDriver, Selection, SelectionContext, SessionMeta, DelegateEvent } from "./types.ts";
 
-/** How long a `session/new` / selection call may take before the start is considered failed. */
+/** How long a session handshake or a selection call may take before the start is considered failed. */
 const SETUP_TIMEOUT_MS = 60_000;
+
+/** Thrown when pi shuts down mid-start, so the caller can say "pi closed the session" rather than "start failed". */
+export class PiShutDownError extends Error {}
 
 export interface TurnHandle {
 	meta: SessionMeta;
@@ -82,7 +87,12 @@ export function attach(rt: DelegateRuntime, client: DelegateTransport, meta: Ses
 			`The session ${meta.sessionId} was interrupted: ${meta.error}. Check it with "delegate_status" or restart it with "delegate_restart".`,
 		);
 		rt.persistSessionMeta(meta, true);
-		rt.totalCompleted++;
+		// The marker decides the count, not the status: `spawnSession` records `running` before any prompt
+		// exists, so a child that dies during the configure window would otherwise charge a turn that was never
+		// sent. Taking it also clears it, so a later cancel cannot charge this turn a second time.
+		if (rt.turnInFlight.delete(meta.sessionId)) {
+			rt.totalCompleted++;
+		}
 		rt.persistState();
 		rt.updateStatusUI();
 		void drainAfter(rt);
@@ -218,6 +228,8 @@ function onPermissionRequest(rt: DelegateRuntime, meta: SessionMeta, requestId: 
  * watchdog's job; cancellation is `delegate_cancel`'s.
  */
 export function startTurn(rt: DelegateRuntime, meta: SessionMeta, client: DelegateTransport, prompt: string): TurnHandle {
+	// The one fact `cancelSession` needs and `status` cannot supply on its own: whether there is a turn to stop.
+	rt.turnInFlight.add(meta.sessionId);
 	rt.activeClients.set(meta.sessionId, client);
 	meta.status = "running";
 	meta.lastMessageTime = Date.now();
@@ -235,6 +247,25 @@ export function startTurn(rt: DelegateRuntime, meta: SessionMeta, client: Delega
 		.then((res: any) => settle(rt, meta, normalizeStopReason(res?.stopReason)))
 
 		.catch((err: any) => {
+			if (err?.agentExited === true) {
+				// The process died. `onExit` owns that verdict — it is the interruption record, and it charges
+				// the turn — and it always runs unless the client was disposed by a path that already recorded a
+				// terminal state (cancel, shutdown, a failed start). Settling the outcome here instead would make
+				// the same death read `failed` when `exit` wins the race and `interrupted` when `close` does.
+				if (err?.agentExitedBeforeSend === true) {
+					// Except that the request refused before it was written, which happens when `close` (and with
+					// it `onExit`) loses to this continuation: the guard upstream still saw `running`, so a turn
+					// was armed for a prompt the agent never received. Leaving the marker would have `onExit`
+					// charge this death to `totalCompleted`, the phantom count a pre-`startTurn` death cannot
+					// earn. Deleting it here is safe in the other ordering too — `onExit` had to run first to
+					// settle the status, and it took the marker with it.
+					rt.turnInFlight.delete(meta.sessionId);
+				}
+				return "error";
+			}
+			// The turn is over whether or not the status says so, and a marker left set here would let a later
+			// cancel charge a completion that never happened.
+			rt.turnInFlight.delete(meta.sessionId);
 			// Only a turn still in flight may be overwritten: onExit (idle/interrupted) and
 			// delegate_cancel (cancelled) already reached a terminal state, and last writer wins here
 			// would rewrite a cancellation as a failure.
@@ -259,13 +290,19 @@ export function startTurn(rt: DelegateRuntime, meta: SessionMeta, client: Delega
 
 /** The single settlement path: buffers, PR detection, the notice, and the drain. */
 async function settle(rt: DelegateRuntime, meta: SessionMeta, reason: ReturnType<typeof normalizeStopReason>): Promise<string> {
+	// Only a turn that was running can complete one, and completing is the other path that says so.
+	const counted = rt.turnInFlight.delete(meta.sessionId);
 	rt.stopStallWatchdog(meta.sessionId);
 	rt.flushBuffers(meta);
 	meta.status = "idle";
 	meta.stopReason = reason;
 	meta.turnCompletedAt = Date.now();
 	meta.finishedAt = Date.now();
-	rt.totalCompleted++;
+	// `counted`, not unconditionally: a turn that was cancelled mid-flight already had its completion taken by
+	// `cancelSession`, and the rejection path that reaches here must not charge a second one.
+	if (counted) {
+		rt.totalCompleted++;
+	}
 	rt.persistSessionMeta(meta, true);
 	// The transcript records why the turn ended, not just that it did. `max_tokens` and `refusal` are the
 	// two stop reasons a reader must be able to find after the fact, and a transcript that ends mid-
@@ -311,15 +348,15 @@ export interface StartResult {
  * selection and starts the first turn — keeping those steps apart is what lets a queued task be
  * reported as queued before it starts, and a restart reuse a worktree it already has.
  *
- * There is deliberately no "attach to an existing agent session id" path: `delegate_restart` re-runs the
- * prompt in the same worktree under a new id, because that is the behavior the tool has always had and
- * a second `acp` process pointed at a live session id forks the agent's view of its own work.
+ * Nothing here attaches to a session that is still **live**: a second `acp` process pointed at a running
+ * session id forks the agent's view of its own work, so `delegate_restart` re-runs the prompt under a new
+ * id. Continuing a conversation whose process *died* is the other case, and that one is `reattachSession`.
  */
 export async function spawnSession(
 	rt: DelegateRuntime,
 	driver: AgentDriver,
 	selection: Selection,
-	opts: { prompt: string; cwd: string; queueId?: string; createWorktree: boolean },
+	opts: { prompt: string; cwd: string; queueId?: string; createWorktree: boolean; stale?: () => boolean },
 ): Promise<StartResult> {
 	const plan = driver.launchPlan(selection, opts.cwd);
 	const client = rt.makeTransport(opts.cwd, plan);
@@ -336,6 +373,23 @@ export async function spawnSession(
 		const created = await createSession(client, plan.label, opts.cwd);
 		sessionId = created.sessionId;
 		advertised = created.options;
+		// Checked here, before anything shared is touched. An id already in the map belongs to a session pi is
+		// still tracking, and arriving later — after the log path, `attach` and `seedOptions` — would have
+		// appended a `session_started` line to the *victim's* transcript and replaced its advertised-vocabulary
+		// map, permanently, while the refusal pretended nothing had happened.
+		if (rt.sessions.has(sessionId)) {
+			throw new Error(
+				`${driver.id} returned a session id (${sessionId}) that this pi is already using for another session; nothing was started`,
+			);
+		}
+		if (opts.stale?.()) {
+			// The runtime this start belongs to has been shut down while the agent was being asked for its id.
+			// Bailing here — before the log path, the registration and the persist — is the point: registering now
+			// would write `meta.json` and a container entry into whichever namespace answers next (the orphan
+			// `default/`, or a later pi session's) and the next boot would read a phantom as real state. Throwing
+			// sends the caller down its not-registered path, which frees the slot and the folder it provisioned.
+			throw new PiShutDownError("pi closed before this session could be registered; nothing was started");
+		}
 		client.setLogFilePath(logPathFor(rt, sessionId));
 
 		meta = {
@@ -348,6 +402,7 @@ export async function spawnSession(
 			thinking: selection.thinking,
 			mode: selection.mode,
 			status: "running",
+			sessionCwd: opts.cwd,
 			createdAt: Date.now(),
 			startedAt: Date.now(),
 			lastMessageTime: Date.now(),
@@ -356,14 +411,7 @@ export async function spawnSession(
 		};
 		const registered = meta;
 		attach(rt, client, registered);
-		// Seed what `session/new` advertised into the per-session catalogue `configureSession` reads. Order
-		// matters: `attach` installs the map, this fills it, and the driver's selection runs after both.
-		const catalogue = rt.configOptions.get(sessionId);
-		if (catalogue) {
-			for (const [id, values] of Object.entries(advertised)) {
-				catalogue.set(id, values);
-			}
-		}
+		seedOptions(rt, sessionId, advertised);
 		client.logEvent("session_started", { sessionId, configOptions: advertised });
 		rt.sessions.set(sessionId, registered);
 		rt.activeClients.set(sessionId, client);
@@ -376,64 +424,6 @@ export async function spawnSession(
 		client.dispose();
 		throw err;
 	}
-}
-
-interface NewSession {
-	sessionId: string;
-	/**
-	 * What the session advertises about itself at creation: every select-style config option with its
-	 * value list, under its option id (`mode`, `model`, `effort`, …), plus `modes`/`models` when the agent
-	 * still speaks the pre-config-option shape.
-	 *
-	 * This is the only place the vocabulary is available. The installed adapter answers `session/new` with
-	 * it and sends a `config_option_update` *only when something changes*, so a reader that waited for the
-	 * notification had a permanently empty picture of a session it was about to configure — every
-	 * "this model offers no such effort" pre-check was dead code, and every refusal message that wanted
-	 * to list the valid values had none to list.
-	 */
-	options: Record<string, string[]>;
-}
-
-/** The value list of one select-style config option, in whatever shape this agent sent it. */
-function optionValues(option: any): string[] {
-	const raw = option?.options ?? option?.values ?? [];
-	const list = Array.isArray(raw) ? raw : [];
-	return list
-		.map((o: any) => (typeof o === "string" ? o : (o?.value ?? o?.id)))
-		.filter((v: unknown): v is string => typeof v === "string" && v.length > 0);
-}
-
-async function createSession(client: DelegateTransport, label: string, cwd: string): Promise<NewSession> {
-	const res: any = await client.request("session/new", { cwd, mcpServers: [] }, SETUP_TIMEOUT_MS);
-	const sessionId = res?.sessionId;
-	if (typeof sessionId !== "string" || !sessionId) {
-		throw new Error(`${label} answered session/new without a sessionId`);
-	}
-	// The id is the agent's, the directory is ours. It is used to build paths we write to and to name records
-	// that later code deletes, so an id like `../../elsewhere` is not a curiosity — it is the extension
-	// writing outside the tree it owns. Refusing here costs one session; accepting it costs the boundary.
-	if (!isStorageSafeId(sessionId)) {
-		throw new Error(
-			`${label} returned the session id ${JSON.stringify(sessionId)}, which cannot be a storage path segment; refusing to register it`,
-		);
-	}
-	const options: Record<string, string[]> = {};
-	for (const opt of Array.isArray(res?.configOptions) ? res.configOptions : []) {
-		const id = typeof opt?.id === "string" ? opt.id : "";
-		if (id) {
-			options[id] = optionValues(opt);
-		}
-	}
-	// The older shape, for an agent that has not moved to config options yet.
-	const modes = Array.isArray(res?.modes?.availableModes) ? res.modes.availableModes : [];
-	if (modes.length && !options.mode) {
-		options.mode = modes.map((m: any) => m?.id).filter((v: unknown): v is string => typeof v === "string");
-	}
-	const models = Array.isArray(res?.models?.availableModels) ? res.models.availableModels : [];
-	if (models.length && !options.model) {
-		options.model = models.map((m: any) => m?.id).filter((v: unknown): v is string => typeof v === "string");
-	}
-	return { sessionId, options };
 }
 
 function logPathFor(rt: DelegateRuntime, sessionId: string): string {
@@ -451,26 +441,220 @@ function logPathFor(rt: DelegateRuntime, sessionId: string): string {
  * re-attached: minting a new id and passing it off as the same session would silently drop the context the
  * caller was writing into, which is worse than saying "use delegate_restart".
  *
- * The slot is the caller's business (see `followUp`): this spawns, it does not reserve.
+ * The slot is the caller's business (see `followUp`): this spawns, it does not reserve. Two follow-ups that
+ * arrive before either has a connection share one spawn — see the wrapper under this function.
  */
-export async function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
-	const cwd = meta.worktreePath ?? rt.baseDir;
+async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
+	// Only a cancel that lands *during* this attempt is a reason to stop: `cancelled` describes the last turn,
+	// not a ban on the conversation, and a session cancelled days ago can still be continued (on `main` it
+	// was). Counting the events is what distinguishes the two — the status alone cannot, because an
+	// already-cancelled conversation reports `cancelled` when a fresh cancel lands in this very window.
+	const cancelsSeen = rt.cancelCount(meta.sessionId);
+	// The workspace the conversation was created in, not the one this pi process happens to be sitting in:
+	// an agent with its own store refuses to move a session, and after a restart in another folder the two
+	// are not the same answer. Older records have no `sessionCwd` and get the old expression.
+	const cwd = meta.sessionCwd ?? meta.worktreePath ?? rt.baseDir;
 	const selection: Selection = { model: meta.model, thinking: meta.thinking, mode: meta.mode };
 	const client = rt.makeTransport(cwd, driver.launchPlan(selection, cwd));
+	let restored: RestoredSession | undefined;
 	try {
 		await client.start();
 		client.setLogFilePath(eventLogPath(rt, meta));
+		// A recorded id means nothing to a process that did not mint it, unless the agent keeps the
+		// conversation itself: the driver's handshake is the call that brings it back (handshake.ts).
+		// Devin declares none and must not be asked — its registry answers the recorded id on the prompt.
+		if (driver.resumeHandshake) {
+			restored = await restoreSession(client, driver, meta.sessionId, cwd);
+		}
 	} catch (err) {
 		client.dispose();
 		throw err;
 	}
+	// Four things can have taken this conversation away while its agent was starting, and they leave different
+	// traces: a restart wrote its pointer; a restart still spawning is in `rt.restarting` and will write one; a
+	// `/new` or a shutdown emptied the map, so this record is no longer the one that was looked up; and
+	// `delegate_cancel` reaches a reattaching session through the same gate that admits a running one. Registering
+	// anyway hands a live agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — and
+	// prompts a conversation that has moved on, in a worktree its sibling is editing.
+	const refusal = reattachRefusal(rt, meta, cancelsSeen);
+	if (refusal) {
+		client.dispose();
+		throw new Error(refusal);
+	}
 	// The wiring a live session has: updates, permission requests, the exit path that reports an interrupted
 	// turn. `attach` owns the session's config-option catalogue from here.
 	attach(rt, client, meta);
+	if (restored) {
+		seedOptions(rt, meta.sessionId, restored.options);
+		// What the adapter came back with replaces what was asked for: `delegate_status` reads `meta`, and a
+		// conversation restored into `default` must not keep reporting the preference that was refused — the
+		// lie `mode.changed` exists to prevent, readable only from this answer. Each resolves again on restart.
+		if (restored.currentModeId) {
+			meta.mode = restored.currentModeId;
+		}
+		if (restored.currentModelId) {
+			meta.model = restored.currentModelId;
+		}
+		if (restored.currentEffort) {
+			// `"default"` is the adapter saying the model picked. That is not a level this tool can name, so the
+			// record stops claiming one instead of keeping the level that was refused.
+			meta.thinking = restored.currentEffort === "default" ? undefined : restored.currentEffort;
+		}
+		// A record older than this field learns the workspace from the store that just vouched for it, so the
+		// next restart does not fall back to an expression and get a mismatch it could have avoided.
+		meta.sessionCwd ??= restored.cwd;
+		// `cwd` last: the workspace the store vouched for is the better fact, but a restore that named none
+		// must not leave the event without one, and a spread of an absent field is exactly that.
+		client.logEvent("session_resumed", { sessionId: meta.sessionId, ...restored, cwd: restored.cwd ?? cwd });
+		// What the agent corrected on the way in belongs in the operator's log as well as the session's:
+		// a stored mode this process cannot honour is a session that is not in the mode its record claims.
+		for (const note of restored.notes) {
+			rt.logWarn(`session ${meta.sessionId} resumed: ${note}`);
+		}
+	}
 	rt.activeClients.set(meta.sessionId, client);
 	meta.pid = client.pid;
 	rt.persistSessionMeta(meta, true);
 	return client;
+}
+
+/**
+ * Reattach, once per session however many follow-ups arrived first. `activeClients` is filled at the *end*
+ * of a reattach and the session is not `running` until its turn starts, so two callers in one window would
+ * each spawn an agent and each ask for the conversation; where the agent keeps its own store, the loser
+ * answers "held by another agy-acp process", which reads like a dead conversation and sends the caller to
+ * `delegate_restart` — the loss this path exists to prevent. Waiting costs nothing else.
+ */
+/**
+ * Point a conversation at the session `delegate_restart` took it to. A restart mints a new id and leaves
+ * this record where it was, so without the pointer a follow-up addressed to the old id would reattach it
+ * while its sibling runs: two live agents of one conversation, in one worktree, since a restart reuses it.
+ */
+export function markSuperseded(rt: DelegateRuntime, meta: SessionMeta, target: { sessionId?: string; queueId?: string }): void {
+	meta.supersededBy = target;
+	rt.persistSessionMeta(meta, true);
+	rt.persistState();
+}
+
+/** Where a superseded conversation went, in the few words every refusal of it needs. */
+export function supersededPointerText(meta: SessionMeta): string {
+	const pointer = meta.supersededBy;
+	if (!pointer) {
+		return "";
+	}
+	return pointer.sessionId ? `restarted as ${pointer.sessionId}` : `waiting to restart as queue entry ${pointer.queueId}`;
+}
+
+/** What the caller of a conversation that moved on hears: where it went, and that nothing was prompted here. */
+export function supersededError(meta: SessionMeta): string {
+	return (
+		`this session was ${supersededPointerText(meta)} — message that one instead; nothing was prompted here, ` +
+		"because two live agents of one conversation would share its workspace"
+	);
+}
+
+/** Forget the pointer: the restart that wrote it did not happen, so the conversation is its own again. */
+export function clearSuperseded(rt: DelegateRuntime, meta: SessionMeta): void {
+	if (!meta.supersededBy) {
+		return;
+	}
+	meta.supersededBy = undefined;
+	rt.persistSessionMeta(meta, true);
+	rt.persistState();
+}
+
+/**
+ * Whether this session's worktree belongs to a restart rather than to the record that names it.
+ *
+ * A restart reuses the parent's folder, so the parent stops being its owner the moment the restart is
+ * *entered*, not when its pointer lands: through the spawn window the parent is settled and unmarked, and a
+ * `delegate_clean_worktree` sweep or a PR closed in that window would delete the directory the successor is
+ * about to start its agent in. The mirror of the rule `reattachRefusal` applies to messages.
+ */
+export function restartClaimsWorktree(rt: DelegateRuntime, meta: SessionMeta): boolean {
+	return meta.supersededBy !== undefined || rt.restarting.has(meta.sessionId);
+}
+
+/**
+ * Whether a settled record's folder still has an agent on its way into it.
+ *
+ * `restartClaimsWorktree` covers the handover to a restart. A follow-up mid-reattach is the other settled
+ * record with a live process behind it: the child is spawned, `session/resume` is in flight, and the prompt
+ * that follows runs in this directory. Releasing it in that window — `delegate_clean_worktree`, the
+ * `--all_settled` sweep, or a PR merging while nobody asks — leaves the resumed turn working in a deleted cwd.
+ * Semantically "this session is connecting", not "a restart owns it", so it is its own predicate rather than
+ * another clause in the one named for restarts.
+ */
+export function worktreeHasLiveClaim(rt: DelegateRuntime, meta: SessionMeta): boolean {
+	return restartClaimsWorktree(rt, meta) || rt.reattaching.has(meta.sessionId);
+}
+
+/**
+ * Why a follow-up has nowhere to work, or nothing.
+ *
+ * Releasing a worktree sets `worktreeStatus` and leaves `worktreePath` and `sessionCwd` naming a folder that
+ * is no longer there, and both are what a follow-up hands to the agent: a live client would take the prompt
+ * into a deleted cwd, and a reattach would spawn into it — `spawn` answers that with `ENOENT`, which blames
+ * the binary — or, worse, the path may have been recreated by a later worktree, in which case the restore
+ * lands in somebody else's tree and the conversation continues against the wrong checkout.
+ */
+export function workspaceProblem(rt: DelegateRuntime, meta: SessionMeta): string | undefined {
+	const cwd = meta.sessionCwd ?? meta.worktreePath ?? rt.baseDir;
+	if (meta.worktreeStatus === "released") {
+		return `its worktree was released (${cwd})`;
+	}
+	if (rt.releasingWorktrees.has(cwd)) {
+		return `its worktree is being released right now (${cwd})`;
+	}
+	// The existence probe belongs to a record that claims the folder is live. Without that gate a record with no
+	// worktree at all — a plain follow-up whose cwd is the folder pi happens to run in, or a legacy record with
+	// no status — would be refused for a directory this engine never created and never claimed. When the record
+	// says the worktree is active and it is not on disk, the operator or orca removed it, and the prompt would
+	// go to an agent standing in a folder that is gone. A missing cwd that nothing claims still fails, at
+	// `spawn`, with a message that names the workspace.
+	if ((meta.worktreeStatus === "active" || meta.worktreeStatus === "retained") && !fs.existsSync(cwd)) {
+		return `its worktree ${cwd} was removed without the session being told`;
+	}
+	return undefined;
+}
+
+/** Why this conversation no longer belongs to the process reattaching it — or nothing, and the reattach goes on. */
+function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta, cancelsSeen = 0): string | undefined {
+	if (meta.supersededBy) {
+		return `the agent was still starting when ${supersededError(meta)}`;
+	}
+	if (rt.restarting.has(meta.sessionId)) {
+		return "a delegate_restart of this session is in flight and owns its conversation now; nothing was prompted here";
+	}
+	if (rt.cancelCount(meta.sessionId) !== cancelsSeen) {
+		// `delegate_cancel` can reach a session mid-reattach even though nothing is running yet: the record is
+		// settled, no client is registered, and the process answering is still in `session/resume`. Cancelling
+		// has to mean the prompt never fires, or "cancelled" is a message the caller gets to watch fail. Scoped
+		// to a cancel that landed during this attempt — by count, not by status, because the status is already
+		// `cancelled` for exactly the conversations this path exists to continue.
+		return "this session was cancelled while its agent was starting; nothing was prompted";
+	}
+	if (rt.sessions.get(meta.sessionId) !== meta) {
+		return "this pi closed the session while its agent was starting; nothing was prompted";
+	}
+	// A release that landed during the handshake is the same hazard as one that landed before it: the caller
+	// `followUp` turned away would have been told to restart, and this prompt would go to an agent whose
+	// working directory is being deleted underneath it.
+	const workspace = workspaceProblem(rt, meta);
+	if (workspace) {
+		return `this session lost its workspace while its agent was starting: ${workspace}; nothing was prompted`;
+	}
+	return undefined;
+}
+
+export function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
+	const inFlight = rt.reattaching.get(meta.sessionId);
+	if (inFlight) {
+		return inFlight;
+	}
+	const attempt = reattachOnce(rt, driver, meta).finally(() => rt.reattaching.delete(meta.sessionId));
+	rt.reattaching.set(meta.sessionId, attempt);
+	return attempt;
 }
 
 /**

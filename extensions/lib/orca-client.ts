@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { commandExists } from "./nonblocking.ts";
-import { type ExecFailure, failureText, READ_TIMEOUT_MS, runJson, runText } from "./exec.ts";
+import { type ExecFailure, failureText, MUTATION_TIMEOUT_MS, READ_TIMEOUT_MS, runJson, runText } from "./exec.ts";
 import { headRef, prForBranch } from "./git-repo.ts";
 
 const execFileAsync = promisify(execFile);
@@ -294,7 +294,10 @@ export async function removeOrcaWorktree(
 			if (fs.existsSync(normPath)) {
 				const gitArgs = ["worktree", "remove", normPath];
 				if (options.force === true) gitArgs.push("--force");
-				await execFileAsync("git", gitArgs, { cwd: options.cwd || process.cwd() });
+				// Bounded: this sits on the release path, and a git that hangs here pins the folder's
+				// "being released" marker forever, which makes every later restart treat the directory as
+				// off-limits and holds any caller that awaits the release with it.
+				await execFileAsync("git", gitArgs, { cwd: options.cwd || process.cwd(), timeout: MUTATION_TIMEOUT_MS });
 				return { ok: true, result: { removed: true } };
 			}
 		} catch {}
