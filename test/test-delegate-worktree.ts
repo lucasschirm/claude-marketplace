@@ -132,6 +132,11 @@ test("a closed PR does not release a worktree a restarted session is working in"
 		const inFlight = metaFor("old-2", { ...shared });
 		stub.rt.sessions.set("old-2", inFlight);
 		stub.rt.restarting.add("old-2");
+		// And the third settled record with a live process behind it: a follow-up is reconnecting it, so the
+		// child is spawned and its prompt is about to run in this directory (round 12).
+		const connecting = metaFor("old-3", { ...shared });
+		stub.rt.sessions.set("old-3", connecting);
+		stub.rt.reattaching.set("old-3", Promise.resolve(undefined as never));
 
 		await onPrClosed(stub.rt, 42, "closed");
 
@@ -140,7 +145,39 @@ test("a closed PR does not release a worktree a restarted session is working in"
 		assert.ok(!told.includes("old-1"), `the superseded session was still treated as dead wood: ${told}`);
 		assert.strictEqual(inFlight.worktreeStatus, "active", "a session whose restart is in flight owns nothing to release either");
 		assert.ok(!told.includes("old-2"), `a folder mid-handover was released: ${told}`);
+		assert.strictEqual(connecting.worktreeStatus, "active", "a session mid-reattach owns nothing to release");
+		assert.ok(!told.includes("old-3"), `a folder a reattach is working in was released: ${told}`);
 		assert.ok(told.includes("new-1"), `the session that does own the folder should have been handled: ${told}`);
+	} finally {
+		stub.restoreHome();
+		fs.rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("a cancel during a reattach does not release the folder that reattach is working in", async () => {
+	// Cancelling a connecting session is real (round 11), which means the release at the end of `cancelSession`
+	// runs for a session whose agent is being spawned into its worktree right now. A prompt against a deleted
+	// cwd is a failed turn nobody asked for.
+	const stub = makeStub();
+	const repo = makeRepo();
+	withoutOrca(stub.rt);
+	try {
+		const made = await createWorktree(stub.rt, repo);
+		const meta = metaFor("att-1", {
+			status: "completed",
+			worktreePath: made.worktreePath,
+			worktreeBranch: made.worktreeBranch,
+			worktreeStatus: "active",
+		});
+		stub.rt.sessions.set("att-1", meta);
+		stub.rt.reattaching.set("att-1", Promise.resolve(undefined as never));
+
+		assert.strictEqual(await cancelSession(stub.rt, "att-1"), "session", "the cancel still cancels the session");
+		assert.ok(
+			!stub.rt.releasingWorktrees.has(made.worktreePath),
+			"a cancel that overlaps a reattach fired a release on the folder the agent is starting in",
+		);
+		assert.strictEqual(meta.worktreeStatus, "active", "the folder is still this session's to reclaim later");
 	} finally {
 		stub.restoreHome();
 		fs.rmSync(repo, { recursive: true, force: true });

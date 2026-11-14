@@ -392,6 +392,10 @@ function logPathFor(rt: DelegateRuntime, sessionId: string): string {
  * arrive before either has a connection share one spawn — see the wrapper under this function.
  */
 async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
+	// Whether this conversation was already cancelled when the attempt began. `cancelled` describes the last
+	// turn, not a ban on the conversation: a session cancelled days ago can still be continued, and on `main`
+	// it was. Only a cancel that lands *during* this attempt is a reason to stop.
+	const cancelledBefore = meta.status === "cancelled";
 	// The workspace the conversation was created in, not the one this pi process happens to be sitting in:
 	// an agent with its own store refuses to move a session, and after a restart in another folder the two
 	// are not the same answer. Older records have no `sessionCwd` and get the old expression.
@@ -412,12 +416,13 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 		client.dispose();
 		throw err;
 	}
-	// Three things can have taken this conversation away while its agent was starting, and they leave
-	// different traces: a restart wrote its pointer; a restart still spawning is in `rt.restarting` and will
-	// write one; a `/new` or a shutdown emptied the map, so this record is no longer the one that was looked
-	// up. Registering anyway hands a live agent to nobody — status, `delegate_cancel` and the limits all read
-	// `rt.sessions` — and prompts a conversation that has moved on, in a worktree its sibling is editing.
-	const refusal = reattachRefusal(rt, meta);
+	// Four things can have taken this conversation away while its agent was starting, and they leave different
+	// traces: a restart wrote its pointer; a restart still spawning is in `rt.restarting` and will write one; a
+	// `/new` or a shutdown emptied the map, so this record is no longer the one that was looked up; and
+	// `delegate_cancel` reaches a reattaching session through the same gate that admits a running one. Registering
+	// anyway hands a live agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — and
+	// prompts a conversation that has moved on, in a worktree its sibling is editing.
+	const refusal = reattachRefusal(rt, meta, cancelledBefore);
 	if (refusal) {
 		client.dispose();
 		throw new Error(refusal);
@@ -516,18 +521,34 @@ export function restartClaimsWorktree(rt: DelegateRuntime, meta: SessionMeta): b
 	return meta.supersededBy !== undefined || rt.restarting.has(meta.sessionId);
 }
 
+/**
+ * Whether a settled record's folder still has an agent on its way into it.
+ *
+ * `restartClaimsWorktree` covers the handover to a restart. A follow-up mid-reattach is the other settled
+ * record with a live process behind it: the child is spawned, `session/resume` is in flight, and the prompt
+ * that follows runs in this directory. Releasing it in that window — `delegate_clean_worktree`, the
+ * `--all_settled` sweep, or a PR merging while nobody asks — leaves the resumed turn working in a deleted cwd.
+ * Semantically "this session is connecting", not "a restart owns it", so it is its own predicate rather than
+ * another clause in the one named for restarts.
+ */
+export function worktreeHasLiveClaim(rt: DelegateRuntime, meta: SessionMeta): boolean {
+	return restartClaimsWorktree(rt, meta) || rt.reattaching.has(meta.sessionId);
+}
+
 /** Why this conversation no longer belongs to the process reattaching it — or nothing, and the reattach goes on. */
-function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta): string | undefined {
+function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta, cancelledBefore = false): string | undefined {
 	if (meta.supersededBy) {
 		return `the agent was still starting when ${supersededError(meta)}`;
 	}
 	if (rt.restarting.has(meta.sessionId)) {
 		return "a delegate_restart of this session is in flight and owns its conversation now; nothing was prompted here";
 	}
-	if (meta.status === "cancelled") {
+	if (meta.status === "cancelled" && !cancelledBefore) {
 		// `delegate_cancel` can reach a session mid-reattach even though nothing is running yet: the record is
 		// settled, no client is registered, and the process answering is still in `session/resume`. Cancelling
-		// has to mean the prompt never fires, or "cancelled" is a message the caller gets to watch fail.
+		// has to mean the prompt never fires, or "cancelled" is a message the caller gets to watch fail. Scoped
+		// to a cancel that landed during this attempt, because a session cancelled earlier is a conversation the
+		// caller can still continue — refusing it here would also spend a spawn and a restore to say no.
 		return "this session was cancelled while its agent was starting; nothing was prompted";
 	}
 	if (rt.sessions.get(meta.sessionId) !== meta) {

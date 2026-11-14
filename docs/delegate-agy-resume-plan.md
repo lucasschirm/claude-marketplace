@@ -149,6 +149,7 @@ await and answers `BUSY`, telling the caller to send it again.
 | a poisoned counter or an unreachable suffix cannot freeze the id generator | same |
 | abandoning a queued restart does not promote a session half that is dead | same |
 | a cancel that lands mid-reattach stops the prompt instead of denying there is anything to cancel | `test/test-delegate-resume.ts` |
+| a session cancelled earlier is still a conversation, and a connecting one still owns its worktree | same, `test/test-delegate-worktree.ts` |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -371,6 +372,43 @@ exits. A late write belongs somewhere, and that somewhere must not be whoever ra
 **Two refusals prescribed a `delegate_cancel` that could not work.** During an in-flight restart there is nothing
 cancelable at the old id — the record is settled and the successor is not registered yet — so the `RESTARTING`
 text no longer suggests it. The mid-reattach one does, and after the change above it is true.
+
+
+### §7.7 A refusal that outstayed its window, and the settled record with a process behind it (round 12)
+
+**`cancelled` is a fact about the last turn, not a ban on the conversation.** Round 11's refusal checked the status
+without asking when the cancel landed, so it also fired for a session cancelled before the follow-up was typed —
+spending a process spawn and a driver restore (for `agy`, a `session/resume` that adopts the whole conversation)
+before saying no, describing a cancel from yesterday as "while its agent was starting", and quietly removing a
+capability: on `main` `reattachSession` checked nothing, so a cancelled session whose agent keeps its history
+server-side could simply be continued by `delegate_message`. The check now asks whether the record was already
+cancelled when this attempt began. If "cancelled is terminal for messaging" ever becomes the rule, it belongs next
+to `conversationTakenElsewhere` in `followUp`, where it costs nothing and can tell the truth — not in the middle
+of a handshake that exists to be refused.
+
+**A third settled record has a live process behind it.** Rounds 5 through 8 taught the worktree paths about a
+restart: written pointer, or still spawning. A follow-up mid-reattach is the same shape — spawned, resuming, about
+to prompt *in that directory* — and it is settled with no registered client, so `delegate_clean_worktree` (both
+`session_id` and `--all_settled`), `onPrClosed` and `cancelSession`'s own release could cut the folder out from
+under it, which `onPrClosed` reaches with no user asking. They ask `worktreeHasLiveClaim` now. It is not folded
+into `restartClaimsWorktree`, because the reason is "this session is connecting", not "a restart owns this".
+
+**And the microtask after the handshake.** `reattachOnce` registers the client as its last act, so a cancel
+landing between that and the caller's continuation is invisible to the guard above: `startTurn` rewrote
+`cancelled` to `running`, counted a completion for a turn that never ran, and re-registered the client the cancel
+had disposed. `followUp` rechecks the status on the way to `startTurn` and refuses with its own code rather than
+`BUSY` — nothing else started a turn. This one has no test: the window is a single microtask, and a test would
+have to schedule itself into it, which means the test would define the race rather than observe it. The guard is
+two lines; the alternative is a session that comes back from a cancel with a turn running and a completion
+counted for it.
+
+Getting that check into `followUp` nearly cost the guarantee round 3 was written for. `followUp` had crossed the
+cognitive-complexity budget, so the reattach block moved into a helper — and the first version returned the
+connection for the caller to start the turn on, which added an `await` between the shared reattach resolving and
+`startTurn`. The winner's continuation slipped behind the loser's, both read a session that was not mid-turn, and
+the shared-spawn test failed with two prompts. So the helper, `deliverFollowUp`, starts the turn itself: one call
+from `followUp`, not a call and an await. Its docblock says so, because the next reader will want to tidy it back
+into a function that returns a client.
 
 
 ## 8. Out of scope

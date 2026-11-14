@@ -358,6 +358,30 @@ test("a restart that lands mid-reattach stops the prompt", async () => {
 	}
 });
 
+test("a session cancelled earlier is still a conversation the caller can continue", async () => {
+	// `cancelled` is a fact about the last turn, not a ban on the conversation: on `main` a follow-up reattached
+	// and prompted it, and for a driver whose sessions live server-side that still works. Round 12 caught the
+	// refusal added for mid-reattach cancels firing for every cancelled session instead — which also spent a
+	// spawn and a restore before saying no.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport();
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		meta.status = "cancelled";
+		const res = await followUp(rt, meta, "still here");
+		assert.ok(res.ok, JSON.stringify(res));
+		assert.notStrictEqual(meta.status, "cancelled", "the conversation is live again, not refused");
+		assert.strictEqual(
+			stub.calls.filter((c) => c.method === "session/prompt").length,
+			1,
+			"the message reached the conversation it was addressed to",
+		);
+	} finally {
+		restoreHome();
+	}
+});
+
 test("a cancel that lands mid-reattach stops the prompt instead of saying there is nothing to cancel", async () => {
 	// A follow-up that is reconnecting looks finished to `delegate_cancel`: settled status, no client, and the
 	// process still inside `session/resume`. Answering "nothing to cancel" while the prompt fires anyway is the

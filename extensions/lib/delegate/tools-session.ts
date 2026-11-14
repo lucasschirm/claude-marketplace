@@ -11,7 +11,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { admit, findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { cancelSession, delegate, followUp, type DelegateRequest } from "./queue.ts";
-import { markSuperseded, restartClaimsWorktree, supersededPointerText } from "./session.ts";
+import { markSuperseded, supersededPointerText, worktreeHasLiveClaim } from "./session.ts";
 import { commandForCaller, PERMISSION_DECISIONS, type PermissionDecision } from "./permissions.ts";
 import { releaseWorktree, worktreeIsReusable } from "./worktree.ts";
 import type { SessionMeta } from "./types.ts";
@@ -36,6 +36,41 @@ function permissionReply(agentId: string, decision: PermissionDecision, chosen: 
 	return degrades
 		? `${base} ${policy?.driver.title} has no session-scoped approval, so this approves this one call only — say so to the user rather than implying a standing rule.`
 		: base;
+}
+
+/**
+ * Why a settled session's folder cannot be cleaned right now — or nothing, and it is dead wood.
+ *
+ * Settled status is not evidence the folder is idle. A conversation that was restarted left its folder to its
+ * successor; a restart mid-spawn is handing it over; a follow-up mid-reattach has a child spawned in it with a
+ * prompt due in that directory. Three reasons, one question — the sweep over every settled session asks the same
+ * one through `worktreeHasLiveClaim`, without needing the words.
+ */
+function cleanWorktreeRefusal(rt: DelegateRuntime, meta: SessionMeta): { message: string; code: string } | undefined {
+	const id = meta.sessionId;
+	if (meta.supersededBy) {
+		return {
+			message: `Session ${id} ${supersededPointerText(meta)}; its worktree is that session's to clean.`,
+			code: "SESSION_SUPERSEDED",
+		};
+	}
+	if (rt.restarting.has(id)) {
+		return {
+			message:
+				`A delegate_restart of session ${id} is in flight and its worktree is being handed to that restart. ` +
+				"Wait for it to finish, then try again.",
+			code: "RESTART_IN_FLIGHT",
+		};
+	}
+	if (rt.reattaching.has(id)) {
+		return {
+			message:
+				`A follow-up is reconnecting session ${id} right now, and its agent works in that worktree. ` +
+				"Wait for it, or delegate_cancel it, then clean up.",
+			code: "SESSION_CONNECTING",
+		};
+	}
+	return undefined;
 }
 
 export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
@@ -351,24 +386,12 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 					if (!meta) {
 						return errorResult(rt, "delegate_clean_worktree", `Session '${params.session_id}' not found.`, { code: "NOT_FOUND" });
 					}
-					if (meta.supersededBy) {
-						// Its worktree belongs to the restarted session, which may be working in it this moment.
-						return errorResult(
-							rt,
-							"delegate_clean_worktree",
-							`Session ${meta.sessionId} ${supersededPointerText(meta)}; its worktree is that session's to clean.`,
-							{ code: "SESSION_SUPERSEDED", session_id: meta.sessionId },
-						);
-					}
-					if (rt.restarting.has(meta.sessionId)) {
-						// Through a restart's spawn window the parent is settled and its pointer has not landed yet, but the
-						// folder is mid-handover: deleting it here takes the directory the successor is starting in.
-						return errorResult(
-							rt,
-							"delegate_clean_worktree",
-							`A delegate_restart of session ${meta.sessionId} is in flight and its worktree is being handed to that restart. Wait for it to finish, then try again.`,
-							{ code: "RESTART_IN_FLIGHT", session_id: meta.sessionId },
-						);
+					const refusal = cleanWorktreeRefusal(rt, meta);
+					if (refusal) {
+						return errorResult(rt, "delegate_clean_worktree", refusal.message, {
+							code: refusal.code,
+							session_id: meta.sessionId,
+						});
 					}
 					targets.push(meta);
 				} else if (params.all_settled === true) {
@@ -378,7 +401,7 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 						}
 						// A settled record whose conversation moved on — or is moving this moment — is not evidence its
 						// folder is dead wood: a restart, written or in flight, owns it.
-						if (restartClaimsWorktree(rt, s)) {
+						if (worktreeHasLiveClaim(rt, s)) {
 							continue;
 						}
 						if (s.worktreePath && s.worktreeStatus === "active") {

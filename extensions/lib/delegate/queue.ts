@@ -20,7 +20,7 @@ import {
 	installDrainer,
 	markSuperseded,
 	reattachSession,
-	restartClaimsWorktree,
+	worktreeHasLiveClaim,
 	spawnSession,
 	startTurn,
 	supersededError,
@@ -372,6 +372,75 @@ function conversationTakenElsewhere(rt: DelegateRuntime, meta: SessionMeta): { c
 }
 
 /**
+ * Get this conversation's connection and put the prompt on it, or say why neither can happen.
+ *
+ * Everything between "the caller addressed this session" and "a turn starts" lives here: no resume capability at
+ * all, a reattach that failed, a conversation cancelled or taken over while its agent was connecting, or a turn
+ * another follow-up began while this one waited for the connection. The live-client path needs none of the checks
+ * that follow the spawn, because nothing between it and `startTurn` is awaited.
+ *
+ * The turn is *started* here rather than by the caller, and that is not tidiness. Two follow-ups that arrive
+ * inside one reattach window await the same promise; the first one's continuation is what makes the session
+ * `running`, and the second reads that status to refuse itself. A second `await` between resolving the shared
+ * promise and calling `startTurn` slips the winner's continuation behind the loser's, both see a session that is
+ * not mid-turn, and the agent answers the second prompt with `TURN_IN_PROGRESS` while the tool has already said
+ * `{ok: true}` twice.
+ */
+async function deliverFollowUp(
+	rt: DelegateRuntime,
+	driver: AgentDriver,
+	meta: SessionMeta,
+	prompt: string,
+	release: () => void,
+): Promise<{ ok: true } | { ok: false; code: string; error: string }> {
+	const refusal = (code: string, error: string) => {
+		release();
+		return { ok: false, code, error };
+	};
+	let client = rt.activeClients.get(meta.sessionId);
+	if (!client) {
+		if (!driver.capabilities().resume) {
+			return refusal(
+				"NO_CONNECTION",
+				`${agentTitle(meta.agent)} has no way to continue a session whose process is gone — use delegate_restart to run the prompt again (same worktree, new session id)`,
+			);
+		}
+		// Whether the record was already cancelled when this attempt began: `cancelled` describes the last turn,
+		// and a conversation the caller wants back is still a conversation, so only a cancel that lands *during*
+		// the reattach refuses. `reattachSession` makes the same distinction; the window that matters for the
+		// answer below opens when its promise resolves, after that guard has run.
+		const cancelledBefore = meta.status === "cancelled";
+		try {
+			client = await reattachSession(rt, driver, meta);
+		} catch (err: any) {
+			return refusal("REATTACH_FAILED", `could not re-attach to the session: ${extractCliError(err) ?? err?.message ?? err}`);
+		}
+		// A cancel landing in the microtask between `reattachOnce` registering the client and this continuation is
+		// invisible to that guard. Without this the caller heard "cancelled" and then watched `startTurn` rewrite
+		// the status and re-register the client the cancel had just disposed.
+		if (!cancelledBefore && meta.status === "cancelled") {
+			return refusal("CANCELLED", "this session was cancelled while its connection was being made; nothing was prompted");
+		}
+		// Somebody else's reattach was also their turn: an agent mid-turn refuses a second prompt
+		// (`TURN_IN_PROGRESS`) and the rejection path marks the session failed, so starting here would answer
+		// `{ok: true}` to a message nothing received. A restart that landed during the same await is caught
+		// inside `reattachSession`, by the pointer it leaves on this record.
+		if (midTurn(meta)) {
+			return refusal(
+				"BUSY",
+				`another follow-up started a turn on this session while yours was waiting for the connection. ` +
+					`Wait for it, or delegate_cancel to stop it, and send the message again.`,
+			);
+		}
+	}
+	// The reservation ends where the session's own `running` status begins — the same handoff an initial start
+	// makes in `startNow`. Between them there is no window in which the turn is uncounted.
+	release();
+	startTurn(rt, meta, client, prompt);
+	return { ok: true };
+}
+
+/**
  * Continue a session with another prompt, on its live connection if there is one.
  *
  * No re-spawn when the process is alive: a second `devin acp` for a live session id would fork the
@@ -425,47 +494,10 @@ export async function followUp(
 		};
 	}
 
-	let client = rt.activeClients.get(meta.sessionId);
-	if (!client) {
-		if (!driver.driver.capabilities().resume) {
-			release();
-			return {
-				ok: false,
-				code: "NO_CONNECTION",
-				error: `${agentTitle(meta.agent)} has no way to continue a session whose process is gone — use delegate_restart to run the prompt again (same worktree, new session id)`,
-			};
-		}
-		try {
-			client = await reattachSession(rt, driver.driver, meta);
-		} catch (err: any) {
-			release();
-			return {
-				ok: false,
-				code: "REATTACH_FAILED",
-				error: `could not re-attach to the session: ${extractCliError(err) ?? err?.message ?? err}`,
-			};
-		}
-		// Somebody else's reattach was also their turn: an agent mid-turn refuses a second prompt
-		// (`TURN_IN_PROGRESS`) and the rejection path marks the session failed, so starting here would answer
-		// `{ok: true}` to a message nothing received. The check above ran before this await and could not see
-		// it; the live-client path needs none, because nothing is awaited before its `startTurn`. A restart that
-		// landed during the same await is caught inside `reattachSession`, by the pointer it leaves on this record.
-		if (midTurn(meta)) {
-			release();
-			return {
-				ok: false,
-				code: "BUSY",
-				error:
-					`another follow-up started a turn on this session while yours was waiting for the connection. ` +
-					`Wait for it, or delegate_cancel to stop it, and send the message again.`,
-			};
-		}
-	}
-	// The reservation ends where the session's own `running` status begins — the same handoff an initial
-	// start makes in `startNow`. Between them there is no window in which the turn is uncounted.
-	release();
-	startTurn(rt, meta, client, prompt);
-	return { ok: true };
+	// Everything after the reservation belongs to `deliverFollowUp`, and it is one call, not one call and an
+	// await: the first follow-up back from a shared reattach has to reach `startTurn` before the second reads the
+	// session's status.
+	return deliverFollowUp(rt, driver.driver, meta, prompt, release);
 }
 
 export type CancelOutcome = "queued" | "session" | "not_running" | "not_found";
@@ -534,11 +566,11 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	rt.updateStatusUI();
 	void drainQueue(rt);
 
-	// A restart owns this folder — its pointer written, or the restart still spawning. The gate above lets a
-	// settled session through when something still holds a client for it, which is how a cancel racing a
-	// restart reaches here at all, and the safety check inside `releaseWorktree` looks at uncommitted work,
-	// not at who the folder belongs to.
-	if (meta.worktreePath && meta.worktreeStatus === "active" && !restartClaimsWorktree(rt, meta)) {
+	// A restart owns this folder — its pointer written, or the restart still spawning — and so does a
+	// reattach still in flight, which is how this same call answers a cancel of a session that is only
+	// connecting. The safety check inside `releaseWorktree` looks at uncommitted work, not at who the folder
+	// belongs to.
+	if (meta.worktreePath && meta.worktreeStatus === "active" && !worktreeHasLiveClaim(rt, meta)) {
 		void releaseWorktree(rt, meta).catch((err) => rt.logError(`worktree release failed for ${meta.sessionId}: ${extractCliError(err)}`));
 	}
 	return "session";
@@ -553,7 +585,7 @@ export async function onPrClosed(rt: DelegateRuntime, prNumber: number, state: s
 		if (!meta.worktreePath || meta.worktreeStatus !== "active") {
 			continue;
 		}
-		if (restartClaimsWorktree(rt, meta)) {
+		if (worktreeHasLiveClaim(rt, meta)) {
 			// The folder belongs to a restart now — one whose pointer landed, or one still spawning — and that
 			// session may be live: a settled record whose conversation moved on is not evidence its worktree is
 			// dead wood, and through the spawn window the parent is settled, unmarked, with the handover due.

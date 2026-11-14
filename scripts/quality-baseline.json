@@ -19,9 +19,9 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
-    "biome.suspicious/noShadow": 78,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
+    "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 59,
     "biome.suspicious/noExplicitAny": 158,
@@ -46,14 +46,14 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 588,
+    "extensions/lib/delegate/queue.ts": 620,
     "extensions/lib/delegate/recovery.ts": 464,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 580,
-    "extensions/lib/delegate/session.ts": 595,
+    "extensions/lib/delegate/session.ts": 616,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
-    "extensions/lib/delegate/tools-session.ts": 428,
+    "extensions/lib/delegate/tools-session.ts": 451,
     "extensions/lib/delegate/tools.ts": 298,
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 456,
@@ -807,8 +807,24 @@
         "extensions/lib/delegate/queue.ts: 588 lines > baseline 579 (files may only shrink)",
         "extensions/lib/delegate/session.ts: 595 lines > baseline 589 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round twelve scoped the cancel refusal and taught the worktree paths about reattaches.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 615 lines > baseline 588 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 616 lines > baseline 595 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 451 lines > baseline 428 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "deliverFollowUp owns the turn so a shared reattach cannot double-prompt.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 620 lines > baseline 615 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "e4387e8",
+  "generatedFrom": "c6bf8c2",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }
