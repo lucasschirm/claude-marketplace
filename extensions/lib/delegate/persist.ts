@@ -89,9 +89,14 @@ export const STATE_VERSION = 2;
 
 /** Debounced unless `immediate`. Streaming updates must not thrash the disk; status changes must not lag. */
 export function persistMeta(rt: DelegateRuntime, meta: SessionMeta, immediate = false): void {
+	// Where the record lives is decided when the save is scheduled, not when its timer fires. The storage root
+	// is resolved per call, so a debounced write that resolved it three seconds late would land in whatever the
+	// answering context was by then — a different home for a test whose stub has since been replaced, a
+	// different root for anything else, and a session whose record moved mid-life.
+	const metaPath = getMetaPath(rt.currentPiSessionId, meta.sessionId);
 	const save = (): void => {
 		try {
-			void rt.stateWrites.write(getMetaPath(rt.currentPiSessionId, meta.sessionId), JSON.stringify(meta, null, 2));
+			void rt.stateWrites.write(metaPath, JSON.stringify(meta, null, 2));
 		} catch (err) {
 			rt.logError(`Failed to persist meta for ${meta.sessionId}: ${extractCliError(err)}`);
 		}

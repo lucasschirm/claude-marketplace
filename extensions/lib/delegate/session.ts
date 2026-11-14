@@ -360,6 +360,15 @@ export async function spawnSession(
 		attach(rt, client, registered);
 		seedOptions(rt, sessionId, advertised);
 		client.logEvent("session_started", { sessionId, configOptions: advertised });
+		// An id already in the map belongs to a session pi is still tracking. Overwriting it would drop that
+		// record while its transport kept running — one `events.jsonl`, one `meta.json`, and a live agent that
+		// slot accounting no longer counts — so the second spawn is the thing that is wrong, and it is refused
+		// before anything is registered. Needs the agent to hand back an id in use; `agy-acp` mints fresh ones.
+		if (rt.sessions.has(sessionId)) {
+			throw new Error(
+				`${driver.id} returned a session id (${sessionId}) that this pi is already using for another session; nothing was started`,
+			);
+		}
 		rt.sessions.set(sessionId, registered);
 		rt.activeClients.set(sessionId, client);
 		rt.persistSessionMeta(registered, true);
@@ -392,10 +401,11 @@ function logPathFor(rt: DelegateRuntime, sessionId: string): string {
  * arrive before either has a connection share one spawn — see the wrapper under this function.
  */
 async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {
-	// Whether this conversation was already cancelled when the attempt began. `cancelled` describes the last
-	// turn, not a ban on the conversation: a session cancelled days ago can still be continued, and on `main`
-	// it was. Only a cancel that lands *during* this attempt is a reason to stop.
-	const cancelledBefore = meta.status === "cancelled";
+	// Only a cancel that lands *during* this attempt is a reason to stop: `cancelled` describes the last turn,
+	// not a ban on the conversation, and a session cancelled days ago can still be continued (on `main` it
+	// was). Counting the events is what distinguishes the two — the status alone cannot, because an
+	// already-cancelled conversation reports `cancelled` when a fresh cancel lands in this very window.
+	const cancelsSeen = rt.cancelCount(meta.sessionId);
 	// The workspace the conversation was created in, not the one this pi process happens to be sitting in:
 	// an agent with its own store refuses to move a session, and after a restart in another folder the two
 	// are not the same answer. Older records have no `sessionCwd` and get the old expression.
@@ -422,7 +432,7 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 	// `delegate_cancel` reaches a reattaching session through the same gate that admits a running one. Registering
 	// anyway hands a live agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — and
 	// prompts a conversation that has moved on, in a worktree its sibling is editing.
-	const refusal = reattachRefusal(rt, meta, cancelledBefore);
+	const refusal = reattachRefusal(rt, meta, cancelsSeen);
 	if (refusal) {
 		client.dispose();
 		throw new Error(refusal);
@@ -536,19 +546,19 @@ export function worktreeHasLiveClaim(rt: DelegateRuntime, meta: SessionMeta): bo
 }
 
 /** Why this conversation no longer belongs to the process reattaching it — or nothing, and the reattach goes on. */
-function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta, cancelledBefore = false): string | undefined {
+function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta, cancelsSeen = 0): string | undefined {
 	if (meta.supersededBy) {
 		return `the agent was still starting when ${supersededError(meta)}`;
 	}
 	if (rt.restarting.has(meta.sessionId)) {
 		return "a delegate_restart of this session is in flight and owns its conversation now; nothing was prompted here";
 	}
-	if (meta.status === "cancelled" && !cancelledBefore) {
+	if (rt.cancelCount(meta.sessionId) !== cancelsSeen) {
 		// `delegate_cancel` can reach a session mid-reattach even though nothing is running yet: the record is
 		// settled, no client is registered, and the process answering is still in `session/resume`. Cancelling
 		// has to mean the prompt never fires, or "cancelled" is a message the caller gets to watch fail. Scoped
-		// to a cancel that landed during this attempt, because a session cancelled earlier is a conversation the
-		// caller can still continue — refusing it here would also spend a spawn and a restore to say no.
+		// to a cancel that landed during this attempt — by count, not by status, because the status is already
+		// `cancelled` for exactly the conversations this path exists to continue.
 		return "this session was cancelled while its agent was starting; nothing was prompted";
 	}
 	if (rt.sessions.get(meta.sessionId) !== meta) {

@@ -405,11 +405,12 @@ async function deliverFollowUp(
 				`${agentTitle(meta.agent)} has no way to continue a session whose process is gone — use delegate_restart to run the prompt again (same worktree, new session id)`,
 			);
 		}
-		// Whether the record was already cancelled when this attempt began: `cancelled` describes the last turn,
-		// and a conversation the caller wants back is still a conversation, so only a cancel that lands *during*
-		// the reattach refuses. `reattachSession` makes the same distinction; the window that matters for the
-		// answer below opens when its promise resolves, after that guard has run.
-		const cancelledBefore = meta.status === "cancelled";
+		// Only a cancel that lands *during* the reattach refuses: `cancelled` describes the last turn, and a
+		// conversation the caller wants back is still a conversation. The count is what makes that decidable —
+		// a session that arrived cancelled has the status either way, and round 14 caught this guard reading a
+		// cancel that landed mid-handshake as the pre-existing one. `reattachSession` makes the same
+		// distinction; the window that matters for the answer below opens when its promise resolves.
+		const cancelsSeen = rt.cancelCount(meta.sessionId);
 		try {
 			client = await reattachSession(rt, driver, meta);
 		} catch (err: any) {
@@ -418,7 +419,7 @@ async function deliverFollowUp(
 		// A cancel landing in the microtask between `reattachOnce` registering the client and this continuation is
 		// invisible to that guard. Without this the caller heard "cancelled" and then watched `startTurn` rewrite
 		// the status and re-register the client the cancel had just disposed.
-		if (!cancelledBefore && meta.status === "cancelled") {
+		if (rt.cancelCount(meta.sessionId) !== cancelsSeen) {
 			return refusal("CANCELLED", "this session was cancelled while its connection was being made; nothing was prompted");
 		}
 		// Somebody else's reattach was also their turn: an agent mid-turn refuses a second prompt
@@ -543,6 +544,9 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	}
 
 	meta.status = "cancelled";
+	// The status says what the conversation is; this says that *this* cancel happened. A reattach cannot tell
+	// the two apart from `status` alone, and has to be able to.
+	rt.cancels.set(targetId, rt.cancelCount(targetId) + 1);
 	meta.finishedAt = Date.now();
 	rt.stopStallWatchdog(meta.sessionId);
 	rt.flushBuffers(meta);

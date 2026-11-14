@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import fs from "node:fs";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { fakeClient, makeStub, metaFor } from "./helpers/delegate-stub.ts";
 import { getEventsLogPath, getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
@@ -253,6 +254,31 @@ test("state and metadata persist under the new root, and drain on demand", async
 		assert.ok(getEventsLogPath("pi-test", "s-1").startsWith(home), "everything is inside the temp home");
 	} finally {
 		restoreHome();
+	}
+});
+
+test("a debounced record write lands where it was scheduled, not where its timer fired", { timeout: 30_000 }, async () => {
+	// The save is deferred three seconds and the storage root is resolved per call, so a path computed inside
+	// the timer is answered by whatever the process thinks the home is by then. For a test that is a sibling
+	// stub's home; for anything else it is a record that moved out from under the session it describes.
+	const first = makeStub();
+	let second: ReturnType<typeof makeStub> | undefined;
+	try {
+		const meta = metaFor("s-1");
+		first.rt.sessions.set("s-1", meta);
+		// Scheduled while the first stub still owns the process-global home...
+		first.rt.persistSessionMeta(meta, false);
+		// ...and only then superseded, so the timer fires into a process that now answers a different home.
+		second = makeStub();
+		await new Promise((done) => setTimeout(done, 3_400));
+		await first.rt.stateWrites.drain(3_000);
+		const scheduled = path.join(first.home, ".pi", "agent", "delegate_task", "pi-test", "s-1", "meta.json");
+		const elsewhere = path.join(second.home, ".pi", "agent", "delegate_task", "pi-test", "s-1", "meta.json");
+		assert.ok(fs.existsSync(scheduled), `the record stayed in the home it was scheduled in: ${scheduled}`);
+		assert.strictEqual(fs.existsSync(elsewhere), false, "and did not follow the current stub's home");
+	} finally {
+		second?.restoreHome();
+		first.restoreHome();
 	}
 });
 

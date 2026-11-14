@@ -122,6 +122,11 @@ await and answers `BUSY`, telling the caller to send it again.
 | an answer naming no id at all is refused, and nothing is prompted | same |
 | two follow-ups in the reattach window share one spawn, adopt once, and the loser is refused (`BUSY`) rather than double-prompting | same |
 | an effort the model picked for itself clears `meta.thinking` instead of leaving the refused level | same |
+| a cancel that lands mid-reattach stops the prompt — for a fresh **and** an already-cancelled conversation | same, against `rt.cancels` |
+| an id the agent hands back a second time cannot evict the session that already holds it | same |
+| a hostile id in `state.json` cannot stop recovery or leave the storage tree | `test/test-delegate-recovery.ts` |
+| a recorded root survives only when both halves are ids, and a session is keyed by its own record | same |
+| a debounced record write lands in the home it was scheduled in, not the one answering three seconds later | `test/test-delegate-runtime.ts` |
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
@@ -415,6 +420,41 @@ restart, so a session whose ordinary follow-up was reconnecting it produced a wa
 for a `delegate_restart` that would never come. `liveClaimText` names the claim — superseded, restart in flight,
 follow-up reconnecting — and the test asserts the three wordings rather than only the skip. A correct decision
 with a wrong explanation is the same defect rounds 11 and 12 were about, one layer down.
+
+### §7.8 A cancel no status can express, and a container nobody validated (round 14)
+
+Round 12 scoped the mid-reattach refusal by asking whether the record had *already* been cancelled, and that
+question cannot be answered from `meta.status`. A conversation that arrives cancelled is one the caller may still
+continue — that is what reattach exists for — and it answers `cancelled` to a fresh cancel too, so "cancelled
+before" and "cancelled just now" are the same string. The caller heard "Cancelled, the slot is free" and watched
+the turn start anyway: round 11's lie, surviving for exactly the sessions reattach serves. `rt.cancels` counts
+cancels per id, and both guards compare the count across their own await. Two tests hold the line from opposite
+sides — a conversation cancelled earlier is still continuable, a second cancel mid-reattach stops the prompt and
+disposes the child — and reverting the guard to a status comparison reddens the first.
+
+The same round moved the trust boundary to `state.json` itself. `normalizeMeta` validates the fields of a record
+and `isStorageSafeId` guards ids from the wire, but the container's own values went straight into `path.join`: a
+non-string in `sessionIds` threw `TypeError` partway through the session loop — queue already restored, every
+later session unread, `persistState` and the drain skipped — and a `..`-bearing id read or appended outside the
+tree this extension owns. `sessionDirs` keys *and* values are path segments too (the value is the pi session id a
+record was written under), and `rt.sessions` is now keyed by `meta.sessionId` rather than by the list entry, so a
+record and its key can no longer be two answers written forward on the next save. The first attempt at this fix
+validated the recorded root with `absolutePathOr` — which would have dropped **every** legitimate entry, because
+those values are ids and not absolute paths — and the failure mode would have been quiet: recovery simply not
+finding records under a renamed pi session id.
+
+Two smaller ones with the same shape. `persistMeta` deferred a debounced save by three seconds and resolved the
+storage root *inside* the timer, so the write answered whatever home the process believed in by then; it resolves
+when the save is scheduled now. And `spawnSession` no longer overwrites: an agent handing back an id already in
+`rt.sessions` used to evict the record pi was tracking while that session's transport kept running — one
+`meta.json`, one `events.jsonl`, and a live agent slot accounting no longer counts — so the second start is
+refused and its child disposed.
+
+Finally, the pin's own honesty. The two-stub recovery test restored neither stub, leaving `HOME` pointing at a
+temp directory for every later test in the file and letting two runtimes write one `pi-test` namespace
+last-writer-wins; it restores newest-first now. And the comment written in round 11 claimed interleaved
+continuations resolved the real `~/.pi` — true before the pin, wrong after it, where a late write lands in
+whatever sibling stub currently owns the process-global home. The comment says that instead.
 
 
 ## 8. Out of scope

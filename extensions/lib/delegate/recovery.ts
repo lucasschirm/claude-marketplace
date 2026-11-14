@@ -205,8 +205,16 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	rt.totalInvoked =
 		Number.isSafeInteger(state.totalInvoked) && state.totalInvoked > 0 && state.totalInvoked <= MAX_QUEUE_ID ? state.totalInvoked : 0;
 	rt.totalCompleted = state.totalCompleted || 0;
-	for (const [id, dir] of Object.entries(state.sessionDirs ?? {})) {
-		rt.sessionDirs.set(id, dir);
+	for (const [id, recorded] of Object.entries(state.sessionDirs ?? {})) {
+		// Both halves become path segments: the id names a session directory, the value is the *pi session id*
+		// the record was written under and heads every later candidate list. A non-string throws inside
+		// `path.join` partway through the session loop below — after the queue is restored, with the remaining
+		// sessions never read and `persistState`/`drainQueue` skipped — and a `..`-bearing one reads or appends
+		// outside the tree this extension owns. `normalizeMeta` guards its own fields; nothing guarded the
+		// container's, and a hand-edited or half-written `state.json` reaches this line first.
+		if (isStorageSafeId(id) && isStorageSafeId(recorded)) {
+			rt.sessionDirs.set(id, recorded);
+		}
 	}
 
 	// The queue is restored before any session is read, and the counters before that. The budget for this
@@ -252,6 +260,11 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			if (signal?.aborted) {
 				return report;
 			}
+			// An id from the list is a directory name before it is anything else, so it is checked the way every
+			// other stored id is: `normalizeMeta` cannot vouch for a value that never reaches it.
+			if (typeof sessionId !== "string" || !isStorageSafeId(sessionId)) {
+				continue;
+			}
 			const meta = await readMeta(rt, piSessionId, sessionId, state.sessionDirs?.[sessionId]);
 			if (!meta) {
 				continue;
@@ -259,7 +272,11 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			if (meta.status === "running" || meta.status === "stalled") {
 				reconcileInFlight(rt, meta, report);
 			}
-			rt.sessions.set(sessionId, meta);
+			// Keyed by what the record says, not by the list: the map key is what `persistState` writes back as a
+			// session id and what every lookup answers to, so a list entry and a record that disagree would leave
+			// a session whose key, `meta.json` and transcript candidates are three different answers — and the
+			// next save would write that split forward.
+			rt.sessions.set(meta.sessionId, meta);
 			report.recovered++;
 			// No unconditional re-anchor here. A recovered record is written again when something about it
 			// changed — `reconcileInFlight` and the backfill both persist what they mutate — and copying every

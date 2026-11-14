@@ -16,12 +16,12 @@
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
+    "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
-    "biome.performance/noAwaitInLoops": 107,
-    "biome.performance/useTopLevelRegex": 617,
-    "biome.suspicious/noShadow": 78,
     "biome.complexity/noExcessiveLinesPerFunction": 10,
+    "biome.suspicious/noShadow": 78,
+    "biome.performance/useTopLevelRegex": 617,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 58,
     "biome.suspicious/noExplicitAny": 158,
@@ -43,14 +43,14 @@
     "extensions/lib/delegate/handshake.ts": 233,
     "extensions/lib/delegate/liveness.ts": 51,
     "extensions/lib/delegate/permissions.ts": 251,
-    "extensions/lib/delegate/persist.ts": 117,
+    "extensions/lib/delegate/persist.ts": 122,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 628,
-    "extensions/lib/delegate/recovery.ts": 464,
+    "extensions/lib/delegate/queue.ts": 632,
+    "extensions/lib/delegate/recovery.ts": 481,
     "extensions/lib/delegate/registry.ts": 238,
-    "extensions/lib/delegate/runtime.ts": 580,
-    "extensions/lib/delegate/session.ts": 616,
+    "extensions/lib/delegate/runtime.ts": 594,
+    "extensions/lib/delegate/session.ts": 626,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
     "extensions/lib/delegate/tools-session.ts": 451,
@@ -830,8 +830,19 @@
       "changes": [
         "extensions/lib/delegate/queue.ts: 628 lines > baseline 620 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round fourteen counted cancels and read state.json as untrusted input.",
+      "changes": [
+        "extensions/lib/delegate/persist.ts: 122 lines > baseline 117 (files may only shrink)",
+        "extensions/lib/delegate/queue.ts: 632 lines > baseline 628 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 481 lines > baseline 464 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 594 lines > baseline 580 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 626 lines > baseline 616 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "ffb0f72",
+  "generatedFrom": "3af7472",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

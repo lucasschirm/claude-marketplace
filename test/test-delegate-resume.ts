@@ -50,10 +50,13 @@ const NOT_IN_STORE_RE = /not a conversation this store has/;
 const NO_SESSION_ID_RE = /without a session id/;
 const STARTED_ORPHANED_RE = /while its agent was starting/;
 const NEW_SESSION_ID_RE = /brave-walrus/;
+// The wording of the refusal is part of the contract: the caller has to be able to tell this from a crash.
+const COLLISION_RE = /already using for another session/;
+
 const CANCELLED_MID_REATTACH_RE = /cancelled while its agent was starting/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
-function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number } } = {}) {
+function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number }; createId?: string } = {}) {
 	const calls: Call[] = [];
 	const events: Array<{ type: string; data: Record<string, unknown> }> = [];
 	let disposed = 0;
@@ -72,6 +75,9 @@ function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delay
 		respond: () => {},
 		request: async (method: string, params: RpcParams) => {
 			calls.push({ method, params });
+			if (method === "session/new" && opts.createId) {
+				return { sessionId: opts.createId, configOptions: [] };
+			}
 			if (method === "session/resume") {
 				if (opts.resume?.delayMs) {
 					await new Promise((done) => setTimeout(done, opts.resume.delayMs));
@@ -407,6 +413,63 @@ test("a cancel that lands mid-reattach stops the prompt instead of saying there 
 		assert.strictEqual(stub.disposed(), 1, "and the child spawned for it is disposed");
 		assert.strictEqual(meta.status, "cancelled");
 		assert.strictEqual(rt.totalCompleted, completedBefore, "a turn that never ran is not a completion");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("an id the agent hands back a second time cannot evict the session that already holds it", async () => {
+	// `rt.sessions.set` overwrites. An agent that mints an id already in the map — a store reset, a server that
+	// recycles ids — would drop the record pi is still tracking while that session's transport kept running:
+	// one `meta.json`, one `events.jsonl`, and a live agent that slot accounting no longer counts. The second
+	// start is the wrong thing, so it is refused, and the child spawned for it is disposed.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ createId: "conv-1" });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const live = deadSession(rt, "agy", "conv-1");
+		live.status = "running";
+		await assert.rejects(
+			() => spawnSession(rt, agyDriver, {}, { prompt: "p", cwd: "/work", createWorktree: false }),
+			COLLISION_RE,
+			"a duplicate id is a refusal, not a replacement",
+		);
+		assert.strictEqual(rt.sessions.get("conv-1"), live, "the session that had the id first keeps it");
+		assert.strictEqual(stub.disposed(), 1, "and the second child is disposed rather than left running");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a cancel that lands mid-reattach of an already-cancelled session still stops the prompt", async () => {
+	// `cancelled` is not evidence about *this* cancel. A conversation cancelled earlier is one the caller can
+	// continue — the test below proves that — so the guard cannot ask the status whether the session was
+	// cancelled before; it asks whether the count moved while it was reconnecting. Round 14 found the
+	// status question answering "yes, unchanged" for a cancel that had just landed, so the caller heard
+	// "cancelled" and watched a turn start anyway: the round 11 lie, surviving for exactly this case.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ resume: { delayMs: 80 } });
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		meta.status = "cancelled";
+		const cancelsBefore = rt.cancelCount("conv-1");
+		const waiting = followUp(rt, meta, "next");
+		await new Promise((done) => setTimeout(done, 20));
+		assert.strictEqual(meta.status, "cancelled", "the conversation was already cancelled when this began");
+		assert.strictEqual(rt.reattaching.has("conv-1"), true, "and the reattach is in flight when the cancel lands");
+		assert.strictEqual(await cancelSession(rt, "conv-1"), "session", "so a cancel still reaches it");
+		assert.strictEqual(rt.cancelCount("conv-1"), cancelsBefore + 1, "the event is counted, not only recorded");
+		const res = failure(await waiting);
+		assert.strictEqual(res.code, "REATTACH_FAILED");
+		assert.match(res.error, CANCELLED_MID_REATTACH_RE);
+		assert.strictEqual(
+			stub.calls.some((c) => c.method === "session/prompt"),
+			false,
+			"and nothing is prompted into the conversation the caller just cancelled",
+		);
+		assert.strictEqual(stub.disposed(), 1, "the child spawned for it is disposed, not left attached");
+		assert.strictEqual(rt.activeClients.has("conv-1"), false, "and no client stays registered on a cancelled session");
 	} finally {
 		restoreHome();
 	}

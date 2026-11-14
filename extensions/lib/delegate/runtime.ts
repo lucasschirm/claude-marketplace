@@ -61,6 +61,15 @@ export class DelegateRuntime {
 	 * while the other was still inside the removal, and the folder would look reusable again.
 	 */
 	readonly releasingWorktrees = new Map<string, number>();
+	/**
+	 * How many times a cancel has been answered for each session id in this process.
+	 *
+	 * `meta.status` cannot express a cancel: a session that arrived already `cancelled` is a conversation the
+	 * caller may still continue — that is what reattach exists for — and it answers `cancelled` to a *new*
+	 * cancel as well, so "was it cancelled before?" and "was it cancelled just now?" are the same question.
+	 * A reattach compares this count across its own await, which tells the two apart.
+	 */
+	readonly cancels = new Map<string, number>();
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();
@@ -155,6 +164,11 @@ export class DelegateRuntime {
 	 *  bug test/test-devin-tui-safety.ts guards (see its note on the worktree failure path). */
 	private safe(message: string): string {
 		return stripAnsi(message).replace(/\s+/g, " ").trim().slice(0, 500);
+	}
+
+	/** How many cancels this conversation has been answered in this process. */
+	cancelCount(sessionId: string): number {
+		return this.cancels.get(sessionId) ?? 0;
 	}
 
 	logWarn(message: string): void {
