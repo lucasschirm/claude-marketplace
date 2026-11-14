@@ -264,6 +264,18 @@ export class DelegateTransport {
 			if (!this.child?.stdin || this.child.killed) {
 				return reject(new Error(`${this.plan.label} process is not running`));
 			}
+			if (this.exitInfo) {
+				// The child is gone but the pipe object is not: `child.stdin` stays non-null and `child.killed`
+				// stays false after a natural exit, so the guard above lets a request through that nothing will
+				// ever answer — the handler that rejects pending requests already ran. A `session/prompt` sent
+				// with `timeoutMs = 0` would then pend forever, holding its slot. Tagged, because the caller has
+				// to know the agent died rather than broke.
+				return reject(
+					Object.assign(new Error(`${this.plan.label} exited with code ${this.exitInfo.code}`), {
+						agentExited: true,
+					}),
+				);
+			}
 			const id = this.nextRpcId++;
 			const req: AcpMessage = { jsonrpc: "2.0", id, method, params };
 

@@ -22,6 +22,7 @@ const SERVER = path.join(import.meta.dirname, "fake-acp-server.mjs");
 // its stdout pipe open — which is how a test suite hangs instead of reporting.
 const launched: DelegateTransport[] = [];
 const MISSING_WORKSPACE_RE = /definitely-not-a-workspace/;
+const EXITED_WITH_CODE_3 = /exited with code 3/;
 after(() => {
 	for (const t of launched) {
 		try {
@@ -69,6 +70,29 @@ async function connected(env: Record<string, string> = {}): Promise<{
 		},
 	};
 }
+
+test("a request written after the agent died is refused at once, not held forever", async () => {
+	// A natural exit leaves `child.stdin` non-null and `child.killed` false, and the handler that rejects
+	// pending requests has already run — so a request written afterwards was accepted into a map nobody would
+	// ever resolve. With `timeoutMs = 0` (how a turn is sent) that is a turn that never ends, holding its slot.
+	const t = makeTransport({
+		...plan(),
+		args: ["-e", "process.exit(3)"],
+	});
+	await assert.rejects(async () => t.start(), "the child dies during the handshake");
+	await waitFor(() => !isPidAlive(t.pid ?? -1), "the child to exit");
+	// Raced, not awaited: unfixed, the request would never settle and the suite would hang rather than report.
+	const settled = await Promise.race([
+		t.request("session/prompt", { sessionId: "x", prompt: [] }, 0).then(
+			() => "resolved",
+			(err: Error) => err,
+		),
+		new Promise((done) => setTimeout(() => done("hung"), 3_000)),
+	]);
+	assert.ok(settled instanceof Error, `expected a rejection, got ${String(settled)}`);
+	assert.match(settled.message, EXITED_WITH_CODE_3);
+	assert.strictEqual((settled as Error & { agentExited?: boolean }).agentExited, true, "tagged as the agent's death");
+});
 
 test("the handshake keeps what the agent advertised, because that is the honest answer to what it can do", async () => {
 	const t = makeTransport(plan({ FAKE_AGENT_NAME: "fake-claude" }));

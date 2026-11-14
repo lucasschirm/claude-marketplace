@@ -19,8 +19,8 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 952,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 621,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 59,
@@ -46,7 +46,7 @@
     "extensions/lib/delegate/persist.ts": 122,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 106,
-    "extensions/lib/delegate/queue.ts": 742,
+    "extensions/lib/delegate/queue.ts": 757,
     "extensions/lib/delegate/recovery.ts": 552,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 614,
@@ -56,7 +56,7 @@
     "extensions/lib/delegate/tools-session.ts": 479,
     "extensions/lib/delegate/tools.ts": 298,
     "extensions/lib/delegate/transcript.ts": 230,
-    "extensions/lib/delegate/transport.ts": 459,
+    "extensions/lib/delegate/transport.ts": 471,
     "extensions/lib/delegate/types.ts": 332,
     "extensions/lib/delegate/worktree.ts": 251,
     "extensions/lib/exec-payload.ts": 165,
@@ -876,8 +876,16 @@
         "extensions/lib/delegate/session.ts: 697 lines > baseline 687 (files may only shrink)",
         "extensions/lib/delegate/transport.ts: 459 lines > baseline 456 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round nineteen stopped a dead agent from being prompted and from hanging a caller.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 757 lines > baseline 742 (files may only shrink)",
+        "extensions/lib/delegate/transport.ts: 471 lines > baseline 459 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "7014c6f",
+  "generatedFrom": "945f6ac",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

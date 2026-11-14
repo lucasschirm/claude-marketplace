@@ -269,12 +269,27 @@ async function startNow(
 			unregisterStart(rt, started, client);
 			return gone;
 		}
-		if (started.status === "cancelled") {
-			// Cancelled while its mode and model were still being chosen — a window that is two round trips
-			// long. Starting the turn anyway would hand the caller back a session it had just stopped, with a
-			// live process behind it.
+		if (started.status !== "running") {
+			// The session stopped being startable while its mode and model were being chosen, a window two round
+			// trips long. Cancelled is the case this guard was written for: starting the turn would hand the
+			// caller back a session it had just stopped. An agent that exited in the window is the other one —
+			// `onExit` settled it as interrupted, and prompting it now would revive a finished session, re-arm
+			// the completion marker, and (since nothing answers a request written after an exit) hold a slot for
+			// a turn that can never end. Either way the recorded status is already terminal, so the slot the
+			// session owns is not held by it.
 			client.dispose();
-			return { ok: false, code: "CANCELLED_DURING_START", error: "the session was cancelled while it was being configured" };
+			if (started.status === "cancelled") {
+				return {
+					ok: false,
+					code: "CANCELLED_DURING_START",
+					error: "the session was cancelled while it was being configured",
+				};
+			}
+			return {
+				ok: false,
+				code: "START_FAILED",
+				error: started.error ?? `${started.agent} exited before its first prompt could be sent`,
+			};
 		}
 		startTurn(rt, started, client, task.prompt);
 		if (announce) {

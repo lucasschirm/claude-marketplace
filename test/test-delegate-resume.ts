@@ -68,12 +68,15 @@ function stubTransport(
 	const calls: Call[] = [];
 	const events: Array<{ type: string; data: Record<string, unknown> }> = [];
 	let disposed = 0;
+	let exitCb: ((code: number | null, signal: string | null) => void) | undefined;
 	const transport = {
 		pid: 4242,
 		start: async () => {},
 		setLogFilePath: () => {},
 		setOnUpdate: () => {},
-		setOnExit: () => {},
+		setOnExit: (cb: (code: number | null, signal: string | null) => void) => {
+			exitCb = cb;
+		},
 		setOnRequest: () => {},
 		logEvent: (type: string, data: Record<string, unknown>) => {
 			events.push({ type, data });
@@ -107,7 +110,14 @@ function stubTransport(
 			disposed++;
 		},
 	};
-	return { transport: transport as unknown as DelegateTransport, calls, events, disposed: () => disposed };
+	return {
+		transport: transport as unknown as DelegateTransport,
+		calls,
+		events,
+		disposed: () => disposed,
+		/** Reports the child's death, as the transport does on `close`. */
+		exit: (code: number | null) => exitCb?.(code, null),
+	};
 }
 
 /** A settled session with no live connection, which is the state a follow-up arrives on. */
@@ -509,6 +519,54 @@ test("a folder removed without the session being told is refused too, not spawne
 		const res = failure(await followUp(rt, meta, "next"));
 		assert.strictEqual(res.code, "WORKSPACE_GONE");
 		assert.match(res.error, /was removed without the session being told/);
+	} finally {
+		restoreHome();
+	}
+});
+
+/** What the caller should hear when the agent died mid-start: its own exit, not a generic failure. */
+const EXITED_WITH_CODE_137 = /exited with code 137/;
+
+test("an agent that died while its mode was being chosen is not started", async () => {
+	// Choosing the mode is a round trip, and the child can die inside it. `onExit` settles the session as
+	// interrupted, and then the start used to prompt it anyway: `startTurn` rewrote the status back to
+	// `running`, re-armed the completion marker, and wrote a `session/prompt` with no timeout to a process that
+	// was already gone — a session sitting `running`, then `stalled`, forever, holding its slot.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ createId: "dying-1", configureDelayMs: 400 });
+	rt.makeTransport = () => stub.transport;
+	const announced: string[] = [];
+	try {
+		rt.sendAgentMessage = (text: string) => {
+			announced.push(text);
+		};
+		rt.queue.push({
+			queueId: "q-1",
+			agent: "agy",
+			prompt: "p",
+			mode: "plan",
+			createWorktree: false,
+			enqueuedAt: Date.now(),
+		} as never);
+		const draining = drainQueue(rt);
+		await new Promise((done) => setTimeout(done, 80));
+		assert.ok(
+			stub.calls.some((c) => c.method !== "session/new"),
+			"the start is inside its configuration round trips when the agent dies",
+		);
+		stub.exit(137);
+		await draining;
+		// `drainQueue` *floats* its start, so `await draining` says nothing about where the start got to — it
+		// returns as soon as the task was handed off. Wait for the start's own verdict: without the guard the
+		// turn is started, the stub answers it, and this notice never arrives.
+		const refusal = await waitFor(() => announced.find((m) => m.includes("The queued task q-1 failed to start")), 3_000);
+		assert.match(refusal, EXITED_WITH_CODE_137, "the caller hears the agent's own death, not a generic failure");
+		// And let the configuration round trips finish: the prompt is what the guard exists to prevent, and it
+		// would land after the wait above if the guard were missing.
+		await new Promise((done) => setTimeout(done, 400));
+		assert.ok(!stub.calls.some((c) => c.method === "session/prompt"), "a dead agent is not prompted");
+		assert.strictEqual(rt.sessions.get("dying-1")?.status, "interrupted", "the death is the verdict, not a revived turn");
+		assert.strictEqual(rt.slots.inFlight("agy"), 0, "and the slot it held comes back");
 	} finally {
 		restoreHome();
 	}

@@ -571,7 +571,7 @@ and leaves the verdict to `onExit`, so a death is an interruption and one comple
 agent that answers the prompt with an *error* while still alive is a different event and still reads `failed`.
 
 **And the code a caller keys on.** A start interrupted inside `spawnSession` reported `START_FAILED` while its
-three sibling shutdown exits reported `SESSION_CLOSED`; the cleanup was identical, but "the agent failed to
+the sibling shutdown exits reported `SESSION_CLOSED`; the cleanup was identical, but "the agent failed to
 start" sends the caller off to retry an agent that was never the problem. The throw is typed now
 (`PiShutDownError`) and maps to the same closed-session answer.
 
