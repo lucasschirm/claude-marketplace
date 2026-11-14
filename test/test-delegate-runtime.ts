@@ -6,7 +6,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fakeClient, makeStub, metaFor } from "./helpers/delegate-stub.ts";
 import { cancelSession } from "../extensions/lib/delegate/queue.ts";
-import { attach } from "../extensions/lib/delegate/session.ts";
+import { attach, startTurn } from "../extensions/lib/delegate/session.ts";
+import { unregisterStart } from "../extensions/lib/delegate/queue.ts";
 import { getEventsLogPath, getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
 import { must } from "./helpers/must.ts";
 
@@ -293,13 +294,19 @@ test("cancelling a turn that is running is the completion", async () => {
 });
 
 /** A client that hands its exit callback to the test, so a process death can be replayed without a process. */
-function exitClient(captured: { onExit?: (code: number | null) => void }) {
+function exitClient(captured: { onExit?: (code: number | null) => void }, opts: { diesWhilePrompting?: boolean } = {}) {
 	const base = fakeClient() as Record<string, unknown>;
 	return {
 		...base,
 		pid: 4242,
 		start: async () => {},
-		request: async () => ({}),
+		request: async (method: string) => {
+			if (opts.diesWhilePrompting && method === "session/prompt") {
+				// Exactly what the transport does when the child exits with a request outstanding.
+				throw Object.assign(new Error("agy-acp exited with code 1"), { agentExited: true });
+			}
+			return {};
+		},
 		setLogFilePath: () => {},
 		setOnUpdate: () => {},
 		setOnRequest: () => {},
@@ -328,6 +335,32 @@ test("an agent that dies before it was ever prompted is not a completed turn", a
 	}
 });
 
+test("a death mid-turn is an interruption whether the rejection or the exit lands first", async () => {
+	// The transport rejects an in-flight prompt on the child's `exit` and delivers the exit callback on `close`,
+	// so the rejection usually wins. Until round 18 that meant the same death read `failed` with no completion
+	// when `exit` won, and `interrupted` with one when `close` did — the caller's history depended on a race.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.turnInFlight.add("s-1");
+		const captured: { onExit?: (code: number | null) => void } = {};
+		const client = exitClient(captured, { diesWhilePrompting: true });
+		// Attached first: without a client on the session there is no exit callback to fire, and the assertion
+		// below would be measuring nothing.
+		attach(rt, client as never, meta);
+		const before = rt.totalCompleted;
+		startTurn(rt, meta, client as never, "go");
+		await new Promise((done) => setImmediate(done));
+		assert.strictEqual(meta.status, "running", "the rejection alone does not decide the verdict");
+		captured.onExit?.(1);
+		assert.strictEqual(meta.status, "interrupted", "the exit does");
+		assert.strictEqual(rt.totalCompleted, before + 1, "one completion, whichever came first");
+	} finally {
+		restoreHome();
+	}
+});
+
 test("an agent that dies mid-turn is one completion, not two", async () => {
 	// The mirror case: with a prompt in flight the marker is there, and `onExit` is the path that charges it.
 	// The rejection that follows the same exit deletes an already-empty marker, so nothing double-counts.
@@ -342,6 +375,33 @@ test("an agent that dies mid-turn is one completion, not two", async () => {
 		captured.onExit?.(2);
 		assert.strictEqual(rt.totalCompleted, before + 1, "a turn that was cut short still ended once");
 		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "and the marker went with it");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("abandoning a start cancels the record write its updates armed", async () => {
+	// A `current_mode_update` answering `session/set_mode` is normal ACP behaviour, and every update persists
+	// the session on a three-second debounce. An abandoned start that left the timer armed writes a record for
+	// the session it is unregistering — into whatever namespace answers when the timer fires.
+	const { rt, home, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.assistantBuffers.set("s-1", "half an answer");
+		rt.thoughtBuffers.set("s-1", "half a thought");
+		rt.persistSessionMeta(meta, false);
+		assert.ok(rt.pendingMetaSaves.has("s-1"), "the debounced write is armed");
+		unregisterStart(rt, meta, exitClient({}) as never);
+		assert.strictEqual(rt.pendingMetaSaves.has("s-1"), false, "abandoning it disarms the write");
+		assert.strictEqual(rt.assistantBuffers.size, 0, "and the half-written buffers go with it");
+		assert.strictEqual(rt.thoughtBuffers.size, 0);
+		await new Promise((done) => setTimeout(done, 3_600));
+		assert.strictEqual(
+			fs.existsSync(path.join(home, ".pi", "agent", "delegate_task", "pi-test", "s-1", "meta.json")),
+			false,
+			"nothing was persisted after the session was taken back",
+		);
 	} finally {
 		restoreHome();
 	}

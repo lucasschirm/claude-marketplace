@@ -139,6 +139,9 @@ await and answers `BUSY`, telling the caller to send it again.
 | a start pi shut down mid-way takes the worktree it provisioned, and writes no record anywhere | same, `test/test-delegate-resume.ts` |
 | a start that was choosing its mode when pi shut down sends no prompt and re-registers nothing | `test/test-delegate-resume.ts` |
 | an agent that dies before it was ever prompted is not a completed turn; one that dies mid-turn is exactly one | `test/test-delegate-runtime.ts` |
+| a death mid-turn says `interrupted` whether the prompt rejection or the exit callback arrives first | same |
+| abandoning a start disarms the debounced record write its updates had armed | same |
+| a start dropped by shutdown is announced as a closed session, not a failed start | `test/test-delegate-worktree.ts` |
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
@@ -545,6 +548,41 @@ nothing selects by a stored id any more).
 marker; `onExit` still counted on `status`, and `spawnSession` records `running` to hold the slot before any
 prompt exists. A child that dies in that configuration window charged a turn that was never sent. `onExit` takes
 the marker too now, which both kills the phantom count and clears the marker on that path.
+
+### §7.11 What the shutdown fix left open, and a verdict that depended on a race (round 18)
+
+Round 17's guard was right where it stood and wrong about how far it reached, in two quiet ways.
+
+**An abandoned start left its record write armed.** Choosing the mode is a round trip, and an agent answering
+`session/set_mode` with a `current_mode_update` is normal ACP behaviour — every update persists the session on a
+three-second debounce. So a start abandoned at either epoch exit could leave a timer that fires after pi is gone
+and writes `meta.json` for the session being unregistered, into whatever namespace answers at the time. The same
+phantom class `spawnSession`'s `stale` check exists to prevent, one await later. Impact was limited — recovery
+enumerates `state.json`'s `sessionIds`, so a stray file is litter rather than resurrected state — which is exactly
+the kind of "harmless today" that stops being harmless when a sweep starts reading directories. `unregisterStart`
+disarms the save and drops the half-written assistant/thought buffers; the failed-start path never had either.
+
+**The same death read two different ways.** The transport rejects an in-flight `session/prompt` on the child's
+`exit` and delivers the exit callback on `close`, which is normally later — so the rejection won, wrote
+`failed`, took the marker without charging, and `onExit` then saw a non-running status and stayed quiet. When
+`close` happened to win, the session read `interrupted` and charged one completion. Same event, two histories,
+decided by stdio timing. The rejection now recognises its own cause (the transport tags exit-caused rejections)
+and leaves the verdict to `onExit`, so a death is an interruption and one completion whichever lands first. An
+agent that answers the prompt with an *error* while still alive is a different event and still reads `failed`.
+
+**And the code a caller keys on.** A start interrupted inside `spawnSession` reported `START_FAILED` while its
+three sibling shutdown exits reported `SESSION_CLOSED`; the cleanup was identical, but "the agent failed to
+start" sends the caller off to retry an agent that was never the problem. The throw is typed now
+(`PiShutDownError`) and maps to the same closed-session answer.
+
+**Judged and left alone: `removeOrcaWorktree`'s orca-less fallback.** It runs `git worktree remove` in
+`process.cwd()` rather than the target repository. Probing git directly: the command needs no particular cwd
+inside the repo (it works from the main worktree, from a *linked* one, and from subdirectories), refuses the main
+worktree as a target, and fails honestly — "not a working tree", "not a git repository" — when the cwd is
+unrelated. It cannot reach across repositories, since a worktree path is registered in exactly one repo's list.
+So the wrong-cwd outcome is a reported failure, never a wrong deletion, and threading the provisioning cwd
+through is a cleanup rather than a fix. The one real edge — pi's cwd *inside* the folder being deleted — is
+reachable on the orca path too and predates this PR.
 
 
 ## 8. Out of scope

@@ -188,7 +188,10 @@ export class DelegateTransport {
 				if (req.timer) {
 					clearTimeout(req.timer);
 				}
-				req.reject(new Error(`${this.plan.label} exited with code ${code}`));
+				// Tagged, because the caller has to know who ended the turn. A rejection that says "the process
+				// died" belongs to `onExit`'s interruption record; treating it as an ordinary failed request makes
+				// the outcome depend on whether `exit` or `close` wins the race.
+				req.reject(Object.assign(new Error(`${this.plan.label} exited with code ${code}`), { agentExited: true }));
 			}
 			this.pendingRequests.clear();
 			if (this.streamsClosed) {

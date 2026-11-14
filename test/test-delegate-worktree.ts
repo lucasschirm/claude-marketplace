@@ -407,9 +407,15 @@ test("a start pi shut down mid-way takes the folder it provisioned with it", asy
 	const stub = makeStub();
 	const repo = makeRepo();
 	const calls: string[] = [];
+	const announced: string[] = [];
 	try {
 		withoutOrca(stub.rt);
 		stub.rt.baseDir = repo;
+		// The queue announces what happened to a task it could not start; that sentence is the caller's only
+		// view of a start dropped by shutdown.
+		stub.rt.sendAgentMessage = (text: string) => {
+			announced.push(text);
+		};
 		stub.rt.makeTransport = () =>
 			({
 				pid: 4343,
@@ -451,6 +457,13 @@ test("a start pi shut down mid-way takes the folder it provisioned with it", asy
 		assert.ok(!calls.includes("session/prompt"), "and nothing was prompted");
 		const args = fs.existsSync(spy) ? fs.readFileSync(spy, "utf8") : "";
 		assert.ok(args.includes(`--worktree path:${folder}`), `the provisioned folder was left behind (orca calls: ${JSON.stringify(args)})`);
+		// And the caller is told the truth about why: pi closed, not that the agent failed to start. Both exits
+		// say `SESSION_CLOSED`; a start reported as `START_FAILED` sends the caller off to retry an agent that
+		// was never the problem.
+		assert.ok(
+			announced.some((m) => m.includes("pi closed this session before its task started")),
+			`the dropped start was announced as something else: ${JSON.stringify(announced)}`,
+		);
 	} finally {
 		if (previous === undefined) {
 			delete process.env.ORCA_CLI_COMMAND;

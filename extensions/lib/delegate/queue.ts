@@ -19,6 +19,7 @@ import {
 	configureSession,
 	installDrainer,
 	markSuperseded,
+	PiShutDownError,
 	reattachSession,
 	worktreeHasLiveClaim,
 	spawnSession,
@@ -303,6 +304,12 @@ async function startNow(
 			rt.persistState();
 			rt.updateStatusUI();
 		}
+		if (err instanceof PiShutDownError) {
+			// Same reason as the other shutdown exits: the task did not fail, pi went away. A caller keying on
+			// `code` should see the closed session, not a start that broke.
+			rt.logWarn(`Dropped the start of ${task.agent} task ${task.queueId}: pi closed while it was starting`);
+			return gone;
+		}
 		rt.logError(`Failed to start ${task.agent} session for ${task.queueId}: ${reason}`);
 		return { ok: false, code: "START_FAILED", error: reason };
 	}
@@ -404,11 +411,22 @@ const midTurn = (meta: SessionMeta) => meta.status === "running" || meta.status 
  * back, so an abandoned start has to be removed from all three and its child stopped — a record left in a
  * cleared runtime is a session the tools can address and nobody owns.
  */
-function unregisterStart(rt: DelegateRuntime, meta: SessionMeta, client: DelegateTransport): void {
+export function unregisterStart(rt: DelegateRuntime, meta: SessionMeta, client: DelegateTransport): void {
 	rt.sessions.delete(meta.sessionId);
 	rt.activeClients.delete(meta.sessionId);
 	rt.turnInFlight.delete(meta.sessionId);
 	rt.stopStallWatchdog(meta.sessionId);
+	// A `session/update` that arrived during the configuration round trips (a `current_mode_update` answering
+	// `session/set_mode` is normal) can have armed the debounced record write and filled the stream buffers.
+	// Left armed, the timer fires after pi is gone and persists a record for the session this function is
+	// unregistering — the phantom write `spawnSession`'s `stale` check exists to prevent, one await later.
+	const pendingSave = rt.pendingMetaSaves.get(meta.sessionId);
+	if (pendingSave) {
+		clearTimeout(pendingSave.timer);
+		rt.pendingMetaSaves.delete(meta.sessionId);
+	}
+	rt.assistantBuffers.delete(meta.sessionId);
+	rt.thoughtBuffers.delete(meta.sessionId);
 	client.dispose();
 }
 

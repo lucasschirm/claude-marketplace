@@ -27,6 +27,9 @@ import type { AgentDriver, Selection, SelectionContext, SessionMeta, DelegateEve
 /** How long a session handshake or a selection call may take before the start is considered failed. */
 const SETUP_TIMEOUT_MS = 60_000;
 
+/** Thrown when pi shuts down mid-start, so the caller can say "pi closed the session" rather than "start failed". */
+export class PiShutDownError extends Error {}
+
 export interface TurnHandle {
 	meta: SessionMeta;
 	client: DelegateTransport;
@@ -244,6 +247,13 @@ export function startTurn(rt: DelegateRuntime, meta: SessionMeta, client: Delega
 		.then((res: any) => settle(rt, meta, normalizeStopReason(res?.stopReason)))
 
 		.catch((err: any) => {
+			if (err?.agentExited === true) {
+				// The process died. `onExit` owns that verdict — it is the interruption record, and it charges
+				// the turn — and it always runs unless the client was disposed by a path that already recorded a
+				// terminal state (cancel, shutdown, a failed start). Settling the outcome here instead would make
+				// the same death read `failed` when `exit` wins the race and `interrupted` when `close` does.
+				return "error";
+			}
 			// The turn is over whether or not the status says so, and a marker left set here would let a later
 			// cancel charge a completion that never happened.
 			rt.turnInFlight.delete(meta.sessionId);
@@ -369,7 +379,7 @@ export async function spawnSession(
 			// would write `meta.json` and a container entry into whichever namespace answers next (the orphan
 			// `default/`, or a later pi session's) and the next boot would read a phantom as real state. Throwing
 			// sends the caller down its not-registered path, which frees the slot and the folder it provisioned.
-			throw new Error("pi closed before this session could be registered; nothing was started");
+			throw new PiShutDownError("pi closed before this session could be registered; nothing was started");
 		}
 		client.setLogFilePath(logPathFor(rt, sessionId));
 
