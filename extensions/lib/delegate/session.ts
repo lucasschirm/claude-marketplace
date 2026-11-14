@@ -504,6 +504,18 @@ export function clearSuperseded(rt: DelegateRuntime, meta: SessionMeta): void {
 	rt.persistState();
 }
 
+/**
+ * Whether this session's worktree belongs to a restart rather than to the record that names it.
+ *
+ * A restart reuses the parent's folder, so the parent stops being its owner the moment the restart is
+ * *entered*, not when its pointer lands: through the spawn window the parent is settled and unmarked, and a
+ * `delegate_clean_worktree` sweep or a PR closed in that window would delete the directory the successor is
+ * about to start its agent in. The mirror of the rule `reattachRefusal` applies to messages.
+ */
+export function restartClaimsWorktree(rt: DelegateRuntime, meta: SessionMeta): boolean {
+	return meta.supersededBy !== undefined || rt.restarting.has(meta.sessionId);
+}
+
 /** Why this conversation no longer belongs to the process reattaching it — or nothing, and the reattach goes on. */
 function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta): string | undefined {
 	if (meta.supersededBy) {

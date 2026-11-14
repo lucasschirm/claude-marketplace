@@ -135,6 +135,9 @@ await and answers `BUSY`, telling the caller to send it again.
 | a queued restart's pointer resolves to the session it started, and shows in the report | same (Q11) |
 | the pointer survives `normalizeMeta`; a string, a number, an array and `{}` do not become one | `test/test-delegate-resume.ts` |
 | a closed PR does not release a worktree a restarted sibling is working in | `test/test-delegate-worktree.ts` |
+| a session whose restart is still in flight is skipped by that cleanup as well | same |
+| recovery derives a missing pointer from the successor that came back, and writes it out | `test/test-delegate-recovery.ts` |
+| a pointer naming nothing is dropped, one naming a restart still queued is kept | same |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -186,6 +189,44 @@ survived the tests written alongside it:
 
 The pointer is also rendered now — in the `delegate_status` overview line and the session report — because
 otherwise the only way to learn where a conversation went is to send it a message and be refused.
+
+
+### §7.2 What a crash leaves, and what recovery may conclude (round 7)
+
+A pointer is a promise about the future, and `markSuperseded` still runs after `await delegate()` — it cannot
+run earlier, because there is nothing to point at until a successor exists. `rt.restarting` closes the window
+for the process that started the restart and for nobody else, so a pi that dies mid-restart leaves three
+promises that may not match the records on disk. Recovery now reads them back:
+
+* **A successor that came back takes the conversation.** `delegate_restart` is the only writer of
+  `parentSessionId`, so a restored session naming a parent *is* that restart, and the parent is marked even
+  though the restart never reached its own pointer. Without this both records are addressable and both name
+  the folder the restart reused: the exact hazard §7.1 exists to prevent, arriving through a crash instead of
+  through a race. The provenance write now happens the moment `parentSessionId` is assigned in `startNow`,
+  because the narrower that window, the less recovery has to infer.
+* **A pointer naming nothing is handed back.** A `{queueId}` entry absent from the restored queue can only
+  mean the restart never produced a session — `resolveQueuedRestart` rewrites to `{sessionId}` before a
+  successor can exist — and a `{sessionId}` whose record could not be read names a ghost either way. The
+  refusal would send every caller to something that does not exist, permanently, while every worktree path
+  skips the record, so the folder became unreclaimable too. Recovery clears it and logs what it dropped.
+  Deriving first is what makes this safe: a pointer derived from a live successor is never cleared after.
+* **The in-flight claim covers the folder too.** Through a restart's spawn window the parent is settled and
+  unmarked, and `releaseWorktree`'s safety check looks at uncommitted work, not ownership: a
+  `delegate_clean_worktree` sweep or a PR closed in that window deleted the directory the successor was about
+  to start in. That sweep and the PR-closed cleanup now ask `restartClaimsWorktree` — the pointer check plus
+  `rt.restarting` — and naming a session to `delegate_clean_worktree` refuses on either. `cancelSession` needs
+  no such guard: by the time a restart is in flight it has already moved its parent out of a cancellable
+  status, so its release cannot run for the folder mid-handover.
+
+One detail is load-bearing in the tests rather than in the code: `normalizeMeta` rebuilds a pointer with
+**exactly the keys that were set**, so a `{ queueId }` round-trips into `{ queueId }`. Growing an
+`undefined` twin made a recovered pointer stop comparing equal to the one that was written, which is how the
+round-trip test caught it.
+
+What stays impossible: a crash between the successor's registration and its provenance write leaves nothing to
+derive from. The parent remains addressable, the successor is an ordinary session, and both name one folder —
+recovery cannot tell that story from evidence it does not have, so it does not guess, and the operator's
+`delegate_status` shows two sessions.
 
 ## 8. Out of scope
 

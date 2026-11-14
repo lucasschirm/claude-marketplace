@@ -29,6 +29,7 @@ import {
 } from "./storage.ts";
 import type { PersistedState, QueuedTask, SessionMeta, SessionStatus } from "./types.ts";
 import { drainQueue } from "./queue.ts";
+import { clearSuperseded } from "./session.ts";
 
 /** Pre-rename records are Devin records; anything else would be inventing history. */
 const LEGACY_AGENT = "devin";
@@ -87,7 +88,16 @@ function supersededPointerOf(value: unknown): SessionMeta["supersededBy"] {
 	const raw = value as Record<string, unknown>;
 	const sessionId = typeof raw.sessionId === "string" && raw.sessionId ? raw.sessionId : undefined;
 	const queueId = typeof raw.queueId === "string" && raw.queueId ? raw.queueId : undefined;
-	return sessionId || queueId ? { sessionId, queueId } : undefined;
+	// Only the keys that are set. A round-tripped pointer has to compare equal to the one that was written,
+	// and `{ sessionId: undefined, queueId: "q-7" }` does not strictly equal `{ queueId: "q-7" }`.
+	const pointer: { sessionId?: string; queueId?: string } = {};
+	if (sessionId) {
+		pointer.sessionId = sessionId;
+	}
+	if (queueId) {
+		pointer.queueId = queueId;
+	}
+	return pointer.sessionId || pointer.queueId ? pointer : undefined;
 }
 
 /** A queued task as it was written to `state.json`. Needs the runtime only to mint a missing id. */
@@ -238,6 +248,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	if (signal?.aborted) {
 		return report;
 	}
+	reconcileRestartPointers(rt);
 	rt.persistState();
 	rt.updateStatusUI();
 	drainQueue(rt);
@@ -332,4 +343,53 @@ function reconcileInFlight(rt: DelegateRuntime, meta: SessionMeta, report: Recov
 		rt.updateStatusUI();
 		drainQueue(rt);
 	});
+}
+
+/**
+ * Make the restart pointers agree with what actually came back.
+ *
+ * A `supersededBy` pointer is a promise about the future, and a pi that died part-way through a restart
+ * leaves promises that no longer match the records on disk. Two reconciliations, in this order and for a
+ * reason:
+ *
+ *  - **a successor that came back takes the conversation.** `delegate_restart` is the only writer of
+ *    `parentSessionId`, so a restored session naming a parent *is* that restart, even when the crash beat the
+ *    restart's own tool call to `markSuperseded`. Without the pointer both records are addressable and both
+ *    name the folder the restart reused, which is the hazard the pointer exists to prevent.
+ *  - **a pointer naming nothing is handed back.** A `{queueId}` entry absent from the restored queue can only
+ *    mean the restart never produced a session — `resolveQueuedRestart` rewrites to `{sessionId}` before a
+ *    successor can exist — and a `{sessionId}` whose record could not be read names a ghost. Either way the
+ *    refusal would send callers to something that does not exist, permanently, while every worktree path skips
+ *    the record: the conversation becomes its own again so it can be messaged and its folder reclaimed.
+ *
+ * Deriving first is what makes the second safe: a pointer derived from a live successor is never cleared.
+ */
+function reconcileRestartPointers(rt: DelegateRuntime): void {
+	for (const meta of rt.sessions.values()) {
+		if (!meta.parentSessionId) {
+			continue;
+		}
+		const parent = rt.sessions.get(meta.parentSessionId);
+		if (parent && parent !== meta && !parent.supersededBy) {
+			parent.supersededBy = { sessionId: meta.sessionId };
+			rt.persistSessionMeta(parent, true);
+			rt.logWarn(`recovered the restart pointer of ${parent.sessionId}: ${meta.sessionId} came back as its restarted session`);
+		}
+	}
+	const queueIds = new Set(rt.queue.map((t) => t.queueId));
+	for (const meta of rt.sessions.values()) {
+		const pointer = meta.supersededBy;
+		if (!pointer) {
+			continue;
+		}
+		const named = pointer.sessionId ?? `queue entry ${pointer.queueId ?? "?"}`;
+		const alive = pointer.sessionId ? rt.sessions.has(pointer.sessionId) : queueIds.has(pointer.queueId ?? "");
+		if (alive) {
+			continue;
+		}
+		clearSuperseded(rt, meta);
+		rt.logWarn(
+			`dropped the restart pointer of ${meta.sessionId} (${named}): nothing came back for it, so its conversation is its own again`,
+		);
+	}
 }

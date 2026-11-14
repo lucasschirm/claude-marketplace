@@ -12,7 +12,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { admit, findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { cancelSession, delegate, followUp, type DelegateRequest } from "./queue.ts";
-import { markSuperseded, supersededPointerText } from "./session.ts";
+import { markSuperseded, restartClaimsWorktree, supersededPointerText } from "./session.ts";
 import { commandForCaller, PERMISSION_DECISIONS, type PermissionDecision } from "./permissions.ts";
 import { releaseWorktree } from "./worktree.ts";
 import type { SessionMeta } from "./types.ts";
@@ -357,14 +357,25 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 							{ code: "SESSION_SUPERSEDED", session_id: meta.sessionId },
 						);
 					}
+					if (rt.restarting.has(meta.sessionId)) {
+						// Through a restart's spawn window the parent is settled and its pointer has not landed yet, but the
+						// folder is mid-handover: deleting it here takes the directory the successor is starting in.
+						return errorResult(
+							rt,
+							"delegate_clean_worktree",
+							`A delegate_restart of session ${meta.sessionId} is in flight and its worktree is being handed to that restart. Wait for it, or delegate_cancel it, then try again.`,
+							{ code: "RESTART_IN_FLIGHT", session_id: meta.sessionId },
+						);
+					}
 					targets.push(meta);
 				} else if (params.all_settled === true) {
 					for (const s of rt.sessions.values()) {
 						if (s.status === "running" || s.status === "stalled") {
 							continue;
 						}
-						// A settled record whose conversation moved on is not evidence its folder is dead wood.
-						if (s.supersededBy) {
+						// A settled record whose conversation moved on — or is moving this moment — is not evidence its
+						// folder is dead wood: a restart, written or in flight, owns it.
+						if (restartClaimsWorktree(rt, s)) {
 							continue;
 						}
 						if (s.worktreePath && s.worktreeStatus === "active") {

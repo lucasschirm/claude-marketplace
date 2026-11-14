@@ -161,11 +161,13 @@ test("the restart pointer survives the record on disk, and garbage does not", ()
 	// exactly when the sibling starts working in the shared worktree. A reader that dropped the field would
 	// re-open the old id in silence, and only after a crash — where nothing else says what happened.
 	const restarted = JSON.parse(JSON.stringify(metaFor("conv-1", { agent: "agy", supersededBy: { sessionId: "brave-walrus" } })));
-	assert.deepStrictEqual(normalizeMeta(restarted)?.supersededBy, { sessionId: "brave-walrus", queueId: undefined });
+	// Exactly the keys that were set, so a pointer survives a round-trip unchanged rather than growing an
+	// `undefined` twin that no longer compares equal to the one that was written.
+	assert.deepStrictEqual(normalizeMeta(restarted)?.supersededBy, { sessionId: "brave-walrus" });
 	// A restart that queued has no session id to name yet, and that pointer has to survive too: it is the
 	// only thing telling a follow-up the conversation is on its way somewhere.
 	const queued = JSON.parse(JSON.stringify(metaFor("conv-1", { agent: "agy", supersededBy: { queueId: "q-9" } })));
-	assert.deepStrictEqual(normalizeMeta(queued)?.supersededBy, { sessionId: undefined, queueId: "q-9" });
+	assert.deepStrictEqual(normalizeMeta(queued)?.supersededBy, { queueId: "q-9" });
 	// And the record may have been written by another build, or damaged: a pointer that names nothing is no
 	// pointer, and a string is not an object that names something.
 	for (const junk of ["brave-walrus", 7, ["brave-walrus"], {}, { sessionId: 7 }, { sessionId: "" }, null]) {

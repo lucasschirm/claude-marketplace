@@ -285,7 +285,8 @@ export interface SessionMeta {
 	 * Set when `delegate_restart` took this conversation over. A restart mints a *new* session id and leaves
 	 * this record alone, so nothing else tells a follow-up that its conversation has moved on — and the
 	 * restarted sibling reuses this session's worktree, so reattaching the old one would run two live agents
-	 * of one conversation in one checkout. Terminal: never cleared.
+	 * of one conversation in one checkout. Nothing a caller does clears it; recovery is the one exception, and
+	 * only for a pointer naming something that did not come back — see `reconcileRestartPointers`.
 	 */
 	supersededBy?: { sessionId?: string; queueId?: string };
 	pid?: number;

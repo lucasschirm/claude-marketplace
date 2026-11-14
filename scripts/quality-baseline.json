@@ -19,11 +19,11 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 212,
     "biome.style/useBlockStatements": 953,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
     "biome.suspicious/noShadow": 78,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noReturnAssign": 14,
-    "biome.complexity/noExcessiveCognitiveComplexity": 56,
+    "biome.complexity/noExcessiveCognitiveComplexity": 58,
     "biome.suspicious/noExplicitAny": 158,
     "biome.suspicious/noConsole": 8
   },
@@ -46,18 +46,18 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 555,
-    "extensions/lib/delegate/recovery.ts": 336,
+    "extensions/lib/delegate/queue.ts": 567,
+    "extensions/lib/delegate/recovery.ts": 396,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 566,
-    "extensions/lib/delegate/session.ts": 577,
+    "extensions/lib/delegate/session.ts": 589,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
-    "extensions/lib/delegate/tools-session.ts": 414,
+    "extensions/lib/delegate/tools-session.ts": 425,
     "extensions/lib/delegate/tools.ts": 298,
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 456,
-    "extensions/lib/delegate/types.ts": 327,
+    "extensions/lib/delegate/types.ts": 328,
     "extensions/lib/delegate/worktree.ts": 201,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
@@ -754,8 +754,20 @@
       "changes": [
         "extensions/lib/delegate/queue.ts: 555 lines > baseline 545 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round seven closes the crash window: recovery rebuilds and retires restart pointers.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 56 -> 58",
+        "extensions/lib/delegate/queue.ts: 567 lines > baseline 555 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 396 lines > baseline 336 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 589 lines > baseline 577 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 425 lines > baseline 414 (files may only shrink)",
+        "extensions/lib/delegate/types.ts: 328 lines > baseline 327 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "814c4f2",
+  "generatedFrom": "dc9ca0b",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

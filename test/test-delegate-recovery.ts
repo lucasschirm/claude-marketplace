@@ -97,7 +97,7 @@ test("state and metadata are restored, and interrupted sessions are labelled", a
 		// The store read is deliberately not awaited (a sqlite probe must not hold boot open), so the
 		// final status lands after the pass reports. `flush` is the seam the scope exposes for exactly
 		// this: wait for quiescence instead of sleeping a guessed number of milliseconds.
-		await rt.tasks.flush(5_000);
+		await rt.stateWrites.drain(5_000);
 		const session = must(rt.sessions.get("s-old"), "the session is restored");
 		assert.strictEqual(session.agent, "devin");
 		assert.strictEqual(session.status, "interrupted");
@@ -252,7 +252,7 @@ test("an interrupted session does not read another agent's store", async () => {
 	);
 	try {
 		const r = await recoverState(rt, "pi-test");
-		await rt.tasks.flush(5_000);
+		await rt.stateWrites.drain(5_000);
 		assert.strictEqual(r.backfilled, 0);
 		assert.strictEqual(rt.sessions.get("s-claude")?.status, "interrupted");
 		// The stronger fact: the Claude driver has no store reader at all, so there is no code path that
@@ -287,3 +287,84 @@ test("recovery writes the state it produced back to disk", async () => {
 		restoreHome();
 	}
 });
+
+test("a successor that came back takes the conversation its parent still claims", async () => {
+	// `markSuperseded` runs after `delegate()` returns, so a pi that died mid-restart can leave the restarted
+	// session on disk while its parent never learned. Both records would then be addressable and both would
+	// name the worktree the restart reused — the hazard the pointer exists to prevent. `parentSessionId` is
+	// written only by `delegate_restart`, so the child is the evidence recovery needs to rebuild the pointer.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{ sessionIds: ["old-1", "new-1"], queue: [] },
+		{
+			"old-1": { sessionId: "old-1", prompt: "p", status: "completed" },
+			"new-1": { sessionId: "new-1", prompt: "p", status: "completed", parentSessionId: "old-1" },
+		},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.deepStrictEqual(rt.sessions.get("old-1")?.supersededBy, { sessionId: "new-1" });
+		// In memory is not enough: a pointer that never reaches the file means the next pi reopens the race.
+		await rt.stateWrites.drain(5_000);
+		const onDisk = JSON.parse(fs.readFileSync(path.join(dirOf(home, "pi-test", "old-1"), "meta.json"), "utf8"));
+		assert.deepStrictEqual(onDisk.supersededBy, { sessionId: "new-1" });
+		// The successor is nobody's pointer target and stays addressable on its own.
+		assert.strictEqual(rt.sessions.get("new-1")?.supersededBy, undefined);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a restart pointer naming nothing is dropped, and one naming a queued restart is kept", async () => {
+	// A refusal is a promise the caller can act on. Pointing them at a queue entry that no longer exists (the
+	// entry was popped, then pi died before the successor's record was written) or at a session whose record
+	// could not be read strands the conversation permanently — and every worktree path skips a superseded
+	// record, so its folder becomes unreclaimable too. A `{queueId}` entry still in the queue is different:
+	// that restart is waiting for a slot, which is exactly what the pointer means.
+	const { rt, home, restoreHome } = makeStub();
+	noCapacity(rt);
+	writeState(
+		home,
+		"delegate_task",
+		"pi-test",
+		{
+			sessionIds: ["gone-queue", "gone-session", "still-queued", "plain"],
+			queue: [{ prompt: "p", agent: "devin", queueId: "q-7" }],
+		},
+		{
+			"gone-queue": { sessionId: "gone-queue", prompt: "p", status: "completed", supersededBy: { queueId: "q-1" } },
+			"gone-session": { sessionId: "gone-session", prompt: "p", status: "completed", supersededBy: { sessionId: "never-restored" } },
+			"still-queued": { sessionId: "still-queued", prompt: "p", status: "completed", supersededBy: { queueId: "q-7" } },
+			plain: { sessionId: "plain", prompt: "p", status: "completed" },
+		},
+	);
+	try {
+		await recoverState(rt, "pi-test");
+		assert.strictEqual(rt.sessions.get("gone-queue")?.supersededBy, undefined, "a queue entry that is gone cannot be where the work went");
+		assert.strictEqual(
+			rt.sessions.get("gone-session")?.supersededBy,
+			undefined,
+			"a successor that did not load cannot be addressed either",
+		);
+		assert.deepStrictEqual(
+			rt.sessions.get("still-queued")?.supersededBy,
+			{ queueId: "q-7" },
+			"a restart still waiting for a slot stays pointed",
+		);
+		assert.strictEqual(rt.sessions.get("plain")?.supersededBy, undefined, "recovery invents pointers for nobody");
+		await rt.stateWrites.drain(5_000);
+		const onDisk = JSON.parse(fs.readFileSync(path.join(dirOf(home, "pi-test", "gone-queue"), "meta.json"), "utf8"));
+		assert.strictEqual(onDisk.supersededBy, undefined, "the dropped pointer has to be dropped on disk too");
+	} finally {
+		restoreHome();
+	}
+});
+
+/** Where a recovered session's `meta.json` lives. */
+function dirOf(home: string, piSessionId: string, sessionId: string): string {
+	return path.join(home, ".pi", "agent", "delegate_task", piSessionId, sessionId);
+}

@@ -121,12 +121,19 @@ test("a closed PR does not release a worktree a restarted session is working in"
 		const successor = metaFor("new-1", shared);
 		stub.rt.sessions.set("old-1", superseded);
 		stub.rt.sessions.set("new-1", successor);
+		// The same folder one moment earlier: the restart has been entered and has not written its pointer, so
+		// the parent is settled and unmarked and only the in-flight claim says the folder is mid-handover.
+		const inFlight = metaFor("old-2", { ...shared });
+		stub.rt.sessions.set("old-2", inFlight);
+		stub.rt.restarting.add("old-2");
 
 		await onPrClosed(stub.rt, 42, "closed");
 
 		assert.strictEqual(superseded.worktreeStatus, "active", "a record whose conversation moved on owns nothing to release");
 		const told = stub.sent.join("\n");
 		assert.ok(!told.includes("old-1"), `the superseded session was still treated as dead wood: ${told}`);
+		assert.strictEqual(inFlight.worktreeStatus, "active", "a session whose restart is in flight owns nothing to release either");
+		assert.ok(!told.includes("old-2"), `a folder mid-handover was released: ${told}`);
 		assert.ok(told.includes("new-1"), `the session that does own the folder should have been handled: ${told}`);
 	} finally {
 		stub.restoreHome();

@@ -21,6 +21,7 @@ import {
 	installDrainer,
 	markSuperseded,
 	reattachSession,
+	restartClaimsWorktree,
 	spawnSession,
 	startTurn,
 	supersededError,
@@ -202,6 +203,12 @@ async function startNow(
 		started.queueId = task.queueId;
 		started.parentSessionId = task.parentSessionId;
 		resolveQueuedRestart(rt, task, started.sessionId);
+		// Provenance before anything else is awaitable. A pi that dies during a restart used to leave a successor
+		// whose parent never learned of it, and recovery rebuilds the parent's pointer from exactly this field:
+		// the earlier it lands, the narrower the window recovery cannot close.
+		if (task.parentSessionId) {
+			rt.persistSessionMeta(started, true);
+		}
 		started.worktreePath = task.worktreePath;
 		started.worktreeBranch = task.worktreeBranch;
 		started.worktreeId = task.worktreeId;
@@ -525,10 +532,15 @@ export async function onPrClosed(rt: DelegateRuntime, prNumber: number, state: s
 		if (!meta.worktreePath || meta.worktreeStatus !== "active") {
 			continue;
 		}
-		if (meta.supersededBy) {
-			// The folder belongs to the restarted sibling now, and that sibling may be live: a settled record
-			// whose conversation moved on is not evidence that its worktree is dead wood.
-			rt.logWarn(`Skipping worktree cleanup for superseded session ${id} (${supersededPointerText(meta)}) on PR #${prNumber} closed event`);
+		if (restartClaimsWorktree(rt, meta)) {
+			// The folder belongs to a restart now — one whose pointer landed, or one still spawning — and that
+			// session may be live: a settled record whose conversation moved on is not evidence its worktree is
+			// dead wood, and through the spawn window the parent is settled, unmarked, with the handover due.
+			rt.logWarn(
+				`Skipping worktree cleanup for ${
+					meta.supersededBy ? `superseded session ${id} (${supersededPointerText(meta)})` : `session ${id}, whose restart is in flight`
+				} on PR #${prNumber} closed event`,
+			);
 			continue;
 		}
 		if (meta.status === "running" || meta.status === "stalled") {
