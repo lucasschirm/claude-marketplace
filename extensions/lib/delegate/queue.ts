@@ -219,13 +219,19 @@ async function startNow(
 			cwd,
 			queueId: task.queueId,
 			createWorktree: task.createWorktree,
+			// Checked inside `spawnSession` too: it registers and persists on its own way out, and a record
+			// written into a shut-down runtime is worse than no record at all.
+			stale: shutDown,
 		});
 		if (shutDown()) {
-			// `spawnSession` registers as it goes, so give back everything it added and stop the child. This is
-			// the window the whole check exists for: past this line the session would be live, owned by nobody.
-			rt.sessions.delete(spawned.meta.sessionId);
-			rt.activeClients.delete(spawned.meta.sessionId);
-			spawned.client.dispose();
+			// Backstop for anything that registered and still returned: give back everything it added, stop the
+			// child, and take away the folder this start made. Past this line the session would be live, owned by
+			// nobody — and the folder would be a `*-dtN` checkout and branch no record names, so no sweep sees it.
+			unregisterStart(rt, spawned.meta, spawned.client);
+			if (provisionedHere && task.worktreePath) {
+				const { removeOrcaWorktree } = await import("../orca-client.ts");
+				void removeOrcaWorktree(`path:${task.worktreePath}`).catch(() => {});
+			}
 			release();
 			return gone;
 		}
@@ -254,6 +260,14 @@ async function startNow(
 		resolveQueuedRestart(rt, task, started.sessionId);
 
 		const warnings = await configureSession(rt, driver, started, client, selection);
+		if (shutDown()) {
+			// Choosing the mode and the model is two awaited round trips, and `session_shutdown` cannot reach a
+			// floated start through them. Starting the turn here would repopulate a cleared runtime, start a
+			// stall watchdog on a session pi has forgotten, and announce a failure into whatever session is
+			// current next.
+			unregisterStart(rt, started, client);
+			return gone;
+		}
 		if (started.status === "cancelled") {
 			// Cancelled while its mode and model were still being chosen — a window that is two round trips
 			// long. Starting the turn anyway would hand the caller back a session it had just stopped, with a
@@ -274,7 +288,7 @@ async function startNow(
 				// A folder created for a session that never existed: nothing else owns it, so nothing else
 				// will ever clean it up. (A queued task's folder is released by `delegate_cancel`.)
 				const { removeOrcaWorktree } = await import("../orca-client.ts");
-				void removeOrcaWorktree(task.worktreeId || `path:${task.worktreePath}`).catch(() => {});
+				void removeOrcaWorktree(`path:${task.worktreePath}`).catch(() => {});
 			}
 		} else if (started && client) {
 			// Registered, and then something threw on the way to the first turn. Left alone, that is a
@@ -382,6 +396,21 @@ installDrainer(drainQueue);
  * answer says nothing about the second.
  */
 const midTurn = (meta: SessionMeta) => meta.status === "running" || meta.status === "stalled";
+
+/**
+ * Take back a registration that must not stand: pi shut down while its start was still awaiting.
+ *
+ * `spawnSession` puts the session in the map, the client table and the transcript before the caller sees it
+ * back, so an abandoned start has to be removed from all three and its child stopped — a record left in a
+ * cleared runtime is a session the tools can address and nobody owns.
+ */
+function unregisterStart(rt: DelegateRuntime, meta: SessionMeta, client: DelegateTransport): void {
+	rt.sessions.delete(meta.sessionId);
+	rt.activeClients.delete(meta.sessionId);
+	rt.turnInFlight.delete(meta.sessionId);
+	rt.stopStallWatchdog(meta.sessionId);
+	client.dispose();
+}
 
 /**
  * Whether this conversation still belongs to the id it was addressed by. A restart mints a new id and leaves

@@ -84,7 +84,12 @@ export function attach(rt: DelegateRuntime, client: DelegateTransport, meta: Ses
 			`The session ${meta.sessionId} was interrupted: ${meta.error}. Check it with "delegate_status" or restart it with "delegate_restart".`,
 		);
 		rt.persistSessionMeta(meta, true);
-		rt.totalCompleted++;
+		// The marker decides the count, not the status: `spawnSession` records `running` before any prompt
+		// exists, so a child that dies during the configure window would otherwise charge a turn that was never
+		// sent. Taking it also clears it, so a later cancel cannot charge this turn a second time.
+		if (rt.turnInFlight.delete(meta.sessionId)) {
+			rt.totalCompleted++;
+		}
 		rt.persistState();
 		rt.updateStatusUI();
 		void drainAfter(rt);
@@ -332,7 +337,7 @@ export async function spawnSession(
 	rt: DelegateRuntime,
 	driver: AgentDriver,
 	selection: Selection,
-	opts: { prompt: string; cwd: string; queueId?: string; createWorktree: boolean },
+	opts: { prompt: string; cwd: string; queueId?: string; createWorktree: boolean; stale?: () => boolean },
 ): Promise<StartResult> {
 	const plan = driver.launchPlan(selection, opts.cwd);
 	const client = rt.makeTransport(opts.cwd, plan);
@@ -357,6 +362,14 @@ export async function spawnSession(
 			throw new Error(
 				`${driver.id} returned a session id (${sessionId}) that this pi is already using for another session; nothing was started`,
 			);
+		}
+		if (opts.stale?.()) {
+			// The runtime this start belongs to has been shut down while the agent was being asked for its id.
+			// Bailing here — before the log path, the registration and the persist — is the point: registering now
+			// would write `meta.json` and a container entry into whichever namespace answers next (the orphan
+			// `default/`, or a later pi session's) and the next boot would read a phantom as real state. Throwing
+			// sends the caller down its not-registered path, which frees the slot and the folder it provisioned.
+			throw new Error("pi closed before this session could be registered; nothing was started");
 		}
 		client.setLogFilePath(logPathFor(rt, sessionId));
 

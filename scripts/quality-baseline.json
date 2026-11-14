@@ -18,7 +18,7 @@
     "frontmatter": 0,
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
-    "biome.style/useBlockStatements": 953,
+    "biome.style/useBlockStatements": 952,
     "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 621,
     "biome.suspicious/noShadow": 78,
@@ -46,14 +46,14 @@
     "extensions/lib/delegate/persist.ts": 122,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 106,
-    "extensions/lib/delegate/queue.ts": 695,
-    "extensions/lib/delegate/recovery.ts": 550,
+    "extensions/lib/delegate/queue.ts": 724,
+    "extensions/lib/delegate/recovery.ts": 552,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 614,
-    "extensions/lib/delegate/session.ts": 674,
+    "extensions/lib/delegate/session.ts": 687,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
-    "extensions/lib/delegate/tools-session.ts": 458,
+    "extensions/lib/delegate/tools-session.ts": 479,
     "extensions/lib/delegate/tools.ts": 298,
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 456,
@@ -857,8 +857,18 @@
         "extensions/lib/delegate/tools-session.ts: 458 lines > baseline 451 (files may only shrink)",
         "extensions/lib/delegate/worktree.ts: 251 lines > baseline 248 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round seventeen closed the start's shutdown window and made a mid-sweep refusal a real answer.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 724 lines > baseline 695 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 552 lines > baseline 550 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 687 lines > baseline 674 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 479 lines > baseline 458 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "e40da6d",
+  "generatedFrom": "7558100",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

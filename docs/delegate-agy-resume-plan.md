@@ -135,6 +135,10 @@ await and answers `BUSY`, telling the caller to send it again.
 | a start still spawning when pi shut down registers nothing and prompts nothing | `test/test-delegate-resume.ts` |
 | a released worktree, or one removed without the session being told, is a refusal rather than a prompt | same |
 | a release deletes the folder it checked, never the id it was handed | `test/test-delegate-worktree.ts` |
+| a sweep that stops partway answers with an error and with the folders it already released | same |
+| a start pi shut down mid-way takes the worktree it provisioned, and writes no record anywhere | same, `test/test-delegate-resume.ts` |
+| a start that was choosing its mode when pi shut down sends no prompt and re-registers nothing | `test/test-delegate-resume.ts` |
+| an agent that dies before it was ever prompted is not a completed turn; one that dies mid-turn is exactly one | `test/test-delegate-runtime.ts` |
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
@@ -508,6 +512,39 @@ charges a second completion — the marker is taken, not tested, so settle canno
 cycle in `state.json` is not turned into two pointers that refuse each other forever. And the two comments about
 `agy-acp`'s heartbeat said its state "exists in the engine" and is "the one a watchdog acts on": nothing reads
 the parsed fields, `liveness.ts` decides from silence alone, and the comments now say that instead.
+
+### §7.10 The shutdown window was wider than the check, and a refusal that was not an answer (round 17)
+
+**A refusal has to be a tool result.** `cleanWorktreeRefusal` returns `{ message, code }`, and the single-session
+path wrapped it in `errorResult` while the mid-sweep re-check added in round 15 returned it bare. Pi reads
+`content ?? []` and leaves `isError` unset, so the caller of `delegate_clean_worktree` got an empty successful
+answer — and because the return discarded `notes`, the folders the sweep had already released were unreported
+too. Same shape on the neighbouring `SESSION_ACTIVE` refusal. Both now go through `errorResult`, and `withNotes`
+appends what already happened, so "stopped at the third folder" cannot be read as "did nothing".
+
+**The epoch check guarded one await of a five-await start.** Round 15 put it after `spawnSession` and at the top
+of the drain loop, which is where the leaked agent is visible — but `spawnSession` registers, writes the
+transcript path and persists on its way out, so a shutdown during the handshake had already written
+`meta.json` plus a container entry into whatever namespace answers next (`shutdown()` resets the pi session id
+to `default`; a later tool call that re-anchors would put the phantom in the *new* session's folder, where the
+next boot reads it as state). `spawnSession` now takes a `stale` predicate and throws before any of that, which
+also routes the failure through the not-registered cleanup. And the two configuration round trips — mode, then
+selection — sat between the check and `startTurn`; a shutdown in there started a turn on a cleared runtime,
+armed a stall watchdog for a session pi had forgotten, and announced a verdict into whichever session is current
+now. One helper, `unregisterStart`, takes back all three registrations and stops the child at both exits.
+
+**An abandoned start kept the folder.** The worktree is provisioned before the agent is asked for its id, and the
+record naming it is written *after* the epoch exit, so a shut-down start left a `*-dtN` checkout and branch that
+no record points at — invisible to `--all_settled`, which needs `worktreePath` and `active`. The failed-start
+`catch` already removed it; the shut-down path does too now, and by `path:` like everywhere else (the last
+id-preferring removal was this `catch`, safe only by the accident that a freshly provisioned id cannot have been
+restored, and the comment in `recovery.ts` that said stored ids "reach `removeOrcaWorktree`" is corrected —
+nothing selects by a stored id any more).
+
+**A completion is taken, not inferred — including on exit.** Round 15 made `settle` and `cancelSession` take the
+marker; `onExit` still counted on `status`, and `spawnSession` records `running` to hold the slot before any
+prompt exists. A child that dies in that configuration window charged a turn that was never sent. `onExit` takes
+the marker too now, which both kills the phantom count and clears the marker on that path.
 
 
 ## 8. Out of scope

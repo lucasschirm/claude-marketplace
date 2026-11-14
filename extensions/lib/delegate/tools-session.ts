@@ -73,6 +73,21 @@ function cleanWorktreeRefusal(rt: DelegateRuntime, meta: SessionMeta): { message
 	return undefined;
 }
 
+/**
+ * A refusal mid-sweep, with what the sweep already did.
+ *
+ * The sweep releases folders one at a time and each release awaits, so a refusal on the fifth target can arrive
+ * after four folders are gone. A tool result that names only the refusal tells the caller nothing about the
+ * work that happened, and a bare `{ message, code }` object is not a tool result at all: pi reads
+ * `content ?? []` and leaves `isError` unset, so the caller would see an empty, successful answer.
+ */
+function withNotes(message: string, notes: string[]): string {
+	if (notes.length === 0) {
+		return message;
+	}
+	return `${message} Before this refusal the sweep already reported: ${notes.join("; ")}`;
+}
+
 export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 	return [
 		{
@@ -423,7 +438,10 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 					// still being removed.
 					const claim = cleanWorktreeRefusal(rt, meta);
 					if (claim) {
-						return claim;
+						return errorResult(rt, "delegate_clean_worktree", withNotes(claim.message, notes), {
+							code: claim.code,
+							session_id: meta.sessionId,
+						});
 					}
 					if (meta.status === "running" || meta.status === "stalled") {
 						// The agent is working in that folder. Removing it under a live process — or marking the
@@ -432,7 +450,10 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 						return errorResult(
 							rt,
 							"delegate_clean_worktree",
-							`Session ${meta.sessionId} is ${meta.status}; its worktree is where it is working. Cancel it first, then clean.`,
+							withNotes(
+								`Session ${meta.sessionId} is ${meta.status}; its worktree is where it is working. Cancel it first, then clean.`,
+								notes,
+							),
 							{ code: "SESSION_ACTIVE", session_id: meta.sessionId },
 						);
 					}

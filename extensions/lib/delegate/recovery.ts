@@ -155,9 +155,11 @@ export function normalizeTask(raw: unknown): QueuedTask | null {
 		// candidate it had already accepted — the collision it exists to remove, arriving by a different door.
 		queueId: typeof t.queueId === "string" && t.queueId ? t.queueId : "",
 		// The worktree fields are the two most dangerous strings a queue record can hold: `worktreePath` becomes
-		// the agent's spawn cwd, and the ids reach `removeOrcaWorktree`, which deletes whatever it is told to.
-		// A relative path would be resolved against whichever folder pi happens to run in, so it is dropped
-		// rather than guessed at — the same rule `normalizeMeta` applies to the same fields.
+		// the agent's spawn cwd, and a folder is deleted by whatever selector it is handed. A relative path would
+		// be resolved against whichever folder pi happens to run in, so it is dropped rather than guessed at — the
+		// same rule `normalizeMeta` applies to the same fields. The ids are carried for provenance and for orca's
+		// own bookkeeping: no deletion path selects by a stored id any more (`releaseWorktreeNow`, and the two
+		// cleanup sites in this file's own queue, all select `path:` of the folder they looked at).
 		worktreePath: absolutePathOr(t.worktreePath),
 		worktreeBranch: typeof t.worktreeBranch === "string" ? t.worktreeBranch : undefined,
 		worktreeId: typeof t.worktreeId === "string" && t.worktreeId ? t.worktreeId : undefined,

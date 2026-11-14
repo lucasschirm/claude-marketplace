@@ -57,7 +57,13 @@ const CANCELLED_MID_REATTACH_RE = /cancelled while its agent was starting/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
 function stubTransport(
-	opts: { resume?: { result?: unknown; error?: Error; delayMs?: number }; createId?: string; createDelayMs?: number } = {},
+	opts: {
+		resume?: { result?: unknown; error?: Error; delayMs?: number };
+		createId?: string;
+		createDelayMs?: number;
+		/** Slows the configuration round trips (`session/set_mode` and friends), not the handshake or a turn. */
+		configureDelayMs?: number;
+	} = {},
 ) {
 	const calls: Call[] = [];
 	const events: Array<{ type: string; data: Record<string, unknown> }> = [];
@@ -79,6 +85,9 @@ function stubTransport(
 			calls.push({ method, params });
 			if (method === "session/new" && opts.createDelayMs) {
 				await new Promise((done) => setTimeout(done, opts.createDelayMs));
+			}
+			if (opts.configureDelayMs && method !== "session/new" && method !== "session/resume" && method !== "session/prompt") {
+				await new Promise((done) => setTimeout(done, opts.configureDelayMs));
 			}
 			if (method === "session/new" && opts.createId) {
 				return { sessionId: opts.createId, configOptions: [] };
@@ -369,6 +378,44 @@ test("a restart that lands mid-reattach stops the prompt", async () => {
 	}
 });
 
+test("a start that was configuring when pi shut down sends no prompt", async () => {
+	// Choosing the mode and the model is two awaited round trips, and `session_shutdown` cannot reach a floated
+	// start through them. Without a re-check the turn starts on a cleared runtime: a stall watchdog begins,
+	// the session is live again in a map pi just emptied, and a completion or failure notice is delivered into
+	// whatever pi session is current next.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport({ createId: "configured-1", configureDelayMs: 400 });
+	rt.makeTransport = () => stub.transport;
+	try {
+		rt.queue.push({
+			queueId: "q-1",
+			agent: "agy",
+			prompt: "p",
+			mode: "plan",
+			createWorktree: false,
+			enqueuedAt: Date.now(),
+		} as never);
+		const draining = drainQueue(rt);
+		await new Promise((done) => setTimeout(done, 80));
+		assert.ok(
+			stub.calls.some((c) => c.method !== "session/new"),
+			"the start is inside its configuration round trips when pi shuts down",
+		);
+		rt.shutdown();
+		await draining;
+		await new Promise((done) => setTimeout(done, 700));
+		assert.strictEqual(
+			stub.calls.some((c) => c.method === "session/prompt"),
+			false,
+			"no prompt was sent",
+		);
+		assert.strictEqual(rt.sessions.size, 0, "and the session did not come back into a cleared runtime");
+		assert.strictEqual(rt.activeClients.size, 0, "with no child left attached");
+	} finally {
+		restoreHome();
+	}
+});
+
 test("a session cancelled earlier is still a conversation the caller can continue", async () => {
 	// `cancelled` is a fact about the last turn, not a ban on the conversation: on `main` a follow-up reattached
 	// and prompted it, and for a driver whose sessions live server-side that still works. Round 12 caught the
@@ -507,12 +554,25 @@ test("a start that was still spawning when pi shut down registers nothing", asyn
 		);
 		// The record is what outlives the process, so that is what must not exist. (`delegate_task/default` can
 		// already sit in the home from before pi anchored a session id; a record for *this* spawn may not.)
-		for (const root of ["delegate_task", "devin_delegate"]) {
-			assert.ok(
-				!fs.existsSync(path.join(home, ".pi", "agent", root, "pi-test", "spawned-1")),
-				`nothing was written for a session that was never allowed to exist (${root})`,
-			);
-		}
+		// The record is what outlives the process, so that is what must not exist — and not under *any*
+		// namespace: `shutdown()` resets the pi session id to `default`, so a write that resolves after it lands
+		// in an orphan folder the next boot reads as state.
+		const phantom = (dir: string): string[] => {
+			if (!fs.existsSync(dir)) {
+				return [];
+			}
+			return fs
+				.readdirSync(dir, { withFileTypes: true })
+				.flatMap((e) => (e.isDirectory() ? phantom(path.join(dir, e.name)) : []))
+				.concat(
+					fs
+						.readdirSync(dir)
+						.filter((n) => n === "spawned-1")
+						.map(() => dir),
+				);
+		};
+		const written = phantom(path.join(home, ".pi", "agent")).filter((d) => fs.existsSync(path.join(d, "spawned-1")));
+		assert.deepEqual(written, [], `a shut-down start wrote a record for its session: ${written.join(", ")}`);
 	} finally {
 		restoreHome();
 	}

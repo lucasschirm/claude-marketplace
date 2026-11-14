@@ -17,8 +17,10 @@ import {
 	unmarkWorktreeReleasing,
 	worktreeIsReusable,
 } from "../extensions/lib/delegate/worktree.ts";
-import { cancelSession, onPrClosed } from "../extensions/lib/delegate/queue.ts";
+import { cancelSession, drainQueue, onPrClosed } from "../extensions/lib/delegate/queue.ts";
+import { buildSessionTools } from "../extensions/lib/delegate/tools-session.ts";
 import { metaFor } from "./helpers/delegate-stub.ts";
+import { must } from "./helpers/must.ts";
 
 /** A committed repo on `feature`, with an origin so "pushed" has a meaning. */
 function makeRepo(): string {
@@ -37,6 +39,10 @@ function makeRepo(): string {
 function withoutOrca(rt: any): void {
 	rt.commandExists = async () => false;
 }
+
+// Which refusal and which note a mid-sweep answer must name (kept at the top, where this repo keeps its patterns).
+const RECONNECT_REFUSAL_RE = /reconnecting session s-2/;
+const RELEASED_NOTE_RE = /s-1: removed/;
 
 test("a worktree lands in orca's layout with the next -dt index", async () => {
 	const stub = makeStub();
@@ -331,5 +337,128 @@ test("a cancel that overlaps a restart leaves the folder the successor is spawni
 	} finally {
 		stub.restoreHome();
 		fs.rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("a sweep that stops partway says so, and says what it already did", async () => {
+	// The collected target list is a list of intentions, not a set of permissions: releases await, and a
+	// follow-up can claim a later folder while the first is still being removed. The refusal has to arrive as a
+	// tool result — pi reads `content ?? []` and leaves `isError` unset, so a bare `{message, code}` would reach
+	// the caller as an empty success — and it has to carry the notes of the folders already gone.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-sweep-"));
+	const spy = path.join(dir, "orca-args.log");
+	const script = path.join(dir, "orca");
+	// The removal sleeps half a second, which is the whole point: the first release has to still be running
+	// when the second folder gains its claim, or the re-check has nothing to refuse.
+	fs.writeFileSync(script, `#!/bin/sh\necho "$@" >> ${spy}\nsleep 0.5\necho '{"ok":true,"result":{"removed":true}}'\n`, { mode: 0o755 });
+	const previous = process.env.ORCA_CLI_COMMAND;
+	process.env.ORCA_CLI_COMMAND = script;
+	const stub = makeStub();
+	const repo = makeRepo();
+	try {
+		withoutOrca(stub.rt);
+		const first = await createWorktree(stub.rt, repo);
+		const second = await createWorktree(stub.rt, repo);
+		stub.rt.sessions.set(
+			"s-1",
+			metaFor("s-1", { status: "idle", worktreePath: first.worktreePath, worktreeStatus: "active", createWorktree: true }),
+		);
+		stub.rt.sessions.set(
+			"s-2",
+			metaFor("s-2", { status: "idle", worktreePath: second.worktreePath, worktreeStatus: "active", createWorktree: true }),
+		);
+		const tool = must(buildSessionTools(stub.rt).find((s) => s.name === "delegate_clean_worktree"));
+		const ctx = { cwd: repo, ui: { notify: () => {} }, mode: "cli", hasUI: false } as never;
+		// `force` so the first release is about the sweep, not about whether a fresh worktree counts as unpushed work.
+		const sweeping = tool.execute("sweep-1", { all_settled: true, force: true }, undefined, undefined, ctx);
+		// Collection happens once, up front; the claim lands after it, while the first release is still running.
+		await new Promise((done) => setTimeout(done, 200));
+		stub.rt.reattaching.set("s-2", Promise.resolve(undefined as never));
+		const res: any = await sweeping;
+		assert.strictEqual(res.isError, true, `a mid-sweep refusal must be an error, got ${JSON.stringify(res)}`);
+		const text = String(res.content?.[0]?.text ?? "");
+		assert.match(text, RECONNECT_REFUSAL_RE, "it names the claim that stopped it");
+		assert.match(text, RELEASED_NOTE_RE, "and reports the folder it had already released");
+		assert.strictEqual(res.details?.code, "SESSION_CONNECTING");
+		assert.ok(fs.existsSync(second.worktreePath), "the claimed folder is untouched");
+	} finally {
+		if (previous === undefined) {
+			delete process.env.ORCA_CLI_COMMAND;
+		} else {
+			process.env.ORCA_CLI_COMMAND = previous;
+		}
+		stub.restoreHome();
+		fs.rmSync(repo, { recursive: true, force: true });
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a start pi shut down mid-way takes the folder it provisioned with it", async () => {
+	// The folder is created before the agent is asked for its id, so a shutdown in that window leaves a
+	// `*-dtN` checkout and branch that no record names: `--all_settled` needs a record with `worktreePath` and
+	// `active`, and nothing else ever learned the name. The failed-start path removes it; the shut-down path
+	// must too.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-abandon-"));
+	const spy = path.join(dir, "orca-args.log");
+	const script = path.join(dir, "orca");
+	fs.writeFileSync(script, `#!/bin/sh\necho "$@" >> ${spy}\necho '{"ok":true,"result":{"removed":true}}'\n`, { mode: 0o755 });
+	const previous = process.env.ORCA_CLI_COMMAND;
+	process.env.ORCA_CLI_COMMAND = script;
+	const stub = makeStub();
+	const repo = makeRepo();
+	const calls: string[] = [];
+	try {
+		withoutOrca(stub.rt);
+		stub.rt.baseDir = repo;
+		stub.rt.makeTransport = () =>
+			({
+				pid: 4343,
+				start: async () => {},
+				setLogFilePath: () => {},
+				setOnUpdate: () => {},
+				setOnExit: () => {},
+				setOnRequest: () => {},
+				logEvent: () => {},
+				appendAssistantMessage: () => {},
+				appendUserMessage: () => {},
+				respond: () => {},
+				request: async (method: string) => {
+					calls.push(method);
+					if (method === "session/new") {
+						await new Promise((done) => setTimeout(done, 400));
+						return { sessionId: "spawned-1", configOptions: [] };
+					}
+					return { stopReason: "end_turn" };
+				},
+				dispose: () => {},
+			}) as never;
+		const task = {
+			queueId: "q-1",
+			agent: "agy",
+			prompt: "p",
+			mode: "plan",
+			createWorktree: true,
+			enqueuedAt: Date.now(),
+		} as never;
+		stub.rt.queue.push(task);
+		await drainQueue(stub.rt);
+		await new Promise((done) => setTimeout(done, 120));
+		const folder = (task as never as { worktreePath: string }).worktreePath;
+		assert.ok(folder && fs.existsSync(folder), "the task got its worktree and is inside its handshake");
+		stub.rt.shutdown();
+		await new Promise((done) => setTimeout(done, 700));
+		assert.strictEqual(stub.rt.sessions.size, 0, "nothing registered into a shut-down runtime");
+		assert.ok(!calls.includes("session/prompt"), "and nothing was prompted");
+		const args = fs.existsSync(spy) ? fs.readFileSync(spy, "utf8") : "";
+		assert.ok(args.includes(`--worktree path:${folder}`), `the provisioned folder was left behind (orca calls: ${JSON.stringify(args)})`);
+	} finally {
+		if (previous === undefined) {
+			delete process.env.ORCA_CLI_COMMAND;
+		} else {
+			process.env.ORCA_CLI_COMMAND = previous;
+		}
+		stub.restoreHome();
+		fs.rmSync(repo, { recursive: true, force: true });
+		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });

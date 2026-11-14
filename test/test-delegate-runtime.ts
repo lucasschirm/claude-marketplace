@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fakeClient, makeStub, metaFor } from "./helpers/delegate-stub.ts";
 import { cancelSession } from "../extensions/lib/delegate/queue.ts";
+import { attach } from "../extensions/lib/delegate/session.ts";
 import { getEventsLogPath, getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
 import { must } from "./helpers/must.ts";
 
@@ -286,6 +287,61 @@ test("cancelling a turn that is running is the completion", async () => {
 		assert.strictEqual(await cancelSession(rt, "s-1"), "session");
 		assert.strictEqual(rt.totalCompleted, before + 1, "a turn that was stopped did not finish on its own");
 		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "and the marker went with it, so settle cannot charge it twice");
+	} finally {
+		restoreHome();
+	}
+});
+
+/** A client that hands its exit callback to the test, so a process death can be replayed without a process. */
+function exitClient(captured: { onExit?: (code: number | null) => void }) {
+	const base = fakeClient() as Record<string, unknown>;
+	return {
+		...base,
+		pid: 4242,
+		start: async () => {},
+		request: async () => ({}),
+		setLogFilePath: () => {},
+		setOnUpdate: () => {},
+		setOnRequest: () => {},
+		setOnExit: (fn: (code: number | null) => void) => {
+			captured.onExit = fn;
+		},
+	} as never;
+}
+
+test("an agent that dies before it was ever prompted is not a completed turn", async () => {
+	// `spawnSession` records `running` to hold the slot before any `session/prompt` exists. A child that dies in
+	// that window used to satisfy `onExit`'s status test and increment the completion counter for a turn that
+	// was never sent — a number the status line reports to the operator.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		const captured: { onExit?: (code: number | null) => void } = {};
+		attach(rt, exitClient(captured), meta);
+		const before = rt.totalCompleted;
+		captured.onExit?.(1);
+		assert.strictEqual(rt.totalCompleted, before, "no prompt, no completion");
+		assert.strictEqual(meta.status, "interrupted", "but the caller still hears the agent went away");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("an agent that dies mid-turn is one completion, not two", async () => {
+	// The mirror case: with a prompt in flight the marker is there, and `onExit` is the path that charges it.
+	// The rejection that follows the same exit deletes an already-empty marker, so nothing double-counts.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.turnInFlight.add("s-1");
+		const captured: { onExit?: (code: number | null) => void } = {};
+		attach(rt, exitClient(captured), meta);
+		const before = rt.totalCompleted;
+		captured.onExit?.(2);
+		assert.strictEqual(rt.totalCompleted, before + 1, "a turn that was cut short still ended once");
+		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "and the marker went with it");
 	} finally {
 		restoreHome();
 	}
