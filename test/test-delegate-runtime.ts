@@ -294,7 +294,10 @@ test("cancelling a turn that is running is the completion", async () => {
 });
 
 /** A client that hands its exit callback to the test, so a process death can be replayed without a process. */
-function exitClient(captured: { onExit?: (code: number | null) => void }, opts: { diesWhilePrompting?: boolean } = {}) {
+function exitClient(
+	captured: { onExit?: (code: number | null) => void },
+	opts: { diesWhilePrompting?: boolean; diesBeforeSend?: boolean } = {},
+) {
 	const base = fakeClient() as Record<string, unknown>;
 	return {
 		...base,
@@ -304,6 +307,13 @@ function exitClient(captured: { onExit?: (code: number | null) => void }, opts: 
 			if (opts.diesWhilePrompting && method === "session/prompt") {
 				// Exactly what the transport does when the child exits with a request outstanding.
 				throw Object.assign(new Error("agy-acp exited with code 1"), { agentExited: true });
+			}
+			if (opts.diesBeforeSend && method === "session/prompt") {
+				// What it does when the child is already gone: the request refuses before it reaches the pipe.
+				throw Object.assign(new Error("agy-acp exited with code 1"), {
+					agentExited: true,
+					agentExitedBeforeSend: true,
+				});
 			}
 			return {};
 		},
@@ -356,6 +366,29 @@ test("a death mid-turn is an interruption whether the rejection or the exit land
 		captured.onExit?.(1);
 		assert.strictEqual(meta.status, "interrupted", "the exit does");
 		assert.strictEqual(rt.totalCompleted, before + 1, "one completion, whichever came first");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a prompt refused before it reached the pipe is not a completed turn", async () => {
+	// The guard at the end of the configure window catches most deaths there, but a child whose pipes stay open
+	// delays `close` — and `onExit` with it — past that check, so the turn is armed and the transport then refuses
+	// the write. The agent died without ever receiving a turn: the death must be recorded, not charged.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		const captured: { onExit?: (code: number | null) => void } = {};
+		const client = exitClient(captured, { diesBeforeSend: true });
+		attach(rt, client as never, meta);
+		const before = rt.totalCompleted;
+		startTurn(rt, meta, client as never, "go");
+		await new Promise((done) => setImmediate(done));
+		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "the armed turn is taken back");
+		captured.onExit?.(1);
+		assert.strictEqual(meta.status, "interrupted", "the death is still the verdict");
+		assert.strictEqual(rt.totalCompleted, before, "and no completion is charged for a prompt never sent");
 	} finally {
 		restoreHome();
 	}

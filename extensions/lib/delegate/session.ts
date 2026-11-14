@@ -252,6 +252,15 @@ export function startTurn(rt: DelegateRuntime, meta: SessionMeta, client: Delega
 				// the turn — and it always runs unless the client was disposed by a path that already recorded a
 				// terminal state (cancel, shutdown, a failed start). Settling the outcome here instead would make
 				// the same death read `failed` when `exit` wins the race and `interrupted` when `close` does.
+				if (err?.agentExitedBeforeSend === true) {
+					// Except that the request refused before it was written, which happens when `close` (and with
+					// it `onExit`) loses to this continuation: the guard upstream still saw `running`, so a turn
+					// was armed for a prompt the agent never received. Leaving the marker would have `onExit`
+					// charge this death to `totalCompleted`, the phantom count a pre-`startTurn` death cannot
+					// earn. Deleting it here is safe in the other ordering too — `onExit` had to run first to
+					// settle the status, and it took the marker with it.
+					rt.turnInFlight.delete(meta.sessionId);
+				}
 				return "error";
 			}
 			// The turn is over whether or not the status says so, and a marker left set here would let a later

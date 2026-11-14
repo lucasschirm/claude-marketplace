@@ -92,6 +92,8 @@ test("a request written after the agent died is refused at once, not held foreve
 	assert.ok(settled instanceof Error, `expected a rejection, got ${String(settled)}`);
 	assert.match(settled.message, EXITED_WITH_CODE_3);
 	assert.strictEqual((settled as Error & { agentExited?: boolean }).agentExited, true, "tagged as the agent's death");
+	// The pre-write distinction matters to the caller's counter: a request the agent never received is not a turn.
+	assert.strictEqual((settled as Error & { agentExitedBeforeSend?: boolean }).agentExitedBeforeSend, true, "and tagged as never sent");
 });
 
 test("the handshake keeps what the agent advertised, because that is the honest answer to what it can do", async () => {

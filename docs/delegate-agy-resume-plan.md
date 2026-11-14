@@ -142,6 +142,9 @@ await and answers `BUSY`, telling the caller to send it again.
 | a death mid-turn says `interrupted` whether the prompt rejection or the exit callback arrives first | same |
 | abandoning a start disarms the debounced record write its updates had armed | same |
 | a start dropped by shutdown is announced as a closed session, not a failed start | `test/test-delegate-worktree.ts` |
+| an agent that died during configuration is not prompted, and the slot it held comes back | `test/test-delegate-resume.ts` |
+| a prompt refused before it reached the pipe charges no completion | `test/test-delegate-runtime.ts` |
+| a request written after the agent died is refused at once, and tagged as never sent | `test/test-delegate-transport.ts` |
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
@@ -570,10 +573,10 @@ decided by stdio timing. The rejection now recognises its own cause (the transpo
 and leaves the verdict to `onExit`, so a death is an interruption and one completion whichever lands first. An
 agent that answers the prompt with an *error* while still alive is a different event and still reads `failed`.
 
-**And the code a caller keys on.** A start interrupted inside `spawnSession` reported `START_FAILED` while its
-the sibling shutdown exits reported `SESSION_CLOSED`; the cleanup was identical, but "the agent failed to
-start" sends the caller off to retry an agent that was never the problem. The throw is typed now
-(`PiShutDownError`) and maps to the same closed-session answer.
+**And the code a caller keys on.** A start interrupted inside `spawnSession` reported `START_FAILED` while the
+other shutdown exits reported `SESSION_CLOSED`; the cleanup was identical, but "the agent failed to start" sends
+the caller off to retry an agent that was never the problem. The throw is typed now (`PiShutDownError`) and maps
+to the same closed-session answer.
 
 **Judged and left alone: `removeOrcaWorktree`'s orca-less fallback.** It runs `git worktree remove` in
 `process.cwd()` rather than the target repository. Probing git directly: the command needs no particular cwd
@@ -583,6 +586,47 @@ unrelated. It cannot reach across repositories, since a worktree path is registe
 So the wrong-cwd outcome is a reported failure, never a wrong deletion, and threading the provisioning cwd
 through is a cleanup rather than a fix. The one real edge — pi's cwd *inside* the folder being deleted — is
 reachable on the orca path too and predates this PR.
+
+### §7.12 A death in the configure window, and a count a refused write should not earn (rounds 19–20)
+
+`startNow` guarded the end of its configuration window against cancellation alone: `started.status ===
+"cancelled"`. A child that died there had already been settled `interrupted` by `onExit`, and the start walked
+past that. `startTurn` rewrote the status to `running`, re-armed the completion marker, re-registered the dead
+transport, and wrote a `session/prompt` with `timeoutMs = 0`. Nothing answers a request written after an exit —
+after a child exits on its own `child.stdin` is still non-null and `child.killed` is still false, and the handler
+that rejects pending requests has already run. So the promise pended forever: the session sat `running`, then
+`stalled`, holding its slot and pinning a transport in `activeClients`, with only `delegate_cancel` or a pi
+restart on the other side.
+
+Both halves were wrong, so both are fixed. **`request()` refuses a child it has seen exit**, rejecting immediately
+with the same tagged error; that also ends the quieter half of the bug, where a driver's post-death configure calls
+hung out their full 60 s timeout. And **the guard is about startability now, not cancellation**: anything other
+than `running` at the end of the window returns without prompting, cancellation keeping its own code and an exited
+agent reporting its own death as the start's reason. The recorded status is already terminal, and `slots.inFlight`
+counts only `running` and `stalled`, so the slot the session owns is released by it.
+
+**Which ordering is reachable — round 20 correcting round 19.** Round 19's writeup attributed this mostly to the
+`claude` driver, the only one whose `applySelection` awaits more than the mode. That confused two waits: agy and
+devin also await a real `session/set_mode` round trip, which is a macrotask like any other. What decides whether
+`onExit` has settled the session before `startTurn` runs is when Node emits `close`, which no driver controls.
+Probed against real children: a clean exit emits `close` synchronously after `exit`, so `onExit` lands first and
+the guard reports `START_FAILED`; a grandchild holding the pipes open delays `close` — up to the 2 s grace — and
+then the guard still sees `running` and the start proceeds. Both orderings are real for every driver, so the code
+has to be right in both, which is what the next finding is about.
+
+**A count a refused write should not earn.** In the second ordering the turn is armed and the transport then
+refuses the write *before it reaches the pipe*. §7.11's deferral left the completion marker for `onExit`, and
+`onExit` charged the death to `totalCompleted`: a completed turn for a prompt the agent never received, and the
+same death yielding `ok: true` plus an interruption notice where the close-first ordering yields a start failure.
+The transport knows the difference between the two rejections, so they are tagged differently now: `agentExited`
+(received the request and outlived it — a turn that happened) and `agentExitedBeforeSend` (never written).
+`startTurn` takes the marker back only for the latter, and `onExit` then has nothing to charge. Deleting it for
+both would be wrong in the other direction: it would un-count a genuine mid-turn death.
+
+What still differs between the two orderings, deliberately: close-first answers the caller `START_FAILED`,
+close-later answers `ok: true` and follows with the interruption notice when `onExit` lands. Both describe a
+session that started and whose agent died; unifying them would mean making `startNow` await a verdict that arrives
+by callback — the same race, held by a longer leash.
 
 
 ## 8. Out of scope

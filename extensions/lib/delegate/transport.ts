@@ -270,9 +270,14 @@ export class DelegateTransport {
 				// ever answer — the handler that rejects pending requests already ran. A `session/prompt` sent
 				// with `timeoutMs = 0` would then pend forever, holding its slot. Tagged, because the caller has
 				// to know the agent died rather than broke.
+				//
+				// `agentExitedBeforeSend` says more than `agentExited` does. The other tagged rejection (in the
+				// exit handler) is a request the agent received and outlived, which is a turn that happened; this
+				// one never reached the pipe, so whoever armed a turn has nothing to charge.
 				return reject(
 					Object.assign(new Error(`${this.plan.label} exited with code ${this.exitInfo.code}`), {
 						agentExited: true,
+						agentExitedBeforeSend: true,
 					}),
 				);
 			}
