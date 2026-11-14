@@ -101,7 +101,7 @@ function supersededPointerOf(value: unknown): SessionMeta["supersededBy"] {
 }
 
 /** A queued task as it was written to `state.json`. Needs the runtime only to mint a missing id. */
-export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): QueuedTask | null {
+export function normalizeTask(raw: unknown): QueuedTask | null {
 	if (!raw || typeof raw !== "object") {
 		return null;
 	}
@@ -125,9 +125,11 @@ export function normalizeTask(raw: unknown, rt?: { totalInvoked: number }): Queu
 		mode: typeof t.mode === "string" ? t.mode : "dangerous",
 		createWorktree: t.createWorktree === true,
 		enqueuedAt: typeof t.enqueuedAt === "number" ? t.enqueuedAt : Date.now(),
-		// Minted by the caller (`queue.ts`), and preserved: a caller that was told `q-7` must still be
-		// able to cancel `q-7` after a restart. A record with no id at all gets the next one.
-		queueId: typeof t.queueId === "string" && t.queueId ? t.queueId : `q-${(rt?.totalInvoked ?? 0) + 1}`,
+		// Preserved verbatim: a caller told `q-7` must still cancel `q-7` after a restart. Empty means no id
+		// was recorded, and recovery mints one. This function must not hand one out: reading `totalInvoked`
+		// without incrementing it gave two id-less records the same id, and gave recovery's uniqueness pass a
+		// candidate it had already accepted — the collision it exists to remove, arriving by a different door.
+		queueId: typeof t.queueId === "string" && t.queueId ? t.queueId : "",
 	};
 }
 
@@ -198,7 +200,10 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 		rt.maxRunsTotal = Math.max(state.maxRunsTotal, rt.maxRuns);
 	}
 
-	rt.totalInvoked = state.totalInvoked || 0;
+	// A JSON value like every other one here: a non-number would make every mint for this boot `q-NaN`, and
+	// a value past the reachable range would stall the generator, so neither counts as a counter at all.
+	rt.totalInvoked =
+		Number.isSafeInteger(state.totalInvoked) && state.totalInvoked > 0 && state.totalInvoked <= MAX_QUEUE_ID ? state.totalInvoked : 0;
 	rt.totalCompleted = state.totalCompleted || 0;
 	for (const [id, dir] of Object.entries(state.sessionDirs ?? {})) {
 		rt.sessionDirs.set(id, dir);
@@ -211,16 +216,16 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	// already in memory by the time anything can be interrupted.
 	if (Array.isArray(state.queue)) {
 		rt.queue.length = 0;
-		// Unique by the time anything reads them. A `{queueId}` pointer is matched by id, so two entries sharing
-		// one make a dead restart look like it is still waiting; `normalizeTask` mints a missing id without
-		// seeing its siblings, so this pass — the one that has the whole queue — fixes collisions.
+		// Unique by the time anything reads them: a `{queueId}` pointer is matched by id, so two entries sharing
+		// one make a dead restart look like it is still waiting, and `delegate_cancel` would free only the first
+		// twin. This is the only pass that sees the whole queue, so it is the only place that hands ids out.
 		// `totalInvoked` is the id generator, so it has to start above every id already on disk: a restored
 		// `q-50` and a future `q-${++totalInvoked}` are the same lookup key, and that key is what a restart
 		// pointer is matched by and what `delegate_cancel` takes.
 		rt.totalInvoked = Math.max(rt.totalInvoked, highestQueueId(state.queue));
 		const restoredIds = new Set<string>();
 		for (const t of state.queue) {
-			const task = normalizeTask(t, rt);
+			const task = normalizeTask(t);
 			if (!task) {
 				continue;
 			}
@@ -228,7 +233,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			// climbs, so the first candidate is already free. A `while` here would have no escape — a
 			// synchronous spin inside recovery cannot even be timed out by a test, because the timer needs the
 			// event loop the loop is holding, and every tool path awaits this pass.
-			if (task.queueId === undefined || restoredIds.has(task.queueId)) {
+			if (!task.queueId || restoredIds.has(task.queueId)) {
 				task.queueId = `q-${++rt.totalInvoked}`;
 			}
 			restoredIds.add(task.queueId);
@@ -366,6 +371,32 @@ function reconcileInFlight(rt: DelegateRuntime, meta: SessionMeta, report: Recov
 }
 
 /**
+ * The largest queue-id suffix a generator could actually reach, so a corrupt one cannot freeze it.
+ *
+ * `q-999999999999999999999` parses to 1e21, where `++` is absorbed and every mint is the same string
+ * forever — and the minted `q-1e+21` no longer matches `QUEUE_ID_RE`, so the next boot cannot even see the
+ * value that stalled it. A queue a billion deep is corrupt data, not a queue.
+ */
+const MAX_QUEUE_ID = 1_000_000_000;
+
+/** The highest numeric queue id in a restored queue, so the generator can start above it. */
+function highestQueueId(entries: unknown[]): number {
+	let highest = 0;
+	for (const raw of entries) {
+		const id = (raw as { queueId?: unknown } | null)?.queueId;
+		const match = typeof id === "string" ? QUEUE_ID_RE.exec(id) : null;
+		if (!match) {
+			continue;
+		}
+		const n = Number.parseInt(match[1], 10);
+		if (Number.isSafeInteger(n) && n <= MAX_QUEUE_ID) {
+			highest = Math.max(highest, n);
+		}
+	}
+	return highest;
+}
+
+/**
  * Make the restart pointers agree with what actually came back.
  *
  * A `supersededBy` pointer is a promise about the future, and a pi that died part-way through a restart
@@ -386,19 +417,6 @@ function reconcileInFlight(rt: DelegateRuntime, meta: SessionMeta, report: Recov
  * Deriving first is what makes the second safe: a pointer derived from something that came back is not cleared.
  *
  */
-/** The highest numeric queue id in a restored queue, so the generator can start above it. */
-function highestQueueId(entries: unknown[]): number {
-	let highest = 0;
-	for (const raw of entries) {
-		const id = (raw as { queueId?: unknown } | null)?.queueId;
-		const match = typeof id === "string" ? QUEUE_ID_RE.exec(id) : null;
-		if (match) {
-			highest = Math.max(highest, Number.parseInt(match[1], 10));
-		}
-	}
-	return highest;
-}
-
 function reconcileRestartPointers(rt: DelegateRuntime): void {
 	for (const meta of rt.sessions.values()) {
 		if (!meta.parentSessionId) {

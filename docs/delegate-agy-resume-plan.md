@@ -143,7 +143,11 @@ await and answers `BUSY`, telling the caller to send it again.
 | a folder mid-release is not reusable, and the release publishes itself before its first await | same |
 | two overlapping releases of one folder keep it off-limits until the last one finishes | same |
 | a cancel that overlaps a restart does not release the folder the successor is spawning into | same |
-| a duplicate restored queue id terminates recovery and mints above every id on disk | `test/test-delegate-recovery.ts` |
+| a duplicate restored queue id terminates recovery instead of spinning forever | `test/test-delegate-recovery.ts` |
+| the queue-id generator starts above every id restored from disk | same |
+| missing, repeated and id-less queue records still end up one id per task | same |
+| a poisoned counter or an unreachable suffix cannot freeze the id generator | same |
+| abandoning a queued restart does not promote a session half that is dead | same |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -284,7 +288,9 @@ a correction — which is worth writing down, because the commit message is what
   half-written or hand-edited `state.json` is not far away. Recovery now raises `totalInvoked` above the
   highest numeric id on disk, and a duplicate is replaced by a single `++rt.totalInvoked` rather than by a
   retry: the counter has been cleared above everything on disk and only climbs, so the first candidate is
-  already free. That also closes the finding's second half: `totalInvoked` *is* the id generator, so ids restored from disk
+  replaced by a single `++rt.totalInvoked` — and the reason "so the first candidate is already free" needed
+  saying twice, because round 9 was true of that pass and false of the program. §7.5 is what came of it.
+  That also closes the finding's second half: `totalInvoked` *is* the id generator, so ids restored from disk
   have to sit below the next mint — otherwise a restored `q-50` and a future `q-50` are one lookup key, and
   the ambiguity the dedupe exists to remove comes back through the counter. The retry loop is gone rather than
   bounded, because a synchronous spin in recovery cannot even be timed out — a test hung on it while the
@@ -306,10 +312,36 @@ a correction — which is worth writing down, because the commit message is what
 * **`cancelSession` needed the folder guard after all**, for the reason §7.2 had dismissed: its settled-session
   gate passes while a client is still registered, so a cancel can overlap a restart. One line, the same
   predicate as the other two call sites.
-* **Two smaller truths.** Abandoning a queued restart clears only the `{queueId}` half of a pointer, leaving a
-  session half that still names somewhere to go; and the `git worktree remove` fallback behind
-  `removeOrcaWorktree` got the mutation timeout its sibling calls already carried, because a hung git there
-  would pin a folder's release marker forever.
+* **Two smaller truths.** Abandoning a queued restart clears only the `{queueId}` half of a pointer (§7.5 puts a
+  condition on that half); and the `git worktree remove` fallback behind `removeOrcaWorktree` got the mutation
+  timeout its sibling calls already carried, because a hung git there would pin a folder's release marker
+  forever.
+
+### §7.5 One id, one writer, and only reachable numbers (round 10)
+
+Round 9 raised the generator above the ids on disk and minted once. It had not stopped the *other* writer:
+`normalizeTask` still filled a missing `queueId` with `q-${totalInvoked + 1}` — a read, never an increment. So
+`[{no id}, {no id}]` restored as two `q-6`s, and `[{no id}, {q-7}, {q-7}]` as `q-10, q-7, q-10`: the id-less entry
+kept `q-10`, and reminting the second `q-7` produced exactly that string. The collision the pass exists to remove
+arrived by another door, and the harm is the one the pass already names — `{queueId}` pointers,
+`delegate_cancel` and `abandonQueuedRestart` all match on the id, so twins make a dead restart look like it is
+still waiting and a cancel frees only the first twin. Recovery is now the only thing that hands ids out: the
+normalizer returns an empty `queueId` and the pass mints it. That is also the condition under which "the first
+candidate is free" is true, rather than merely asserted — the counter sits above every reachable id, and every
+mint consumes it.
+
+Reachable is the other half of the proof, and it was missing. `state.totalInvoked` is a JSON number nothing
+type-checked: `"abc"` makes `Math.max` return NaN and every mint for the boot is `q-NaN`; a
+`q-999999999999999999999` on disk parses to 1e21, where `++` is absorbed, so every mint is the same string
+forever — and the minted `q-1e+21` no longer matches `QUEUE_ID_RE`, so the next boot cannot see the value that
+stalled it either. Both ends now pass `Number.isSafeInteger` under a `MAX_QUEUE_ID` ceiling, because a queue a
+billion deep is corrupt data rather than a queue, and believing it costs the generator every id after it.
+
+The same round caught the abandoned-queue pointer promoting whatever session half it found. A both-halves pointer
+only arrives from disk — live writers emit one half each — and a disk half can name a session that died, which
+would refuse the parent as "restarted as `<gone>`" with nothing behind the id until the next boot reconciled it.
+The half is checked against `rt.sessions` now, and a pointer naming nothing is dropped rather than inherited.
+
 
 ## 8. Out of scope
 

@@ -140,7 +140,7 @@ export async function delegate(rt: DelegateRuntime, req: DelegateRequest): Promi
  * noise in the conversation, and six delegations meant six duplicated lines.
  */
 /** The mirror of `resolveQueuedRestart`: a restart that will never start must hand the conversation back. */
-function abandonQueuedRestart(rt: DelegateRuntime, task: QueuedTask): void {
+export function abandonQueuedRestart(rt: DelegateRuntime, task: QueuedTask): void {
 	if (!task.parentSessionId) {
 		return;
 	}
@@ -149,9 +149,11 @@ function abandonQueuedRestart(rt: DelegateRuntime, task: QueuedTask): void {
 	if (!parent || !pointer || pointer.queueId !== task.queueId) {
 		return;
 	}
-	// Only the half this entry was: a pointer that also names a session still has somewhere to send a caller,
-	// so dropping the whole thing would strand the successor's parent too.
-	parent.supersededBy = pointer.sessionId ? { sessionId: pointer.sessionId } : undefined;
+	// Only the half this entry was — a pointer that also names a live session still has somewhere to send a
+	// caller. The half must be checked, not trusted: a both-halves pointer only ever arrives from disk (live
+	// writers emit one half each), so its session half can name something that died, and promoting that would
+	// refuse the parent as "restarted as <id>" with nothing behind the id until the next boot reconciles it.
+	parent.supersededBy = pointer.sessionId && rt.sessions.has(pointer.sessionId) ? { sessionId: pointer.sessionId } : undefined;
 	rt.persistSessionMeta(parent, true);
 	rt.persistState();
 }

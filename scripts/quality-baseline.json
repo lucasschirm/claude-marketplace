@@ -16,11 +16,11 @@
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
+    "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
-    "biome.performance/noAwaitInLoops": 107,
-    "biome.performance/useTopLevelRegex": 617,
     "biome.complexity/noExcessiveLinesPerFunction": 10,
+    "biome.performance/useTopLevelRegex": 617,
     "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 59,
@@ -46,8 +46,8 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 577,
-    "extensions/lib/delegate/recovery.ts": 446,
+    "extensions/lib/delegate/queue.ts": 579,
+    "extensions/lib/delegate/recovery.ts": 464,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 580,
     "extensions/lib/delegate/session.ts": 589,
@@ -791,8 +791,16 @@
         "extensions/lib/delegate/worktree.ts: 248 lines > baseline 233 (files may only shrink)",
         "extensions/lib/orca-client.ts: 618 lines > baseline 615 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round ten made queue ids single-writer and unreachable numbers cost nothing.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 579 lines > baseline 577 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 464 lines > baseline 446 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "2a05945",
+  "generatedFrom": "e53a921",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

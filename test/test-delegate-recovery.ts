@@ -6,6 +6,7 @@ import path from "node:path";
 import { makeStub } from "./helpers/delegate-stub.ts";
 import { getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
 import { normalizeMeta, normalizeTask, recoverState } from "../extensions/lib/delegate/recovery.ts";
+import { abandonQueuedRestart } from "../extensions/lib/delegate/queue.ts";
 import { claudeDriver } from "../extensions/lib/delegate/drivers/claude.ts";
 import { must } from "./helpers/must.ts";
 
@@ -54,11 +55,12 @@ test("an unusable record is dropped instead of poisoning the load", () => {
 	assert.strictEqual(meta.status, "interrupted");
 });
 
-test("a queued task recovers with its agent and gets a lookup id back", () => {
+test("a queued task recovers with its agent, keeping the id it was given", () => {
 	// The id a caller was told has to survive the restart, or `delegate_cancel(q-…)` reports a task that
-	// is still about to run as gone. A record with no id gets the next one rather than an empty string.
-	const task = must(normalizeTask({ prompt: "p", agent: "claude", model: "sonnet", thinking: "high" }, { totalInvoked: 6 }), "recovers");
-	assert.strictEqual(task.queueId, "q-7");
+	// is still about to run as gone. A record with no id comes back with none: handing out ids belongs to the
+	// one pass that sees every id at once, below.
+	const task = must(normalizeTask({ prompt: "p", agent: "claude", model: "sonnet", thinking: "high" }), "recovers");
+	assert.strictEqual(task.queueId, "", "a record with no id is not given one here");
 	assert.strictEqual(task.agent, "claude");
 	assert.strictEqual(task.model, "sonnet");
 	assert.strictEqual(task.thinking, "high");
@@ -443,6 +445,118 @@ test("restored queue ids stay unique, because a pointer matches one by id", asyn
 	} finally {
 		restoreHome();
 	}
+});
+
+test("a queue restored without ids, or with repeats, ends up with one id per task", async () => {
+	// Both ways a duplicate arrives: records that never had an id, and records that repeat one. Round 9 fixed
+	// the loop that could not terminate and left this open — `normalizeTask` minted from `totalInvoked` without
+	// advancing it, so two id-less records got the same id, and a record reminted later got that id again.
+	// Uniqueness is load-bearing: a `{queueId}` pointer, `delegate_cancel` and `abandonQueuedRestart` all match
+	// on it, so twins make one dead restart look like it is still waiting.
+	const cases: Array<Array<Record<string, unknown>>> = [
+		[
+			{ prompt: "a", agent: "devin" },
+			{ prompt: "b", agent: "devin" },
+		],
+		[
+			{ prompt: "a", agent: "devin" },
+			{ prompt: "b", agent: "devin", queueId: "q-7" },
+			{ prompt: "c", agent: "devin", queueId: "q-7" },
+		],
+		[
+			{ prompt: "a", agent: "devin", queueId: "q-7" },
+			{ prompt: "b", agent: "devin", queueId: "q-7" },
+			{ prompt: "c", agent: "devin" },
+		],
+		[
+			{ prompt: "a", agent: "devin", queueId: "weird" },
+			{ prompt: "b", agent: "devin", queueId: "weird" },
+		],
+	];
+	// One pass per shape, in parallel: `recoverState` is awaited once outside the loop, both because a boot is
+	// a sequence and because the gate that counts awaits inside loops should stay where it is.
+	await Promise.all(
+		cases.map(async (queue) => {
+			const { rt, home, restoreHome } = makeStub();
+			noCapacity(rt);
+			writeState(home, "delegate_task", "pi-test", { sessionIds: [], totalInvoked: 5, queue }, {});
+			try {
+				await recoverState(rt, "pi-test");
+				const ids = rt.queue.map((task) => task.queueId);
+				assert.strictEqual(rt.queue.length, queue.length, `nothing is dropped: ${JSON.stringify(ids)}`);
+				assert.strictEqual(new Set(ids).size, ids.length, `queue ids collide: ${JSON.stringify(ids)}`);
+				for (const id of ids) {
+					assert.ok(id && id !== "q-NaN", `an unusable id reached the queue: ${JSON.stringify(ids)}`);
+				}
+			} finally {
+				restoreHome();
+			}
+		}),
+	);
+});
+
+test("a counter that is not a counter, and a suffix no counter reaches, both cost nothing", async () => {
+	// `state.json` is the file this code base itself calls plantable. `totalInvoked: "abc"` used to make every
+	// mint for the boot `q-NaN` (`Math.max` propagates NaN), and a `q-999999999999999999999` on disk parses to
+	// 1e21, where `++` is absorbed and every mint is the same string forever — one that no longer looks like a
+	// queue id, so the next boot cannot see the value that stalled it either.
+	const poisoned = ["abc", null, {}, -4, 1.5, 1e21];
+	await Promise.all(
+		poisoned.map(async (totalInvoked) => {
+			const { rt, home, restoreHome } = makeStub();
+			noCapacity(rt);
+			writeState(
+				home,
+				"delegate_task",
+				"pi-test",
+				{
+					sessionIds: [],
+					totalInvoked,
+					queue: [
+						{ prompt: "a", agent: "devin", queueId: "q-999999999999999999999" },
+						{ prompt: "b", agent: "devin", queueId: "q-999999999999999999999" },
+						{ prompt: "c", agent: "devin" },
+					],
+				},
+				{},
+			);
+			try {
+				await recoverState(rt, "pi-test");
+				const ids = rt.queue.map((task) => task.queueId);
+				assert.strictEqual(new Set(ids).size, ids.length, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
+				for (const id of ids) {
+					assert.match(id, QUEUE_ID_RE, `${JSON.stringify(totalInvoked)}: ${JSON.stringify(ids)}`);
+				}
+				assert.ok(rt.totalInvoked <= 1_000_000_000, `the generator was frozen at ${rt.totalInvoked}`);
+			} finally {
+				restoreHome();
+			}
+		}),
+	);
+});
+
+test("abandoning a queued restart hands the conversation back, unless a live successor owns it", () => {
+	// The `{queueId}` half named an entry that will never start. A session half that names something live is
+	// kept, because the caller still has somewhere to go; a half that names something dead must not be promoted
+	// to the whole story — a both-halves pointer only ever arrives from disk, where a dead half can sit next to
+	// a live one — or the parent is refused as "restarted as <id>" with nothing behind the id.
+	const meta = (over: Record<string, unknown>) =>
+		must(normalizeMeta({ sessionId: "old-1", agent: "devin", prompt: "p", status: "settled", ...over }), "a record the loader accepts");
+
+	const dead = makeStub();
+	noCapacity(dead.rt);
+	const deadParent = meta({ supersededBy: { sessionId: "gone", queueId: "q-4" } });
+	dead.rt.sessions.set("old-1", deadParent);
+	abandonQueuedRestart(dead.rt, { parentSessionId: "old-1", queueId: "q-4" } as never);
+	assert.strictEqual(deadParent.supersededBy, undefined, "a dead half must not become the whole pointer");
+
+	const alive = makeStub();
+	noCapacity(alive.rt);
+	alive.rt.sessions.set("young-2", meta({ sessionId: "young-2", supersededBy: undefined }));
+	const aliveParent = meta({ supersededBy: { sessionId: "young-2", queueId: "q-4" } });
+	alive.rt.sessions.set("old-1", aliveParent);
+	abandonQueuedRestart(alive.rt, { parentSessionId: "old-1", queueId: "q-4" } as never);
+	assert.deepEqual(aliveParent.supersededBy, { sessionId: "young-2" }, "a live successor keeps its claim");
 });
 
 test("a duplicate restored queue id terminates recovery instead of spinning forever", { timeout: 30_000 }, async () => {
