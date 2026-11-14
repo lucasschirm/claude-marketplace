@@ -628,6 +628,20 @@ close-later answers `ok: true` and follows with the interruption notice when `on
 session that started and whose agent died; unifying them would mean making `startNow` await a verdict that arrives
 by callback — the same race, held by a longer leash.
 
+**Accepted, and written down so the next reader does not rediscover them.** Three things about a death during a
+start are still timing-dependent, and each is individually honest:
+
+- A prompt written in the microsecond before Node emits `exit` is charged as a completed turn. Nothing in this
+  process can know whether the agent read it — the write succeeded, which is the only fact available.
+- The two orderings answer the caller differently (`START_FAILED` versus `ok: true` plus a notice when the callback
+  lands), because unifying them means `startNow` awaiting a verdict that arrives by callback.
+- The interruption notice for a prompt that was never written still reads "in the middle of the turn". That is true
+  of the session's bookkeeping and false of the agent, and the notice is written where the bookkeeping is.
+
+Round 21 reviewed the accounting across every rejection kind the transport can produce — disposed, killed, exited
+before send, exited after send, JSON-RPC error, a `stdin.write` throw — confirmed each ends in one defensible
+status with the completion count matching whether a prompt was actually written, and called the area converged.
+
 
 ## 8. Out of scope
 
