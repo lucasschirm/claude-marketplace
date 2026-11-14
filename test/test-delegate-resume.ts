@@ -570,7 +570,16 @@ test("on the wire: the restarted process adopts the recorded conversation and an
 		assert.notStrictEqual(calls[0].split(" ")[1], calls[3].split(" ")[1], "the second turn really ran in a new process");
 
 		await waitFor(() => (sent.length >= 2 ? true : null), 8000);
-		const events = fs.readFileSync(getEventsLogPath("pi-test", sessionId), "utf8");
+		// Waited for, not snapshotted: `session_resumed` is logged before the client is attached, so it reaches
+		// the transcript when the reattach's buffer is flushed rather than when it is written, and under load
+		// that is later than the turn announcement this test has already seen. A single read here raced it and
+		// failed ~2 runs in 10 inside a parallel group — with the file containing the *next* turn's completion
+		// and not this line, which is what a race looks like from the outside.
+		const eventsPath = getEventsLogPath("pi-test", sessionId);
+		const events = await waitFor(() => {
+			const text = fs.existsSync(eventsPath) ? fs.readFileSync(eventsPath, "utf8") : "";
+			return RESUMED_EVENT_RE.test(text) ? text : null;
+		}, 8000);
 		assert.match(events, RESUMED_EVENT_RE);
 		assert.ok(
 			notifications.some((n) => n[0].includes(note)),
