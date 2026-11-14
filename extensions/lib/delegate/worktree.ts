@@ -160,7 +160,39 @@ function worktreeFolder(repo: string, branch: string): string {
  * or left uncommitted edits, and only the first two are recoverable after `rm -rf`. An unknown answer
  * keeps the folder.
  */
+/** Whether this record's folder can take a restarted agent: there, not released, not on its way out. */
+export function worktreeIsReusable(rt: DelegateRuntime, meta: SessionMeta): boolean {
+	if (!meta.worktreePath) {
+		return false;
+	}
+	return meta.worktreeStatus !== "released" && !rt.releasingWorktrees.has(meta.worktreePath) && fs.existsSync(meta.worktreePath);
+}
+
+/**
+ * Release a worktree, published as in flight for as long as it takes.
+ *
+ * The seconds between "asked" and "gone" are the hazard: `worktreeStatus` stays "active" through the safety
+ * check and the removal, so `delegate_restart` — whose own documented flow is "cancel it first" — reads the
+ * folder as reusable and starts an agent in a directory that is about to be deleted. Only the primitive knows
+ * when a release is running, so the primitive says so.
+ */
 export async function releaseWorktree(
+	rt: DelegateRuntime,
+	meta: SessionMeta,
+	opts: { force?: boolean } = {},
+): Promise<{ removed: boolean; note: string }> {
+	if (!meta.worktreePath || meta.worktreeStatus === "released") {
+		return releaseWorktreeNow(rt, meta, opts);
+	}
+	rt.releasingWorktrees.add(meta.worktreePath);
+	try {
+		return await releaseWorktreeNow(rt, meta, opts);
+	} finally {
+		rt.releasingWorktrees.delete(meta.worktreePath);
+	}
+}
+
+async function releaseWorktreeNow(
 	rt: DelegateRuntime,
 	meta: SessionMeta,
 	opts: { force?: boolean } = {},

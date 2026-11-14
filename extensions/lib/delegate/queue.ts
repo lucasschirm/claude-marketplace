@@ -203,17 +203,19 @@ async function startNow(
 		started.queueId = task.queueId;
 		started.parentSessionId = task.parentSessionId;
 		resolveQueuedRestart(rt, task, started.sessionId);
-		// Provenance before anything else is awaitable. A pi that dies during a restart used to leave a successor
-		// whose parent never learned of it, and recovery rebuilds the parent's pointer from exactly this field:
-		// the earlier it lands, the narrower the window recovery cannot close.
-		if (task.parentSessionId) {
-			rt.persistSessionMeta(started, true);
-		}
 		started.worktreePath = task.worktreePath;
 		started.worktreeBranch = task.worktreeBranch;
 		started.worktreeId = task.worktreeId;
 		started.parentWorktreeId = task.parentWorktreeId;
 		started.worktreeStatus = task.worktreePath ? "active" : undefined;
+		// Provenance before anything else is awaitable, and never without the folder it belongs to: a record
+		// that says "I am the restarted one" but names no worktree lets recovery point the parent at a session
+		// that cannot claim the directory, and the folder is then orphaned for good — every cleanup path skips
+		// a superseded record. Recovery rebuilds the parent's pointer from exactly this field, so the earlier
+		// it lands the narrower the window it cannot close, but a half-written claim is worse than a later one.
+		if (task.parentSessionId) {
+			rt.persistSessionMeta(started, true);
+		}
 
 		const warnings = await configureSession(rt, driver, started, client, selection);
 		if (started.status === "cancelled") {

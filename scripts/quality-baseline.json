@@ -17,13 +17,13 @@
     "wiredTests": 0,
     "frontmatter": 0,
     "biome.performance/noAwaitInLoops": 107,
-    "biome.performance/noNamespaceImport": 212,
+    "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
     "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
     "biome.suspicious/noShadow": 78,
     "biome.suspicious/noReturnAssign": 14,
-    "biome.complexity/noExcessiveCognitiveComplexity": 58,
+    "biome.complexity/noExcessiveCognitiveComplexity": 59,
     "biome.suspicious/noExplicitAny": 158,
     "biome.suspicious/noConsole": 8
   },
@@ -46,19 +46,19 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 567,
-    "extensions/lib/delegate/recovery.ts": 396,
+    "extensions/lib/delegate/queue.ts": 569,
+    "extensions/lib/delegate/recovery.ts": 422,
     "extensions/lib/delegate/registry.ts": 238,
-    "extensions/lib/delegate/runtime.ts": 566,
+    "extensions/lib/delegate/runtime.ts": 576,
     "extensions/lib/delegate/session.ts": 589,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
-    "extensions/lib/delegate/tools-session.ts": 425,
+    "extensions/lib/delegate/tools-session.ts": 428,
     "extensions/lib/delegate/tools.ts": 298,
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 456,
-    "extensions/lib/delegate/types.ts": 328,
-    "extensions/lib/delegate/worktree.ts": 201,
+    "extensions/lib/delegate/types.ts": 332,
+    "extensions/lib/delegate/worktree.ts": 233,
     "extensions/lib/exec-payload.ts": 165,
     "extensions/lib/exec.ts": 451,
     "extensions/lib/extension-log.ts": 135,
@@ -766,8 +766,22 @@
         "extensions/lib/delegate/tools-session.ts: 425 lines > baseline 414 (files may only shrink)",
         "extensions/lib/delegate/types.ts: 328 lines > baseline 327 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round eight sealed the crash seams: release registry, queue-side derivation, unique ids.",
+      "changes": [
+        "biome.complexity/noExcessiveCognitiveComplexity: 58 -> 59",
+        "biome.performance/useTopLevelRegex: 617 -> 618",
+        "extensions/lib/delegate/queue.ts: 569 lines > baseline 567 (files may only shrink)",
+        "extensions/lib/delegate/recovery.ts: 422 lines > baseline 396 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 576 lines > baseline 566 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 428 lines > baseline 425 (files may only shrink)",
+        "extensions/lib/delegate/types.ts: 332 lines > baseline 328 (files may only shrink)",
+        "extensions/lib/delegate/worktree.ts: 233 lines > baseline 201 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "dc9ca0b",
+  "generatedFrom": "f081f0b",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

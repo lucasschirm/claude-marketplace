@@ -6,7 +6,6 @@
 // because those mechanics have to be identical to what the slash command does. Where a tool and
 // `/delegate cancel` behaved differently, both bugs were reported; they are one function now.
 
-import * as fs from "node:fs";
 import { Type } from "typebox";
 import { extractCliError } from "./diagnostics.ts";
 import { admit, findAgent } from "./registry.ts";
@@ -14,7 +13,7 @@ import type { DelegateRuntime } from "./runtime.ts";
 import { cancelSession, delegate, followUp, type DelegateRequest } from "./queue.ts";
 import { markSuperseded, restartClaimsWorktree, supersededPointerText } from "./session.ts";
 import { commandForCaller, PERMISSION_DECISIONS, type PermissionDecision } from "./permissions.ts";
-import { releaseWorktree } from "./worktree.ts";
+import { releaseWorktree, worktreeIsReusable } from "./worktree.ts";
 import type { SessionMeta } from "./types.ts";
 import { begin, errorResult, queueReasonText, textResult, type ToolSpec } from "./tools.ts";
 
@@ -280,8 +279,12 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 						parentWorktreeId: meta.parentWorktreeId,
 						worktreeStatus: meta.worktreeStatus,
 					};
-					const reusable = worktree.worktreePath && worktree.worktreeStatus !== "released" && fs.existsSync(worktree.worktreePath);
-					if (meta.createWorktree && !reusable) {
+					const releasing = meta.worktreePath !== undefined && rt.releasingWorktrees.has(meta.worktreePath);
+					const reusable = worktreeIsReusable(rt, meta);
+					if (!reusable && (meta.createWorktree || releasing)) {
+						// Either it wants a folder of its own, or the one it names is on its way out — a cancel's
+						// release runs unawaited, and "cancel then restart" is the documented recovery flow, so the two
+						// overlap by design. Provision fresh rather than start the agent in a directory being removed.
 						worktree = undefined;
 					}
 
@@ -363,7 +366,7 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 						return errorResult(
 							rt,
 							"delegate_clean_worktree",
-							`A delegate_restart of session ${meta.sessionId} is in flight and its worktree is being handed to that restart. Wait for it, or delegate_cancel it, then try again.`,
+							`A delegate_restart of session ${meta.sessionId} is in flight and its worktree is being handed to that restart. Wait for it to finish, then try again.`,
 							{ code: "RESTART_IN_FLIGHT", session_id: meta.sessionId },
 						);
 					}

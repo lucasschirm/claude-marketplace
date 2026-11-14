@@ -208,11 +208,20 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	// already in memory by the time anything can be interrupted.
 	if (Array.isArray(state.queue)) {
 		rt.queue.length = 0;
+		// Unique by the time anything reads them. A `{queueId}` pointer is matched by id, so two entries sharing
+		// one make a dead restart look like it is still waiting; `normalizeTask` mints a missing id without
+		// seeing its siblings, so this pass — the one that has the whole queue — fixes collisions.
+		const restoredIds = new Set<string>();
 		for (const t of state.queue) {
 			const task = normalizeTask(t, rt);
-			if (task) {
-				rt.queue.push(task);
+			if (!task) {
+				continue;
 			}
+			while (!task.queueId || restoredIds.has(task.queueId)) {
+				task.queueId = `q-${rt.totalInvoked + restoredIds.size + 1}`;
+			}
+			restoredIds.add(task.queueId);
+			rt.queue.push(task);
 		}
 	}
 	// An aborted pass has read enough to know what was there and not enough to say what is. Writing the
@@ -353,16 +362,18 @@ function reconcileInFlight(rt: DelegateRuntime, meta: SessionMeta, report: Recov
  * reason:
  *
  *  - **a successor that came back takes the conversation.** `delegate_restart` is the only writer of
- *    `parentSessionId`, so a restored session naming a parent *is* that restart, even when the crash beat the
- *    restart's own tool call to `markSuperseded`. Without the pointer both records are addressable and both
- *    name the folder the restart reused, which is the hazard the pointer exists to prevent.
- *  - **a pointer naming nothing is handed back.** A `{queueId}` entry absent from the restored queue can only
- *    mean the restart never produced a session — `resolveQueuedRestart` rewrites to `{sessionId}` before a
- *    successor can exist — and a `{sessionId}` whose record could not be read names a ghost. Either way the
- *    refusal would send callers to something that does not exist, permanently, while every worktree path skips
- *    the record: the conversation becomes its own again so it can be messaged and its folder reclaimed.
+ *    `parentSessionId`, on the session *and* on the queued task carrying it, so either naming a parent *is*
+ *    that restart — even when the crash beat the restart's own call to `markSuperseded`. Without the pointer
+ *    both records are addressable and both name the folder the restart reused: the hazard it exists to prevent.
+ *  - **a pointer naming nothing is handed back.** Absent means no successor with provenance came back. The
+ *    crash can land after `drainQueue` popped the entry and before `resolveQueuedRestart` rewrote the pointer,
+ *    which leaves a `{queueId}` with nothing queued — and possibly a record on disk that never got its
+ *    `parentSessionId`, which no derivation can see. Whatever the history, a pointer to an absent target sends
+ *    every caller somewhere they cannot act on, permanently, while each worktree path skips the record; handing
+ *    the conversation back makes it messageable again and its folder reclaimable.
  *
- * Deriving first is what makes the second safe: a pointer derived from a live successor is never cleared.
+ * Deriving first is what makes the second safe: a pointer derived from something that came back is not cleared.
+ *
  */
 function reconcileRestartPointers(rt: DelegateRuntime): void {
 	for (const meta of rt.sessions.values()) {
@@ -376,6 +387,17 @@ function reconcileRestartPointers(rt: DelegateRuntime): void {
 			rt.logWarn(`recovered the restart pointer of ${parent.sessionId}: ${meta.sessionId} came back as its restarted session`);
 		}
 	}
+	for (const task of rt.queue) {
+		if (!task.parentSessionId) {
+			continue;
+		}
+		const parent = rt.sessions.get(task.parentSessionId);
+		if (parent && !parent.supersededBy) {
+			parent.supersededBy = { queueId: task.queueId };
+			rt.persistSessionMeta(parent, true);
+			rt.logWarn(`recovered the restart pointer of ${parent.sessionId}: ${task.queueId} came back waiting to restart it`);
+		}
+	}
 	const queueIds = new Set(rt.queue.map((t) => t.queueId));
 	for (const meta of rt.sessions.values()) {
 		const pointer = meta.supersededBy;
@@ -383,7 +405,11 @@ function reconcileRestartPointers(rt: DelegateRuntime): void {
 			continue;
 		}
 		const named = pointer.sessionId ?? `queue entry ${pointer.queueId ?? "?"}`;
-		const alive = pointer.sessionId ? rt.sessions.has(pointer.sessionId) : queueIds.has(pointer.queueId ?? "");
+		// Either half is enough. The shape allows both keys, and a pointer whose session half is dead but whose
+		// queued restart is alive still has somewhere to send a caller.
+		const alive =
+			(pointer.sessionId !== undefined && rt.sessions.has(pointer.sessionId)) ||
+			(pointer.queueId !== undefined && queueIds.has(pointer.queueId));
 		if (alive) {
 			continue;
 		}

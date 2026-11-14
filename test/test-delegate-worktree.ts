@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { makeStub } from "./helpers/delegate-stub.ts";
-import { createWorktree, releaseWorktree } from "../extensions/lib/delegate/worktree.ts";
+import { createWorktree, releaseWorktree, worktreeIsReusable } from "../extensions/lib/delegate/worktree.ts";
 import { onPrClosed } from "../extensions/lib/delegate/queue.ts";
 import { metaFor } from "./helpers/delegate-stub.ts";
 
@@ -150,5 +150,37 @@ test("releasing says why it did nothing", async () => {
 		assert.deepEqual(already, { removed: false, note: "already released" });
 	} finally {
 		stub.restoreHome();
+	}
+});
+
+test("a folder that is on its way out cannot take a restarted agent", async () => {
+	// `delegate_cancel` then `delegate_restart` is the documented recovery flow, and the release that cancel
+	// starts is not awaited: it spends seconds in a safety check and an orca removal with `worktreeStatus`
+	// still "active" and the folder still on disk. Asked "reusable?" in that window, the restart answered yes
+	// and started an agent in a directory about to be deleted.
+	const stub = makeStub();
+	const repo = makeRepo();
+	withoutOrca(stub.rt);
+	try {
+		const made = await createWorktree(stub.rt, repo);
+		const meta = metaFor("ag-r", {
+			status: "completed",
+			worktreePath: made.worktreePath,
+			worktreeBranch: made.worktreeBranch,
+			worktreeStatus: "active",
+		});
+		assert.ok(worktreeIsReusable(stub.rt, meta), "an active folder that exists is where a restarted agent belongs");
+
+		const releasing = releaseWorktree(stub.rt, meta);
+		// Deterministic rather than raced: everything up to the safety check is synchronous, so this lands in
+		// the window the registry exists to describe.
+		assert.ok(stub.rt.releasingWorktrees.has(made.worktreePath), "a release must publish itself before its first await");
+		assert.ok(!worktreeIsReusable(stub.rt, meta), "a folder mid-release is not reusable, folder or no folder");
+
+		await releasing;
+		assert.ok(!stub.rt.releasingWorktrees.has(made.worktreePath), "a release unregisters whatever the outcome");
+	} finally {
+		stub.restoreHome();
+		fs.rmSync(repo, { recursive: true, force: true });
 	}
 });

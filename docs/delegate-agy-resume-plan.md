@@ -138,6 +138,9 @@ await and answers `BUSY`, telling the caller to send it again.
 | a session whose restart is still in flight is skipped by that cleanup as well | same |
 | recovery derives a missing pointer from the successor that came back, and writes it out | `test/test-delegate-recovery.ts` |
 | a pointer naming nothing is dropped, one naming a restart still queued is kept | same |
+| a queued task naming its parent marks the parent too, in the boot that restores it | same |
+| restored queue ids are unique, so a pointer cannot match a task that is not its restart | same |
+| a folder mid-release is not reusable, and the release publishes itself before its first await | `test/test-delegate-worktree.ts` |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -227,6 +230,40 @@ What stays impossible: a crash between the successor's registration and its prov
 derive from. The parent remains addressable, the successor is an ordinary session, and both name one folder —
 recovery cannot tell that story from evidence it does not have, so it does not guess, and the operator's
 `delegate_status` shows two sessions.
+
+### §7.3 The three seams round 8 found in the crash story
+
+Round 7 closed the crash window and left three seams of its own, all found by Devin reading the new code
+against a boot rather than against a race:
+
+* **The provenance write outran the folder.** `startNow` persisted the successor the moment `parentSessionId`
+  was assigned — which was *before* the worktree fields were, and `persistMeta` serializes at the call. A pi
+  dying inside `configureSession` then left a record that said "I am the restarted one" and named no folder:
+  recovery pointed the parent at it correctly, the child restored with no worktree claim, every cleanup path
+  skipped the parent, and the directory leaked for good. The five assignments are synchronous, so moving them
+  above the write costs nothing and keeps "before anything awaitable" true.
+* **A release is seconds long and says nothing while it runs.** `releaseWorktree` keeps `worktreeStatus` at
+  `"active"` through the safety check and the orca removal, and `cancelSession` fires it unawaited — while
+  "cancel it, then restart" is the documented recovery flow. A restart asking "is that folder reusable?" in
+  that window said yes and started an agent in a directory about to be deleted. `rt.releasingWorktrees` is the
+  transitional state, published by the primitive so no caller can forget to, and read by `worktreeIsReusable`,
+  which is now the one place that answers the question. A session whose folder is mid-release restarts into a
+  fresh one; the old folder finishes going away.
+* **Recovery read the sessions and not the queue.** A queued restart persists its task (`parentSessionId` and
+  all) long before the tool call can write a pointer, so the same crash-consistency gap existed one step
+  earlier: the boot restored the task, started it, and never marked the parent — both ids addressable until
+  *some later* boot derived it from the child. Derivation now reads queued tasks too, pointing at the entry
+  rather than a session, which is what the caller needs to be told anyway.
+
+Two of the fixes are about pointers meaning what they say. A pointer with both keys and one live half is kept
+(the caller has somewhere to go); restored queue ids are made unique, because `normalizeTask`'s id-less
+fallback cannot see its siblings and a duplicate would make a dead pointer look alive. And two comments were
+wrong in ways a future reader would rely on: `parentSessionId` was documented as generic delegation
+provenance when `delegate_restart` is its only writer — the exclusivity derivation depends on — and §7.2's
+claim that an absent `{queueId}` "can only mean the restart never produced a session" was stronger than what
+holds: the crash can land after the entry was popped, leaving a successor that never got its provenance. The
+decision to hand the conversation back is unchanged; the reason is that no successor *with provenance* came
+back, which is what the code can actually know.
 
 ## 8. Out of scope
 

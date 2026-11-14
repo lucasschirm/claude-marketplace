@@ -47,6 +47,16 @@ export class DelegateRuntime {
 	 * reattach the same conversation beside the sibling the restart is starting.
 	 */
 	readonly restarting = new Set<string>();
+	/**
+	 * Worktree paths whose `releaseWorktree` is in flight.
+	 *
+	 * A release spends seconds in a safety check and an orca removal, and `worktreeStatus` cannot say "active
+	 * but on its way out" without a new state in every reader: the folder is still there, still looks reusable,
+	 * and is about not to be. `delegate_restart` asks exactly that question, and `delegate_cancel` followed by
+	 * `delegate_restart` is the documented recovery flow, so the transitional state gets a place of its own —
+	 * published by the primitive, so no caller can forget to.
+	 */
+	readonly releasingWorktrees = new Set<string>();
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();

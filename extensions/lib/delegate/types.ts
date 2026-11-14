@@ -247,10 +247,13 @@ export interface QueuedTask {
 export interface SessionMeta {
 	sessionId: string;
 	/**
-	 * The session this one was delegated from, when the caller was itself a delegated session.
+	 * The session whose conversation this one took over: written only by `delegate_restart`, on the task it
+	 * enqueues and on the session that starts from it.
 	 *
-	 * Recorded on the session, not only on the queued task that carried it, so a transcript or a status
-	 * report can still say whose child this after the queue entry is gone.
+	 * That exclusivity is load-bearing, not bookkeeping. A restart writes its pointer after the successor
+	 * exists, so a pi that died mid-restart leaves none — recovery reads these records instead, and treats a
+	 * restored child naming a parent as proof the parent's conversation moved. Recording it for any other
+	 * relationship would make recovery mark sessions that were never restarted.
 	 */
 	parentSessionId?: string;
 	queueId?: string;
@@ -285,8 +288,9 @@ export interface SessionMeta {
 	 * Set when `delegate_restart` took this conversation over. A restart mints a *new* session id and leaves
 	 * this record alone, so nothing else tells a follow-up that its conversation has moved on — and the
 	 * restarted sibling reuses this session's worktree, so reattaching the old one would run two live agents
-	 * of one conversation in one checkout. Nothing a caller does clears it; recovery is the one exception, and
-	 * only for a pointer naming something that did not come back — see `reconcileRestartPointers`.
+	 * of one conversation in one checkout. Nothing a caller does clears it. Two things in here do, each for a
+	 * pointer that cannot be honoured: `abandonQueuedRestart`, when the queued restart it pointed at is
+	 * cancelled or fails to start, and `reconcileRestartPointers`, when recovery finds nothing behind it.
 	 */
 	supersededBy?: { sessionId?: string; queueId?: string };
 	pid?: number;
