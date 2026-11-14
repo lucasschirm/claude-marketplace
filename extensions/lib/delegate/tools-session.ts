@@ -418,6 +418,13 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 						notes.push(`${meta.sessionId}: no worktree`);
 						continue;
 					}
+					// Collected targets are a list of intentions, not a set of permissions: the releases below
+					// await, and a restart or a follow-up can claim one of the later folders while the first is
+					// still being removed.
+					const claim = cleanWorktreeRefusal(rt, meta);
+					if (claim) {
+						return claim;
+					}
 					if (meta.status === "running" || meta.status === "stalled") {
 						// The agent is working in that folder. Removing it under a live process — or marking the
 						// session's worktree `retained` so the PR hook and the cancel path both stop looking at it —

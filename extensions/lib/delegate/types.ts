@@ -141,9 +141,9 @@ export type DelegateEvent =
 	| { kind: "selection.updated"; options: Record<string, string[]> }
 	| { kind: "mode.changed"; modeId: string }
 	/** What the agent says it is doing while it says nothing. `agy-acp` beats during a turn because agy
-	 *  goes silent when a hook blocks, carrying the state a watchdog acts on. Liveness, not content: any
-	 *  frame already restarts the stall clock, so what this kind adds is a held fact about *why* a session
-	 *  is quiet — and a beat every 15 s must never reach the transcript as text. */
+	 *  goes silent when a hook blocks. Mapping it is how a beat every 15 s stays out of the transcript;
+	 *  the fields are parsed but unread for now — any frame already restarts the stall clock, and
+	 *  `liveness.ts` decides from silence alone, so no verdict consumes a `state` yet. */
 	| { kind: "liveness"; state?: string; pendingPermissions?: number; turnMs?: number; seq?: number }
 	| { kind: "ignored"; reason: string };
 

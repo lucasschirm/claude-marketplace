@@ -176,7 +176,9 @@ test("a session whose process is still alive is killed, and the driver's CLI nam
 		"pi-test",
 		{ sessionIds: ["s-orphan"] },
 		{
-			"s-orphan": { sessionId: "s-orphan", agent: "claude", prompt: "p", status: "running", pid: process.pid },
+			// An alive pid that is not ours: a record may name a live process, and `normalizeMeta` refuses one
+			// that names the reader, so the fixture cannot either.
+			"s-orphan": { sessionId: "s-orphan", agent: "claude", prompt: "p", status: "running", pid: process.ppid },
 		},
 	);
 	const kills: Array<{ pid: number; cli?: string }> = [];
@@ -186,7 +188,7 @@ test("a session whose process is still alive is killed, and the driver's CLI nam
 	try {
 		const r = await recoverState(rt, "pi-test");
 		assert.strictEqual(r.orphanProcessesKilled, 1);
-		assert.deepStrictEqual(kills, [{ pid: process.pid, cli: "claude" }], "the agent recorded on the session decides the guard");
+		assert.deepStrictEqual(kills, [{ pid: process.ppid, cli: "claude" }], "the agent recorded on the session decides the guard");
 		assert.strictEqual(rt.sessions.get("s-orphan")?.status, "interrupted");
 	} finally {
 		restoreHome();

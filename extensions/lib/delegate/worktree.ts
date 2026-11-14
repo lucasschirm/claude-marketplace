@@ -234,9 +234,12 @@ async function releaseWorktreeNow(
 		rt.logWarn(`force-releasing the worktree ${meta.worktreePath} of ${meta.sessionId} without the safety check`);
 	}
 
-	// orca addresses a worktree by its id when it has one, and by path otherwise. `force` is safe here
-	// only because the check above already established there is nothing to lose.
-	const selector = meta.worktreeId || `path:${meta.worktreePath}`;
+	// Always by path, never by the recorded id. The safety check above is a statement about *this directory* —
+	// its uncommitted and unpushed work — and orca would happily delete whatever other worktree a stored id
+	// names: a record pairing a clean path with a borrowed id gets the borrowed one removed past the check, and
+	// a stored id is exactly as trustworthy as the file it was read from. If orca cannot resolve the path the
+	// removal fails and says so, which is the right failure shape.
+	const selector = `path:${meta.worktreePath}`;
 	const rm = await removeOrcaWorktree(selector, { force: true });
 	if (!rm.ok) {
 		return { removed: false, note: `could not remove ${meta.worktreePath}: ${stripAnsi(rm.error?.message ?? "orca worktree rm failed")}` };

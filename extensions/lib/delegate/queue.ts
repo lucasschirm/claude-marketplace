@@ -25,6 +25,7 @@ import {
 	startTurn,
 	supersededError,
 	supersededPointerText,
+	workspaceProblem,
 } from "./session.ts";
 import type { DelegateTransport } from "./transport.ts";
 import type { DelegateRuntime } from "./runtime.ts";
@@ -184,6 +185,14 @@ async function startNow(
 	let provisionedHere = false;
 	let started: SessionMeta | undefined;
 	let client: DelegateTransport | undefined;
+	// `drainQueue` floats this call and nothing else holds it, so `session_shutdown` does not reach it. Without
+	// the epoch check a start that was mid-flight when pi closed finishes anyway: it registers into a runtime
+	// that has been cleared, persists under whatever pi session id answers next (the orphan `default/`
+	// namespace), and leaves an agent running for a session that no longer exists — invisible to the next boot's
+	// recovery, and visible to this process's own tools until it exits.
+	const epoch = rt.epoch;
+	const shutDown = () => rt.epoch !== epoch;
+	const gone = { ok: false, code: "SESSION_CLOSED", error: "pi closed this session before its task started" } as const;
 	try {
 		if (task.createWorktree && !task.worktreePath) {
 			const wt = await provisionWorktree(rt, task);
@@ -192,6 +201,16 @@ async function startNow(
 				return { ok: false, code: "WORKTREE_CREATE_FAILED", error: wt.error };
 			}
 			provisionedHere = true;
+			if (shutDown()) {
+				// The folder was created for a task that will never run, and nothing else knows its name.
+				void releaseWorktree(rt, { ...task, sessionId: task.queueId } as never).catch(() => {});
+				release();
+				return gone;
+			}
+		}
+		if (shutDown()) {
+			release();
+			return gone;
 		}
 		const cwd = task.worktreePath ?? rt.baseDir;
 		const selection: Selection = { model: task.model, thinking: task.thinking, mode: task.mode };
@@ -201,6 +220,15 @@ async function startNow(
 			queueId: task.queueId,
 			createWorktree: task.createWorktree,
 		});
+		if (shutDown()) {
+			// `spawnSession` registers as it goes, so give back everything it added and stop the child. This is
+			// the window the whole check exists for: past this line the session would be live, owned by nobody.
+			rt.sessions.delete(spawned.meta.sessionId);
+			rt.activeClients.delete(spawned.meta.sessionId);
+			spawned.client.dispose();
+			release();
+			return gone;
+		}
 		started = spawned.meta;
 		client = spawned.client;
 		// Registered: from here the session holds the slot itself, through its own status.
@@ -290,8 +318,14 @@ export async function drainQueue(rt: DelegateRuntime): Promise<void> {
 		return;
 	}
 	draining.set(rt, true);
+	const epoch = rt.epoch;
 	try {
 		for (;;) {
+			if (rt.epoch !== epoch) {
+				// `session_shutdown` cleared the runtime and the queue with it. Everything after this point
+				// would be starting work for a pi session that no longer exists.
+				return;
+			}
 			const idx = rt.queue.findIndex((task) => rt.slots.inFlight(task.agent) < rt.maxRuns);
 			if (idx < 0) {
 				break;
@@ -480,6 +514,20 @@ export async function followUp(
 		return { ok: false, ...taken };
 	}
 
+	// Nowhere to work is a refusal before it is a slot: a released worktree, a folder on its way out, or a
+	// workspace that has simply been deleted. Prompting into one hands the agent a cwd its next file operation
+	// fails in — or, if the path was recreated by a later worktree, a restore that lands in somebody else's
+	// checkout. `delegate_restart` is the way back: it provisions fresh when the recorded folder cannot be
+	// reused.
+	const workspace = workspaceProblem(rt, meta);
+	if (workspace) {
+		return {
+			ok: false,
+			code: "WORKSPACE_GONE",
+			error: `this session has no workspace to continue in: ${workspace}. Use delegate_restart to run the prompt again with a new one.`,
+		};
+	}
+
 	// A follow-up turn occupies capacity exactly the way an initial one does, so it asks for the slot the
 	// same way. Without this the limits were a suggestion: two running sessions plus a follow-up was a third
 	// turn inside a per-agent limit of two, and the status line reported more in flight than there were.
@@ -521,8 +569,10 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 		// the parent's conversation still lives in, and this path has no safety check to lose.
 		if (queued.worktreePath && !queued.parentSessionId) {
 			// Provisioned for a task that will never run: give the folder back.
+			// By path for the same reason `releaseWorktreeNow` is: the id arrived from `state.json` and orca
+			// deletes whatever the id it is given names.
 			const { removeOrcaWorktree } = await import("../orca-client.ts");
-			void removeOrcaWorktree(queued.worktreeId || `path:${queued.worktreePath}`).catch(() => {});
+			void removeOrcaWorktree(`path:${queued.worktreePath}`).catch(() => {});
 		}
 		rt.persistState();
 		rt.updateStatusUI();
@@ -561,8 +611,11 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 		// that stale number could reach whatever recycled it, while the child is disposed by the reattach instead.
 		rt.killProcessGroup(meta.pid, rt.driverCli(meta.agent));
 	}
-	// A reattach has no turn to complete, and the turn that already ended counted this session once.
-	if (!reattaching) {
+	// Count the cancel only when it stopped a turn. A settled record with a live client is a parked agent — idle
+	// sessions keep their process between turns, and cancelling one is how a caller puts it away — and its turn
+	// was counted when it settled. The marker is taken here rather than tested so the settle path cannot also
+	// charge it, whichever of the two arrives first.
+	if (!reattaching && rt.turnInFlight.delete(targetId)) {
 		rt.totalCompleted++;
 	}
 	rt.persistSessionMeta(meta, true);
@@ -621,6 +674,16 @@ export async function onPrClosed(rt: DelegateRuntime, prNumber: number, state: s
 			}
 		}
 		if (!matches) {
+			continue;
+		}
+		// Re-checked, because `detectPullRequest` above is a `gh` call and its seconds are enough for a
+		// follow-up to reconnect this session or a restart to claim it. The checks at the top of the loop are
+		// then out of date, and the release deletes a folder an agent is about to work in.
+		// `midTurn` is a re-read, not a restatement of the check at the top of the loop: TypeScript narrows
+		// `meta.status` there, and the whole point here is that the await in between makes that narrowing
+		// stale — a turn can have started in exactly those seconds.
+		if (worktreeHasLiveClaim(rt, meta) || midTurn(meta)) {
+			rt.logWarn(`Skipping worktree cleanup for ${liveClaimText(rt, id, meta)} on PR #${prNumber} closed event`);
 			continue;
 		}
 		const res = await releaseWorktree(rt, meta);

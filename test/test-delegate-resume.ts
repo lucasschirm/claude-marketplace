@@ -21,7 +21,7 @@ import { DelegateTransport } from "../extensions/lib/delegate/transport.ts";
 import { agyDriver } from "../extensions/lib/delegate/drivers/agy.ts";
 import { devinDriver } from "../extensions/lib/delegate/drivers/devin.ts";
 import { markSuperseded, spawnSession, startTurn } from "../extensions/lib/delegate/session.ts";
-import { cancelSession, followUp } from "../extensions/lib/delegate/queue.ts";
+import { cancelSession, drainQueue, followUp } from "../extensions/lib/delegate/queue.ts";
 import { getEventsLogPath } from "../extensions/lib/delegate/storage.ts";
 import { normalizeMeta } from "../extensions/lib/delegate/recovery.ts";
 import { makeStub, metaFor } from "./helpers/delegate-stub.ts";
@@ -56,7 +56,9 @@ const COLLISION_RE = /already using for another session/;
 const CANCELLED_MID_REATTACH_RE = /cancelled while its agent was starting/;
 
 /** A transport that records the RPCs the engine made, so ordering is asserted rather than inferred. */
-function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delayMs?: number }; createId?: string } = {}) {
+function stubTransport(
+	opts: { resume?: { result?: unknown; error?: Error; delayMs?: number }; createId?: string; createDelayMs?: number } = {},
+) {
 	const calls: Call[] = [];
 	const events: Array<{ type: string; data: Record<string, unknown> }> = [];
 	let disposed = 0;
@@ -75,6 +77,9 @@ function stubTransport(opts: { resume?: { result?: unknown; error?: Error; delay
 		respond: () => {},
 		request: async (method: string, params: RpcParams) => {
 			calls.push({ method, params });
+			if (method === "session/new" && opts.createDelayMs) {
+				await new Promise((done) => setTimeout(done, opts.createDelayMs));
+			}
 			if (method === "session/new" && opts.createId) {
 				return { sessionId: opts.createId, configOptions: [] };
 			}
@@ -413,6 +418,101 @@ test("a cancel that lands mid-reattach stops the prompt instead of saying there 
 		assert.strictEqual(stub.disposed(), 1, "and the child spawned for it is disposed");
 		assert.strictEqual(meta.status, "cancelled");
 		assert.strictEqual(rt.totalCompleted, completedBefore, "a turn that never ran is not a completion");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a session whose worktree was released is not prompted into the folder it left", async () => {
+	// Releasing a folder sets `worktreeStatus` and deliberately leaves `worktreePath` and `sessionCwd` pointing
+	// at it, because the record still describes work that happened there. A follow-up that reads those fields
+	// without reading the status prompts an agent into a deleted cwd — or, if orca recreated the path for a
+	// later branch, restores the conversation against somebody else's checkout.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport();
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		meta.worktreeStatus = "released";
+		const res = failure(await followUp(rt, meta, "next"));
+		assert.strictEqual(res.code, "WORKSPACE_GONE");
+		assert.match(res.error, /worktree was released/);
+		assert.match(res.error, /delegate_restart/, "and the caller is told the way back");
+		assert.strictEqual(
+			stub.calls.some((c) => c.method === "session/prompt"),
+			false,
+			"nothing is prompted into a folder that is gone",
+		);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a folder removed without the session being told is refused too, not spawned into", async () => {
+	// `worktreeStatus: "active"` is the record's own claim that the directory is there. When it is not, the
+	// operator or orca took it, and the spawn that follows would fail with an `ENOENT` that reads like a
+	// missing binary.
+	const { rt, restoreHome } = makeStub();
+	const stub = stubTransport();
+	rt.makeTransport = () => stub.transport;
+	try {
+		const meta = deadSession(rt, "agy");
+		meta.sessionCwd = path.join(rt.baseDir ?? os.tmpdir(), "no-such-checkout");
+		meta.worktreeStatus = "active";
+		const res = failure(await followUp(rt, meta, "next"));
+		assert.strictEqual(res.code, "WORKSPACE_GONE");
+		assert.match(res.error, /was removed without the session being told/);
+	} finally {
+		restoreHome();
+	}
+});
+
+test("a start that was still spawning when pi shut down registers nothing", async () => {
+	// `drainQueue` floats `startNow` and nothing else holds it, so `session_shutdown` does not reach it. Without
+	// an epoch the start completes into a runtime that has been cleared: a session record persisted under
+	// whatever pi session id answers next, and an agent process running for a session that no longer exists —
+	// invisible to the next boot's recovery, and offered by this one until it exits.
+	const { rt, home, restoreHome } = makeStub();
+	// A `session/new` that answers, slowly: the test needs the spawn to *succeed* after the shutdown, because
+	// that is the moment the start would register. A stub that failed the handshake would prove nothing.
+	const stub = stubTransport({ createDelayMs: 300, createId: "spawned-1" });
+	rt.makeTransport = () => stub.transport;
+	try {
+		rt.queue.push({
+			queueId: "q-1",
+			agent: "agy",
+			prompt: "p",
+			mode: "plan",
+			createWorktree: false,
+			enqueuedAt: Date.now(),
+		} as never);
+		const draining = drainQueue(rt);
+		await new Promise((done) => setTimeout(done, 60));
+		// `drainQueue` floats its starts, so this is the only way to know the spawn is really mid-handshake:
+		// without it the test would finish before the start ever registered, and pass on nothing.
+		assert.ok(
+			stub.calls.some((c) => c.method === "session/new"),
+			"the start is inside its handshake when pi shuts down",
+		);
+		rt.shutdown();
+		await draining;
+		// Let the in-flight spawn resolve into whatever the runtime has become.
+		await new Promise((done) => setTimeout(done, 600));
+		assert.strictEqual(rt.sessions.size, 0, "nothing registered into a runtime that has been shut down");
+		assert.strictEqual(rt.activeClients.size, 0, "and no child stayed attached");
+		assert.strictEqual(
+			stub.calls.some((c) => c.method === "session/prompt"),
+			false,
+			"and the queued prompt was never sent into an agent nobody owns",
+		);
+		// The record is what outlives the process, so that is what must not exist. (`delegate_task/default` can
+		// already sit in the home from before pi anchored a session id; a record for *this* spawn may not.)
+		for (const root of ["delegate_task", "devin_delegate"]) {
+			assert.ok(
+				!fs.existsSync(path.join(home, ".pi", "agent", root, "pi-test", "spawned-1")),
+				`nothing was written for a session that was never allowed to exist (${root})`,
+			);
+		}
 	} finally {
 		restoreHome();
 	}

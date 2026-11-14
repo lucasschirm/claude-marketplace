@@ -36,6 +36,22 @@ test("the CLI a driver wraps comes from the driver, not from a hardcoded name", 
 	assert.equal(driverCli("no-such-agent"), undefined);
 });
 
+test("the pids that are lethal are never probed and never killed", () => {
+	// `kill(0)` signals this process's own group, and `kill(-1)` — what negating a recorded `1` reaches —
+	// signals every process the user may signal. Node reports both as success, so a liveness check calls them
+	// alive and the recycle guard reads `/proc/0/cmdline`, fails, and stands aside. A record can carry any of
+	// them: a corrupt `state.json`, a hand-edit, a value that never came from a spawn.
+	const warnings: string[] = [];
+	for (const pid of [-1, 0, 1, 1.5, Number.NaN, 2 ** 53]) {
+		assert.strictEqual(isPidAlive(pid), false, `pid ${pid} is not a live process`);
+		killProcessGroup(pid, "agy", (m) => warnings.push(m));
+	}
+	assert.strictEqual(warnings.length, 6, `each refusal says so: ${warnings.join(" | ")}`);
+	// Killing pi itself by way of a recorded pid is the same mistake.
+	killProcessGroup(process.pid, "agy", (m) => warnings.push(m));
+	assert.strictEqual(warnings.length, 7, "pi's own pid is not a kill target");
+});
+
 test("a recorded pid that is not the agent's process is left alone", async (t) => {
 	if (process.platform !== "linux") {
 		t.skip("the recycle guard reads /proc, which is Linux-only");

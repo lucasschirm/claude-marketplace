@@ -70,6 +70,23 @@ export class DelegateRuntime {
 	 * A reattach compares this count across its own await, which tells the two apart.
 	 */
 	readonly cancels = new Map<string, number>();
+	/**
+	 * Sessions with a turn actually running.
+	 *
+	 * `totalCompleted` counts turns, and `cancelSession` used to increment it whenever it was called on a
+	 * session it accepted — which, since round 11, includes an *idle* session that keeps its agent between
+	 * turns. Every idle cancel therefore charged a completion the settle path had already charged. The marker
+	 * is set by `startTurn` and cleared by whichever path ends the turn, so a cancel can tell "stop this turn"
+	 * from "put the parked agent away".
+	 */
+	readonly turnInFlight = new Set<string>();
+	/**
+	 * Bumped by `shutdown()`. A start that was floated rather than awaited (`drainQueue` fires `startNow` and
+	 * forgets it) survives `session_shutdown` otherwise: it registers into a runtime that has been cleared,
+	 * persists under whatever pi session id answers next, and leaves an agent running for a session nobody owns.
+	 * Such a start captures the epoch and stops when it no longer matches.
+	 */
+	epoch = 0;
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();
@@ -559,6 +576,7 @@ export class DelegateRuntime {
 	 * cannot be relied on). On-disk state is untouched — recovery re-anchors it.
 	 */
 	shutdown(): void {
+		this.epoch++;
 		for (const t of this.stallTimers.values()) {
 			clearInterval(t);
 		}
@@ -575,6 +593,8 @@ export class DelegateRuntime {
 		this.pendingPermissions.clear();
 		this.cleanupClients();
 		this.sessions.clear();
+		this.turnInFlight.clear();
+		this.cancels.clear();
 		this.queue.length = 0;
 		this.configOptions.clear();
 		this.sessionDirs.clear();

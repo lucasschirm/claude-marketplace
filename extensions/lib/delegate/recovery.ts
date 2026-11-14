@@ -77,7 +77,31 @@ export function normalizeMeta(raw: unknown): SessionMeta | null {
 		sessionCwd: absolutePathOr(m.sessionCwd),
 		supersededBy: supersededPointerOf(m.supersededBy),
 		worktreePath: absolutePathOr(m.worktreePath),
+		// A pid is a claim that ends in `kill(-pid)`, so it is checked before anything reads it: `0` would
+		// signal pi's own process group and `1` would broadcast to the user's, and neither is stopped by the
+		// recycle guard (there is no `/proc/0/cmdline` to compare against). See `isKillablePid`.
+		pid: pidOr(m.pid),
 	};
+}
+
+/** A recorded pid, or nothing. `process.pid` is excluded: a record must never describe the reader. */
+function pidOr(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 1 && value !== process.pid ? value : undefined;
+}
+
+/** A recorded counter, or 0. A JSON value is not a number: `"3"`, `true`, `1.5` and `1e999` are all storable. */
+function countOr(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_QUEUE_ID ? value : 0;
+}
+
+/**
+ * A slot ceiling as read from disk: an integer within range, or nothing. `maxRunsTotal` is the one value
+ * where a permissive read is worse than ignoring the file — `"3"`, `true` and `1.5` are all storable JSON and
+ * all compare greater than zero, and `1e999` is `Infinity`, which makes the total ceiling stop binding
+ * entirely so only the per-agent limit is left holding the line.
+ */
+function isPositiveLimit(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_QUEUE_ID;
 }
 
 /** The restart pointer as read back: an object naming a session, a queue entry, both, or neither. */
@@ -130,6 +154,14 @@ export function normalizeTask(raw: unknown): QueuedTask | null {
 		// without incrementing it gave two id-less records the same id, and gave recovery's uniqueness pass a
 		// candidate it had already accepted — the collision it exists to remove, arriving by a different door.
 		queueId: typeof t.queueId === "string" && t.queueId ? t.queueId : "",
+		// The worktree fields are the two most dangerous strings a queue record can hold: `worktreePath` becomes
+		// the agent's spawn cwd, and the ids reach `removeOrcaWorktree`, which deletes whatever it is told to.
+		// A relative path would be resolved against whichever folder pi happens to run in, so it is dropped
+		// rather than guessed at — the same rule `normalizeMeta` applies to the same fields.
+		worktreePath: absolutePathOr(t.worktreePath),
+		worktreeBranch: typeof t.worktreeBranch === "string" ? t.worktreeBranch : undefined,
+		worktreeId: typeof t.worktreeId === "string" && t.worktreeId ? t.worktreeId : undefined,
+		parentWorktreeId: typeof t.parentWorktreeId === "string" && t.parentWorktreeId ? t.parentWorktreeId : undefined,
 	};
 }
 
@@ -185,7 +217,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 		if (!Number.isNaN(parsed) && parsed > 0) {
 			rt.maxRuns = parsed;
 		}
-	} else if (state.maxRuns && state.maxRuns > 0) {
+	} else if (isPositiveLimit(state.maxRuns)) {
 		rt.maxRuns = state.maxRuns;
 	}
 	// The total is never below the per-agent limit, here or at startup. Reading a persisted 3 back over a
@@ -196,7 +228,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 		if (!Number.isNaN(parsed) && parsed > 0) {
 			rt.maxRunsTotal = Math.max(parsed, rt.maxRuns);
 		}
-	} else if (state.maxRunsTotal && state.maxRunsTotal > 0) {
+	} else if (isPositiveLimit(state.maxRunsTotal)) {
 		rt.maxRunsTotal = Math.max(state.maxRunsTotal, rt.maxRuns);
 	}
 
@@ -204,7 +236,7 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 	// a value past the reachable range would stall the generator, so neither counts as a counter at all.
 	rt.totalInvoked =
 		Number.isSafeInteger(state.totalInvoked) && state.totalInvoked > 0 && state.totalInvoked <= MAX_QUEUE_ID ? state.totalInvoked : 0;
-	rt.totalCompleted = state.totalCompleted || 0;
+	rt.totalCompleted = countOr(state.totalCompleted);
 	for (const [id, recorded] of Object.entries(state.sessionDirs ?? {})) {
 		// Both halves become path segments: the id names a session directory, the value is the *pi session id*
 		// the record was written under and heads every later candidate list. A non-string throws inside
@@ -265,7 +297,13 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			if (typeof sessionId !== "string" || !isStorageSafeId(sessionId)) {
 				continue;
 			}
-			const meta = await readMeta(rt, piSessionId, sessionId, state.sessionDirs?.[sessionId]);
+			// The validated map, never the container: reading `state.sessionDirs` again here would hand the raw
+			// value straight to `path.join` inside `sessionFileCandidates`, which is the exact failure the pass
+			// above exists to prevent — a non-string throws mid-loop (queue restored, later sessions unread,
+			// pointer reconciliation, `persistState` and the drain all skipped, and because recovery is floated
+			// the rejection is swallowed and every later tool runs on the partial state), and a `..`-bearing
+			// string probes for a plantable `meta.json` outside the storage tree.
+			const meta = await readMeta(rt, piSessionId, sessionId, rt.sessionDirs.get(sessionId));
 			if (!meta) {
 				continue;
 			}
@@ -277,6 +315,17 @@ export async function recoverState(rt: DelegateRuntime, piSessionId: string, sig
 			// a session whose key, `meta.json` and transcript candidates are three different answers — and the
 			// next save would write that split forward.
 			rt.sessions.set(meta.sessionId, meta);
+			if (meta.sessionId !== sessionId) {
+				// Carry the recorded root across the rename, or lose it: `persistState` keys `sessionDirs` by
+				// session key, so an entry left under the list id is dropped on the next save and the record
+				// then resolves under *this* pi session id — where its files are not — and disappears on the
+				// second boot.
+				const recorded = rt.sessionDirs.get(sessionId);
+				if (recorded) {
+					rt.sessionDirs.set(meta.sessionId, recorded);
+					rt.sessionDirs.delete(sessionId);
+				}
+			}
 			report.recovered++;
 			// No unconditional re-anchor here. A recovered record is written again when something about it
 			// changed — `reconcileInFlight` and the backfill both persist what they mutate — and copying every
@@ -434,13 +483,33 @@ function highestQueueId(entries: unknown[]): number {
  * Deriving first is what makes the second safe: a pointer derived from something that came back is not cleared.
  *
  */
+/** Does following this session's restart chain reach `target`? Used to refuse a derived pointer that would
+ * close a cycle — a cycle would refuse every conversation inside it, permanently. */
+function restartsA(rt: DelegateRuntime, fromSessionId: string, target: string): boolean {
+	let current = rt.sessions.get(fromSessionId);
+	for (let hops = 0; current && hops < 32; hops++) {
+		const next = current.supersededBy?.sessionId;
+		if (!next) {
+			return false;
+		}
+		if (next === target) {
+			return true;
+		}
+		current = rt.sessions.get(next);
+	}
+	return true;
+}
+
 function reconcileRestartPointers(rt: DelegateRuntime): void {
 	for (const meta of rt.sessions.values()) {
 		if (!meta.parentSessionId) {
 			continue;
 		}
 		const parent = rt.sessions.get(meta.parentSessionId);
-		if (parent && parent !== meta && !parent.supersededBy) {
+		// `restartsA` guards the two-node cycle: provenance from disk can say A restarted B and B restarted
+		// A, and deriving both pointers leaves every conversation in the loop refused as superseded, with no
+		// way out but editing `state.json`. Legit writers only point backwards in creation order.
+		if (parent && parent !== meta && !parent.supersededBy && !restartsA(rt, meta.sessionId, parent.sessionId)) {
 			parent.supersededBy = { sessionId: meta.sessionId };
 			rt.persistSessionMeta(parent, true);
 			rt.logWarn(`recovered the restart pointer of ${parent.sessionId}: ${meta.sessionId} came back as its restarted session`);

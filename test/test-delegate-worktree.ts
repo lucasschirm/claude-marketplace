@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { makeStub } from "./helpers/delegate-stub.ts";
 import {
@@ -199,6 +200,42 @@ test("a cancel during a reattach does not release the folder that reattach is wo
 	} finally {
 		stub.restoreHome();
 		fs.rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("a release deletes the folder it checked, never the id it was handed", async () => {
+	// The safety check is a statement about one directory: its uncommitted and unpushed work. orca deletes
+	// whatever the selector names, so a record pairing a clean path with a borrowed — or planted — id would
+	// have the borrowed worktree removed past the check. `state.json` is where that id comes from.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dt-release-"));
+	const spy = path.join(dir, "orca-args.log");
+	const script = path.join(dir, "orca");
+	fs.writeFileSync(script, `#!/bin/sh\necho "$@" >> ${spy}\necho '{"ok":true,"result":{"removed":true}}'\n`, { mode: 0o755 });
+	const previous = process.env.ORCA_CLI_COMMAND;
+	process.env.ORCA_CLI_COMMAND = script;
+	const { rt, restoreHome } = makeStub();
+	try {
+		const worktree = path.join(dir, "checkout");
+		fs.mkdirSync(worktree);
+		const meta = metaFor("s-1", {
+			status: "idle",
+			worktreePath: worktree,
+			worktreeId: "someone-elses-worktree",
+			worktreeStatus: "active",
+		});
+		const res = await releaseWorktree(rt, meta, { force: true });
+		assert.strictEqual(res.removed, true, res.note);
+		const args = fs.existsSync(spy) ? fs.readFileSync(spy, "utf8") : "";
+		assert.match(args, /--worktree path:/, `the deletion was addressed by path: ${args}`);
+		assert.ok(!args.includes("someone-elses-worktree"), `the stored id selected the deletion: ${args}`);
+	} finally {
+		if (previous === undefined) {
+			delete process.env.ORCA_CLI_COMMAND;
+		} else {
+			process.env.ORCA_CLI_COMMAND = previous;
+		}
+		restoreHome();
+		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 

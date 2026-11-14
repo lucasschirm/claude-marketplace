@@ -127,6 +127,14 @@ await and answers `BUSY`, telling the caller to send it again.
 | a hostile id in `state.json` cannot stop recovery or leave the storage tree | `test/test-delegate-recovery.ts` |
 | a recorded root survives only when both halves are ids, and a session is keyed by its own record | same |
 | a debounced record write lands in the home it was scheduled in, not the one answering three seconds later | `test/test-delegate-runtime.ts` |
+| the pids that are lethal (`0`, `-1`, this process) are never probed and never killed | `test/test-delegate-process.ts` |
+| a planted `pid` never survives `normalizeMeta`, and hostile container scalars never become counters | `test/test-delegate-recovery.ts` |
+| a hostile recorded root cannot stop recovery even when its session is listed; the binding follows the record | same |
+| provenance that points both ways is not turned into two pointers that refuse each other forever | same |
+| cancelling a parked agent is not a second completed turn; cancelling a running one is | `test/test-delegate-runtime.ts` |
+| a start still spawning when pi shut down registers nothing and prompts nothing | `test/test-delegate-resume.ts` |
+| a released worktree, or one removed without the session being told, is a refusal rather than a prompt | same |
+| a release deletes the folder it checked, never the id it was handed | `test/test-delegate-worktree.ts` |
 | the restore answer still names `_meta.restored.*` and the advertised state | `test/test-delegate-agy.ts` |
 | on the wire: `new → prompt → resume → prompt`, in two different processes | same, against `test/fake-acp-server.mjs` with `FAKE_STORE_DIR` |
 | on the wire: an unknown conversation never gets a prompt | same |
@@ -455,6 +463,51 @@ temp directory for every later test in the file and letting two runtimes write o
 last-writer-wins; it restores newest-first now. And the comment written in round 11 claimed interleaved
 continuations resolved the real `~/.pi` — true before the pin, wrong after it, where a late write lands in
 whatever sibling stub currently owns the process-global home. The comment says that instead.
+
+### §7.9 The record reaches the process table and the worktree registry (round 15)
+
+Two blockers, and both were the same mistake seen from further out. Rounds 12–14 validated the *paths* a
+persisted record could name; round 15 found the two fields that do worse than read a file.
+
+**A pid ends in `kill(-pid)`.** `normalizeMeta` passed `pid` through raw, the boot sweep kills whatever a
+running record names, and `killProcessGroup` negates it to take the process group. `kill(0, 0)` and
+`kill(-1, 0)` both *succeed* in Node, so `isPidAlive` called them alive; the recycle guard then reads
+`/proc/0/cmdline`, cannot read it, and correctly declines to block a kill of something it cannot identify. A
+`meta.json` with `"pid": -1, "status": "running"` therefore SIGTERMs every process the user can signal at boot,
+repeats with SIGKILL 1.5 s later, and the same pair is reachable from `cancelSession` and `delegate_restart`.
+`isKillablePid` now decides: a safe integer above 1, and never this process. Probing keeps the weaker rule —
+`isPidAlive(own pid)` is a legitimate question — but nothing kills on a claim that fails it, and
+`normalizeMeta` drops such a `pid` so the sweep never sees one.
+
+**A stored worktree id is a deletion selector.** The safety check in `releaseWorktreeNow` is a statement about
+one directory — its uncommitted and unpushed work — while orca deletes whatever selector it is handed, and the
+selector preferred `meta.worktreeId`. A record pairing a clean path with a borrowed or planted id had the
+borrowed worktree deleted past the check, and the queued-cancel removal ran no check at all. Both now select by
+`path:` of the directory that was actually examined; a stored id that no longer resolves simply fails the
+removal, which is the right shape of failure. `normalizeTask` also stopped passing the queued worktree fields
+through raw — `worktreePath` is a spawn cwd, and a relative one used to be resolved against whichever folder pi
+happened to run in.
+
+**Recovery's own door.** Round 14 validated `sessionDirs` into the map and then read the raw container again one
+function further down, which is the same value arriving at `path.join` by a second door: a non-string throws
+mid-loop, and because recovery is floated the rejection is swallowed, `recoveryDone` resolves, and every tool
+later in that boot runs on a half-restored state. `readMeta` now takes the validated map. The remaining
+container scalars — `totalCompleted`, `maxRuns`, `maxRunsTotal` — were guarded like `totalInvoked` was not:
+`"3"`, `true`, `1.5` all compare greater than zero, and `1e999` is `Infinity`, which quietly stops the total
+ceiling binding at all.
+
+**The rest.** A follow-up now refuses a workspace that is gone: `releaseWorktree` sets `worktreeStatus` and
+deliberately leaves the path fields pointing at the folder, so a follow-up reading them prompted an agent into a
+deleted cwd — or restored a conversation against a checkout orca had recreated for a later branch. The existence
+probe only applies when the record itself claims the folder is live; a cwd nothing ever claimed still fails at
+`spawn`, with the message that names the workspace. `startNow` carries the runtime's epoch, because
+`drainQueue` floats it and `session_shutdown` cannot reach a floated call: a start that resolved after shutdown
+used to register into a cleared runtime, persist under whatever pi session id answered next, and leave an agent
+running for a session that no longer exists. Cancelling a *parked* agent (idle status, live client) no longer
+charges a second completion — the marker is taken, not tested, so settle cannot also charge it. A provenance
+cycle in `state.json` is not turned into two pointers that refuse each other forever. And the two comments about
+`agy-acp`'s heartbeat said its state "exists in the engine" and is "the one a watchdog acts on": nothing reads
+the parsed fields, `liveness.ts` decides from silence alone, and the comments now say that instead.
 
 
 ## 8. Out of scope

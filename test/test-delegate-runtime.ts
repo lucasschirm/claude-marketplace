@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fakeClient, makeStub, metaFor } from "./helpers/delegate-stub.ts";
+import { cancelSession } from "../extensions/lib/delegate/queue.ts";
 import { getEventsLogPath, getMetaPath, getStatePath } from "../extensions/lib/delegate/storage.ts";
 import { must } from "./helpers/must.ts";
 
@@ -252,6 +253,39 @@ test("state and metadata persist under the new root, and drain on demand", async
 		const meta = JSON.parse(fs.readFileSync(getMetaPath("pi-test", "s-1"), "utf-8"));
 		assert.strictEqual(meta.agent, "claude");
 		assert.ok(getEventsLogPath("pi-test", "s-1").startsWith(home), "everything is inside the temp home");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("cancelling a parked agent is not a second completed turn", async () => {
+	// An idle session keeps its agent between turns, and cancelling one is how a caller puts it away. Its turn
+	// was counted when it settled; `cancelSession` accepting a settled+connected session (round 11) then
+	// incremented again, so every idle cancel drifted a persisted counter that the status line reports.
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "idle" });
+		rt.sessions.set("s-1", meta);
+		rt.activeClients.set("s-1", fakeClient() as never);
+		const before = rt.totalCompleted;
+		assert.strictEqual(await cancelSession(rt, "s-1"), "session");
+		assert.strictEqual(rt.totalCompleted, before, "one turn, one completion");
+		assert.strictEqual(meta.status, "cancelled", "the caller did stop it");
+	} finally {
+		restoreHome();
+	}
+});
+
+test("cancelling a turn that is running is the completion", async () => {
+	const { rt, restoreHome } = makeStub();
+	try {
+		const meta = metaFor("s-1", { status: "running" });
+		rt.sessions.set("s-1", meta);
+		rt.turnInFlight.add("s-1");
+		const before = rt.totalCompleted;
+		assert.strictEqual(await cancelSession(rt, "s-1"), "session");
+		assert.strictEqual(rt.totalCompleted, before + 1, "a turn that was stopped did not finish on its own");
+		assert.strictEqual(rt.turnInFlight.has("s-1"), false, "and the marker went with it, so settle cannot charge it twice");
 	} finally {
 		restoreHome();
 	}
