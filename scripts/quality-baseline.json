@@ -16,14 +16,14 @@
     "noUnusedLibs": 0,
     "wiredTests": 0,
     "frontmatter": 0,
-    "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 211,
     "biome.style/useBlockStatements": 953,
+    "biome.performance/noAwaitInLoops": 107,
     "biome.performance/useTopLevelRegex": 617,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noShadow": 78,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noReturnAssign": 14,
-    "biome.complexity/noExcessiveCognitiveComplexity": 59,
+    "biome.complexity/noExcessiveCognitiveComplexity": 58,
     "biome.suspicious/noExplicitAny": 158,
     "biome.suspicious/noConsole": 8
   },
@@ -46,7 +46,7 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 620,
+    "extensions/lib/delegate/queue.ts": 628,
     "extensions/lib/delegate/recovery.ts": 464,
     "extensions/lib/delegate/registry.ts": 238,
     "extensions/lib/delegate/runtime.ts": 580,
@@ -823,8 +823,15 @@
       "changes": [
         "extensions/lib/delegate/queue.ts: 620 lines > baseline 615 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "Round thirteen named which claim holds a folder, and pinned the three wordings.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 628 lines > baseline 620 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "c6bf8c2",
+  "generatedFrom": "ffb0f72",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

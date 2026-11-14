@@ -576,6 +576,17 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	return "session";
 }
 
+/** Which live claim keeps a settled record's folder off the cleanup list, in the words the log needs. */
+function liveClaimText(rt: DelegateRuntime, id: string, meta: SessionMeta): string {
+	if (meta.supersededBy) {
+		return `superseded session ${id} (${supersededPointerText(meta)})`;
+	}
+	if (rt.restarting.has(id)) {
+		return `session ${id}, whose restart is in flight`;
+	}
+	return `session ${id}, whose follow-up is reconnecting it`;
+}
+
 /**
  * observe-pr calls this when a PR merges or closes: a worktree whose PR landed is dead wood, and the
  * agent is not going to clean it up on its own.
@@ -586,14 +597,11 @@ export async function onPrClosed(rt: DelegateRuntime, prNumber: number, state: s
 			continue;
 		}
 		if (worktreeHasLiveClaim(rt, meta)) {
-			// The folder belongs to a restart now — one whose pointer landed, or one still spawning — and that
-			// session may be live: a settled record whose conversation moved on is not evidence its worktree is
-			// dead wood, and through the spawn window the parent is settled, unmarked, with the handover due.
-			rt.logWarn(
-				`Skipping worktree cleanup for ${
-					meta.supersededBy ? `superseded session ${id} (${supersededPointerText(meta)})` : `session ${id}, whose restart is in flight`
-				} on PR #${prNumber} closed event`,
-			);
+			// Something else owns this folder and may be live: a conversation that moved to a restart, a restart
+			// mid-spawn whose pointer has not landed, or a follow-up reconnecting it in this very directory. A
+			// settled record is not evidence its worktree is dead wood, and the log has to say which of the three
+			// it is — an operator told to wait for a restart that does not exist waits for the wrong thing.
+			rt.logWarn(`Skipping worktree cleanup for ${liveClaimText(rt, id, meta)} on PR #${prNumber} closed event`);
 			continue;
 		}
 		if (meta.status === "running" || meta.status === "stalled") {

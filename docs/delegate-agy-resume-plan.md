@@ -410,6 +410,12 @@ the shared-spawn test failed with two prompts. So the helper, `deliverFollowUp`,
 from `followUp`, not a call and an await. Its docblock says so, because the next reader will want to tidy it back
 into a function that returns a client.
 
+Round 13 found the last wrong word: the skip inside `onPrClosed` still described every claim on a folder as a
+restart, so a session whose ordinary follow-up was reconnecting it produced a warning telling the operator to wait
+for a `delegate_restart` that would never come. `liveClaimText` names the claim — superseded, restart in flight,
+follow-up reconnecting — and the test asserts the three wordings rather than only the skip. A correct decision
+with a wrong explanation is the same defect rounds 11 and 12 were about, one layer down.
+
 
 ## 8. Out of scope
 

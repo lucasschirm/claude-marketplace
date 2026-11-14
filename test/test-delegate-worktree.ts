@@ -106,6 +106,12 @@ test("a failed checkout says why, instead of returning a path that does not exis
 	}
 });
 
+// The three ways a settled record's folder is claimed, as the operator sees them in the skip warning. Naming the
+// wrong one is not cosmetic: "wait for the restart" sends someone after a `delegate_restart` that will never come.
+const SUPERSEDED_SKIP_RE = /superseded session old-1 \(restarted as new-1\)/;
+const RESTART_SKIP_RE = /whose restart is in flight/;
+const RECONNECT_SKIP_RE = /whose follow-up is reconnecting it/;
+
 test("a closed PR does not release a worktree a restarted session is working in", async () => {
 	// `delegate_restart` reuses the worktree, so one folder can be named by two records: the settled one whose
 	// conversation moved on, and the session that took it. Releasing "settled sessions with an active worktree"
@@ -137,6 +143,10 @@ test("a closed PR does not release a worktree a restarted session is working in"
 		const connecting = metaFor("old-3", { ...shared });
 		stub.rt.sessions.set("old-3", connecting);
 		stub.rt.reattaching.set("old-3", Promise.resolve(undefined as never));
+		const warns: string[] = [];
+		stub.rt.logWarn = (message: string) => {
+			warns.push(message);
+		};
 
 		await onPrClosed(stub.rt, 42, "closed");
 
@@ -147,6 +157,14 @@ test("a closed PR does not release a worktree a restarted session is working in"
 		assert.ok(!told.includes("old-2"), `a folder mid-handover was released: ${told}`);
 		assert.strictEqual(connecting.worktreeStatus, "active", "a session mid-reattach owns nothing to release");
 		assert.ok(!told.includes("old-3"), `a folder a reattach is working in was released: ${told}`);
+		// The skip is right; the sentence has to name the right claim. "Wait for the restart" is bad advice when
+		// what holds the folder is an ordinary follow-up reconnecting it.
+		const skipped = warns.filter((w) => w.includes("Skipping worktree cleanup"));
+		const byId = (id: string) => skipped.find((w) => w.includes(id)) ?? "";
+		assert.match(byId("old-1"), SUPERSEDED_SKIP_RE, byId("old-1"));
+		assert.match(byId("old-2"), RESTART_SKIP_RE, byId("old-2"));
+		assert.match(byId("old-3"), RECONNECT_SKIP_RE, byId("old-3"));
+		assert.ok(!byId("old-3").includes("restart"), `a reattach was logged as a restart: ${byId("old-3")}`);
 		assert.ok(told.includes("new-1"), `the session that does own the folder should have been handled: ${told}`);
 	} finally {
 		stub.restoreHome();
