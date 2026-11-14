@@ -19,9 +19,9 @@
     "biome.performance/noAwaitInLoops": 107,
     "biome.performance/noNamespaceImport": 212,
     "biome.style/useBlockStatements": 953,
-    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.performance/useTopLevelRegex": 617,
     "biome.suspicious/noShadow": 78,
+    "biome.complexity/noExcessiveLinesPerFunction": 10,
     "biome.suspicious/noReturnAssign": 14,
     "biome.complexity/noExcessiveCognitiveComplexity": 56,
     "biome.suspicious/noExplicitAny": 158,
@@ -46,15 +46,15 @@
     "extensions/lib/delegate/persist.ts": 117,
     "extensions/lib/delegate/pr-detect.ts": 50,
     "extensions/lib/delegate/process.ts": 79,
-    "extensions/lib/delegate/queue.ts": 481,
+    "extensions/lib/delegate/queue.ts": 555,
     "extensions/lib/delegate/recovery.ts": 336,
     "extensions/lib/delegate/registry.ts": 238,
-    "extensions/lib/delegate/runtime.ts": 558,
-    "extensions/lib/delegate/session.ts": 547,
+    "extensions/lib/delegate/runtime.ts": 566,
+    "extensions/lib/delegate/session.ts": 577,
     "extensions/lib/delegate/slots.ts": 81,
     "extensions/lib/delegate/storage.ts": 131,
-    "extensions/lib/delegate/tools-session.ts": 365,
-    "extensions/lib/delegate/tools.ts": 289,
+    "extensions/lib/delegate/tools-session.ts": 414,
+    "extensions/lib/delegate/tools.ts": 298,
     "extensions/lib/delegate/transcript.ts": 230,
     "extensions/lib/delegate/transport.ts": 456,
     "extensions/lib/delegate/types.ts": 327,
@@ -736,8 +736,26 @@
       "changes": [
         "extensions/lib/delegate/recovery.ts: 336 lines > baseline 334 (files may only shrink)"
       ]
+    },
+    {
+      "at": "2026-11-13",
+      "reason": "Round six closed the restart race on both sides, and five files each grew by the reader of that pointer.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 545 lines > baseline 481 (files may only shrink)",
+        "extensions/lib/delegate/runtime.ts: 566 lines > baseline 558 (files may only shrink)",
+        "extensions/lib/delegate/session.ts: 577 lines > baseline 547 (files may only shrink)",
+        "extensions/lib/delegate/tools-session.ts: 414 lines > baseline 365 (files may only shrink)",
+        "extensions/lib/delegate/tools.ts: 298 lines > baseline 289 (files may only shrink)"
+      ]
+    },
+    {
+      "at": "2026-11-14",
+      "reason": "A restart that never starts hands its parent's conversation back, which needs the same reader twice.",
+      "changes": [
+        "extensions/lib/delegate/queue.ts: 555 lines > baseline 545 (files may only shrink)"
+      ]
     }
   ],
-  "generatedFrom": "9996343",
+  "generatedFrom": "814c4f2",
   "biomeConfigHash": "4a7e658c148e7ff2"
 }

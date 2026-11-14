@@ -39,6 +39,14 @@ export class DelegateRuntime {
 	readonly activeClients = new Map<string, DelegateTransport>();
 	/** A reattach in flight, so a second follow-up waits for it instead of spawning a rival agent. */
 	readonly reattaching = new Map<string, Promise<DelegateTransport>>();
+	/**
+	 * Session ids whose `delegate_restart` is in flight. In flight is process-local by definition — after a
+	 * pi restart nothing is pending — so this is a set and never a record on disk, where a crashed restart
+	 * would dead-end a conversation that nothing took over. It exists because a restart spawns, handshakes
+	 * and prompts before it can write its pointer, and a follow-up landing inside that window would
+	 * reattach the same conversation beside the sibling the restart is starting.
+	 */
+	readonly restarting = new Set<string>();
 	readonly queue: QueuedTask[] = [];
 	/** Advertised ACP config-option vocabularies, captured from `config_option_update`. */
 	readonly configOptions = new Map<string, Map<string, string[]>>();

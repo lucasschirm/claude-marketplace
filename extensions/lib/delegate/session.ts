@@ -412,18 +412,15 @@ async function reattachOnce(rt: DelegateRuntime, driver: AgentDriver, meta: Sess
 		client.dispose();
 		throw err;
 	}
-	// Two things can have taken this conversation away while its agent was starting, and they leave different
-	// traces: a restart mints a new id and marks this record, which stays in the map; a `/new` or a shutdown
-	// empties the map, so the record is no longer the one that was looked up. Registering anyway hands a live
-	// agent to nobody — status, `delegate_cancel` and the limits all read `rt.sessions` — and prompts a
-	// conversation that has moved on, in a worktree its sibling is editing.
-	if (meta.supersededBy || rt.sessions.get(meta.sessionId) !== meta) {
+	// Three things can have taken this conversation away while its agent was starting, and they leave
+	// different traces: a restart wrote its pointer; a restart still spawning is in `rt.restarting` and will
+	// write one; a `/new` or a shutdown emptied the map, so this record is no longer the one that was looked
+	// up. Registering anyway hands a live agent to nobody — status, `delegate_cancel` and the limits all read
+	// `rt.sessions` — and prompts a conversation that has moved on, in a worktree its sibling is editing.
+	const refusal = reattachRefusal(rt, meta);
+	if (refusal) {
 		client.dispose();
-		throw new Error(
-			meta.supersededBy
-				? `the agent was still starting when ${supersededError(meta)}`
-				: "this pi closed the session while its agent was starting; nothing was prompted",
-		);
+		throw new Error(refusal);
 	}
 	// The wiring a live session has: updates, permission requests, the exit path that reports an interrupted
 	// turn. `attach` owns the session's config-option catalogue from here.
@@ -480,12 +477,45 @@ export function markSuperseded(rt: DelegateRuntime, meta: SessionMeta, target: {
 	rt.persistState();
 }
 
+/** Where a superseded conversation went, in the few words every refusal of it needs. */
+export function supersededPointerText(meta: SessionMeta): string {
+	const pointer = meta.supersededBy;
+	if (!pointer) {
+		return "";
+	}
+	return pointer.sessionId ? `restarted as ${pointer.sessionId}` : `waiting to restart as queue entry ${pointer.queueId}`;
+}
+
 /** What the caller of a conversation that moved on hears: where it went, and that nothing was prompted here. */
 export function supersededError(meta: SessionMeta): string {
-	const target = meta.supersededBy?.sessionId
-		? `it was restarted as ${meta.supersededBy.sessionId} — message that session`
-		: `a restart of it is queued as ${meta.supersededBy?.queueId} — message the session that starts from it`;
-	return `${target}; nothing was prompted here, because two live agents of one conversation would share its workspace`;
+	return (
+		`this session was ${supersededPointerText(meta)} — message that one instead; nothing was prompted here, ` +
+		"because two live agents of one conversation would share its workspace"
+	);
+}
+
+/** Forget the pointer: the restart that wrote it did not happen, so the conversation is its own again. */
+export function clearSuperseded(rt: DelegateRuntime, meta: SessionMeta): void {
+	if (!meta.supersededBy) {
+		return;
+	}
+	meta.supersededBy = undefined;
+	rt.persistSessionMeta(meta, true);
+	rt.persistState();
+}
+
+/** Why this conversation no longer belongs to the process reattaching it — or nothing, and the reattach goes on. */
+function reattachRefusal(rt: DelegateRuntime, meta: SessionMeta): string | undefined {
+	if (meta.supersededBy) {
+		return `the agent was still starting when ${supersededError(meta)}`;
+	}
+	if (rt.restarting.has(meta.sessionId)) {
+		return "a delegate_restart of this session is in flight and owns its conversation now; nothing was prompted here";
+	}
+	if (rt.sessions.get(meta.sessionId) !== meta) {
+		return "this pi closed the session while its agent was starting; nothing was prompted";
+	}
+	return undefined;
 }
 
 export function reattachSession(rt: DelegateRuntime, driver: AgentDriver, meta: SessionMeta): Promise<DelegateTransport> {

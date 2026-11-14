@@ -12,7 +12,7 @@ import { extractCliError } from "./diagnostics.ts";
 import { admit, findAgent } from "./registry.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { cancelSession, delegate, followUp, type DelegateRequest } from "./queue.ts";
-import { markSuperseded } from "./session.ts";
+import { markSuperseded, supersededPointerText } from "./session.ts";
 import { commandForCaller, PERMISSION_DECISIONS, type PermissionDecision } from "./permissions.ts";
 import { releaseWorktree } from "./worktree.ts";
 import type { SessionMeta } from "./types.ts";
@@ -47,8 +47,7 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 			description:
 				"Sends a follow-up prompt to a delegated session and returns immediately. The session must be idle: " +
 				"a running session is still working, one whose process died is continued where the agent can " +
-				"restore its conversation and otherwise restarted (delegate_restart), and one that was already " +
-				"restarted refuses and names the session that took its conversation.",
+				"restore its conversation and otherwise restarted (delegate_restart), and one whose conversation a restart took over refuses and names where it went.",
 			parameters: Type.Object({
 				session_id: SESSION_ID,
 				message: Type.String({ description: "Follow-up instruction for the session" }),
@@ -173,7 +172,7 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 			label: "Delegate Restart",
 			description:
 				"Runs an interrupted, failed or finished session again in its original worktree, with the original prompt or a revised one. " +
-				"The id it was given stops taking messages: the new session owns the conversation. " +
+				"The id it was given stops taking messages, and restarting it again refuses: the new session owns the conversation. " +
 				"This starts a NEW session id — the old one keeps its record; a running session must be cancelled first.",
 			parameters: Type.Object({
 				session_id: SESSION_ID,
@@ -182,111 +181,148 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 				agent: Type.Optional(Type.String({ description: "Run the restart on another agent (default: the original session's)." })),
 			}),
 			async execute(_id, params, _signal, _onUpdate, ctx) {
-				await begin(rt, ctx);
-				const meta = rt.sessions.get(String(params.session_id));
-				if (!meta) {
-					return errorResult(rt, "delegate_restart", `Session '${params.session_id}' not found.`, { code: "NOT_FOUND" });
+				// Claim the conversation from the id the caller wrote, before the first await. Everything between
+				// here and the pointer — anchoring the session, the kill window, the spawn, the handshake, the first
+				// prompt — is time in which `delegate_message` on this id would otherwise reattach the conversation
+				// beside the sibling this call is starting, in the worktree the two share. In flight is
+				// process-local: a restart that died with pi leaves nothing behind to dead-end anybody.
+				const requested = String(params.session_id);
+				if (rt.restarting.has(requested)) {
+					return errorResult(rt, "delegate_restart", `Session '${requested}' is already being restarted; wait for that call.`, {
+						code: "RESTART_IN_FLIGHT",
+					});
 				}
-				if (meta.status === "running" || meta.status === "stalled") {
-					return errorResult(
-						rt,
-						"delegate_restart",
-						`Session '${meta.sessionId}' is ${meta.status}. Cancel it first with delegate_cancel.`,
-						{
-							code: "BUSY",
-							status: meta.status,
-						},
-					);
-				}
-				if (meta.pid && rt.isPidAlive(meta.pid)) {
-					if (meta.status !== "cancelled") {
+				rt.restarting.add(requested);
+				try {
+					await begin(rt, ctx);
+					const meta = rt.sessions.get(requested);
+					if (!meta) {
+						return errorResult(rt, "delegate_restart", `Session '${params.session_id}' not found.`, { code: "NOT_FOUND" });
+					}
+					if (meta.supersededBy) {
+						// This id's conversation already has an owner, and that owner may be live in the same worktree.
+						// Restarting the dead id again would put a second agent of one conversation in that folder and
+						// overwrite the pointer, so the caller is sent to the session that took it.
 						return errorResult(
 							rt,
 							"delegate_restart",
-							`The ${meta.agent} process for '${meta.sessionId}' is still alive (pid ${meta.pid}). Cancel it with delegate_cancel before restarting.`,
-							{ code: "PROCESS_ALIVE", pid: meta.pid },
+							`'${meta.sessionId}' was ${supersededPointerText(meta)}. Restart or message that session instead; restarting this id again would put a second agent of one conversation in the worktree they share.`,
+							{ code: "SUPERSEDED" },
 						);
 					}
-					// Cancelled: the old process may still be inside its dispose kill window. Wait for the
-					// SIGKILL timers to fire — starting a second agent on a worktree the first is still
-					// writing to is how two sessions end up editing one checkout.
-					rt.killProcessGroup(meta.pid, rt.driverCli(meta.agent));
-					for (let i = 0; i < 30 && rt.isPidAlive(meta.pid); i++) {
-						await new Promise((r) => setTimeout(r, 100));
-					}
-					if (rt.isPidAlive(meta.pid)) {
+					if (rt.reattaching.has(meta.sessionId)) {
+						// The mirror of the rule below: a follow-up is reconnecting this conversation right now, and a
+						// restart spawning beside it is the same two agents in one checkout.
 						return errorResult(
 							rt,
 							"delegate_restart",
-							`The old process (pid ${meta.pid}) would not stop. Try delegate_restart again shortly.`,
+							`A follow-up is reconnecting '${meta.sessionId}' right now. Wait for it, or delegate_cancel it, then restart.`,
+							{ code: "REATTACH_IN_FLIGHT" },
+						);
+					}
+					if (meta.status === "running" || meta.status === "stalled") {
+						return errorResult(
+							rt,
+							"delegate_restart",
+							`Session '${meta.sessionId}' is ${meta.status}. Cancel it first with delegate_cancel.`,
 							{
-								code: "PROCESS_NOT_STOPPED",
+								code: "BUSY",
+								status: meta.status,
 							},
 						);
 					}
-				}
+					if (meta.pid && rt.isPidAlive(meta.pid)) {
+						if (meta.status !== "cancelled") {
+							return errorResult(
+								rt,
+								"delegate_restart",
+								`The ${meta.agent} process for '${meta.sessionId}' is still alive (pid ${meta.pid}). Cancel it with delegate_cancel before restarting.`,
+								{ code: "PROCESS_ALIVE", pid: meta.pid },
+							);
+						}
+						// Cancelled: the old process may still be inside its dispose kill window. Wait for the
+						// SIGKILL timers to fire — starting a second agent on a worktree the first is still
+						// writing to is how two sessions end up editing one checkout.
+						rt.killProcessGroup(meta.pid, rt.driverCli(meta.agent));
+						for (let i = 0; i < 30 && rt.isPidAlive(meta.pid); i++) {
+							await new Promise((r) => setTimeout(r, 100));
+						}
+						if (rt.isPidAlive(meta.pid)) {
+							return errorResult(
+								rt,
+								"delegate_restart",
+								`The old process (pid ${meta.pid}) would not stop. Try delegate_restart again shortly.`,
+								{
+									code: "PROCESS_NOT_STOPPED",
+								},
+							);
+						}
+					}
 
-				const agentId = params.agent ?? meta.agent;
-				const admitted = admit({
-					agent: agentId,
-					model: meta.model,
-					thinking: meta.thinking,
-					mode: params.mode ?? meta.mode,
-				});
-				if (!admitted.ok) {
-					return errorResult(rt, "delegate_restart", admitted.error, { code: admitted.code, agent: agentId });
-				}
-
-				// The worktree is the session's state: reuse it, and let `delegate` provision a fresh one
-				// only when it is gone or was already released. Restarting into a deleted folder would put
-				// the agent in the parent checkout, where it would edit the wrong tree.
-				let worktree: DelegateRequest["reuseWorktree"] = {
-					worktreePath: meta.worktreePath,
-					worktreeBranch: meta.worktreeBranch,
-					worktreeId: meta.worktreeId,
-					parentWorktreeId: meta.parentWorktreeId,
-					worktreeStatus: meta.worktreeStatus,
-				};
-				const reusable = worktree.worktreePath && worktree.worktreeStatus !== "released" && fs.existsSync(worktree.worktreePath);
-				if (meta.createWorktree && !reusable) {
-					worktree = undefined;
-				}
-
-				const res = await delegate(rt, {
-					driver: admitted.driver,
-					selection: admitted.selection,
-					prompt: params.prompt ?? meta.prompt,
-					createWorktree: meta.createWorktree,
-					parentSessionId: meta.sessionId,
-					reuseWorktree: worktree,
-				});
-				if (!res.ok) {
-					return errorResult(rt, "delegate_restart", `Failed to restart '${meta.sessionId}': ${res.error}`, { code: res.code });
-				}
-				// The conversation belongs to the restarted session now. A restart mints a new id and leaves this
-				// record where it was, so without the pointer a later `delegate_message` to the old id would reattach
-				// it beside its sibling: two live agents of one conversation in the worktree a restart reuses.
-				markSuperseded(rt, meta, "started" in res ? { sessionId: res.started.sessionId } : { queueId: res.queued.queueId });
-				const warnings = [...admitted.warnings];
-				const note = warnings.length ? `\nNote: ${warnings.join("; ")}` : "";
-				if ("started" in res) {
-					return textResult(rt, "delegate_restart", `Restarted as session ${res.started.sessionId} (${res.started.agent}).${note}`, {
-						result: "restarted",
-						sessionId: res.started.sessionId,
-						agent: res.started.agent,
-						parentSessionId: meta.sessionId,
+					const agentId = params.agent ?? meta.agent;
+					const admitted = admit({
+						agent: agentId,
+						model: meta.model,
+						thinking: meta.thinking,
+						mode: params.mode ?? meta.mode,
 					});
-				}
-				return textResult(
-					rt,
-					"delegate_restart",
-					`Restart queued as ${res.queued.queueId} (position ${res.position} of ${res.queueTotal}) — ${queueReasonText(rt, res.queued.agent, res.reason)}. You will receive the session id when it starts.${note}`,
-					{
-						result: "queued",
-						queueId: res.queued.queueId,
+					if (!admitted.ok) {
+						return errorResult(rt, "delegate_restart", admitted.error, { code: admitted.code, agent: agentId });
+					}
+
+					// The worktree is the session's state: reuse it, and let `delegate` provision a fresh one
+					// only when it is gone or was already released. Restarting into a deleted folder would put
+					// the agent in the parent checkout, where it would edit the wrong tree.
+					let worktree: DelegateRequest["reuseWorktree"] = {
+						worktreePath: meta.worktreePath,
+						worktreeBranch: meta.worktreeBranch,
+						worktreeId: meta.worktreeId,
+						parentWorktreeId: meta.parentWorktreeId,
+						worktreeStatus: meta.worktreeStatus,
+					};
+					const reusable = worktree.worktreePath && worktree.worktreeStatus !== "released" && fs.existsSync(worktree.worktreePath);
+					if (meta.createWorktree && !reusable) {
+						worktree = undefined;
+					}
+
+					const res = await delegate(rt, {
+						driver: admitted.driver,
+						selection: admitted.selection,
+						prompt: params.prompt ?? meta.prompt,
+						createWorktree: meta.createWorktree,
 						parentSessionId: meta.sessionId,
-					},
-				);
+						reuseWorktree: worktree,
+					});
+					if (!res.ok) {
+						return errorResult(rt, "delegate_restart", `Failed to restart '${meta.sessionId}': ${res.error}`, { code: res.code });
+					}
+					// The conversation belongs to the restarted session now. A restart mints a new id and leaves this
+					// record where it was, so without the pointer a later `delegate_message` to the old id would reattach
+					// it beside its sibling: two live agents of one conversation in the worktree a restart reuses.
+					markSuperseded(rt, meta, "started" in res ? { sessionId: res.started.sessionId } : { queueId: res.queued.queueId });
+					const warnings = [...admitted.warnings];
+					const note = warnings.length ? `\nNote: ${warnings.join("; ")}` : "";
+					if ("started" in res) {
+						return textResult(rt, "delegate_restart", `Restarted as session ${res.started.sessionId} (${res.started.agent}).${note}`, {
+							result: "restarted",
+							sessionId: res.started.sessionId,
+							agent: res.started.agent,
+							parentSessionId: meta.sessionId,
+						});
+					}
+					return textResult(
+						rt,
+						"delegate_restart",
+						`Restart queued as ${res.queued.queueId} (position ${res.position} of ${res.queueTotal}) — ${queueReasonText(rt, res.queued.agent, res.reason)}. You will receive the session id when it starts.${note}`,
+						{
+							result: "queued",
+							queueId: res.queued.queueId,
+							parentSessionId: meta.sessionId,
+						},
+					);
+				} finally {
+					rt.restarting.delete(requested);
+				}
 			},
 		},
 		{
@@ -312,10 +348,23 @@ export function buildSessionTools(rt: DelegateRuntime): ToolSpec[] {
 					if (!meta) {
 						return errorResult(rt, "delegate_clean_worktree", `Session '${params.session_id}' not found.`, { code: "NOT_FOUND" });
 					}
+					if (meta.supersededBy) {
+						// Its worktree belongs to the restarted session, which may be working in it this moment.
+						return errorResult(
+							rt,
+							"delegate_clean_worktree",
+							`Session ${meta.sessionId} ${supersededPointerText(meta)}; its worktree is that session's to clean.`,
+							{ code: "SESSION_SUPERSEDED", session_id: meta.sessionId },
+						);
+					}
 					targets.push(meta);
 				} else if (params.all_settled === true) {
 					for (const s of rt.sessions.values()) {
 						if (s.status === "running" || s.status === "stalled") {
+							continue;
+						}
+						// A settled record whose conversation moved on is not evidence its folder is dead wood.
+						if (s.supersededBy) {
 							continue;
 						}
 						if (s.worktreePath && s.worktreeStatus === "active") {

@@ -15,7 +15,17 @@ import { extractCliError } from "./diagnostics.ts";
 import { detectPullRequest } from "./pr-detect.ts";
 import { agentTitle, findAgent } from "./registry.ts";
 import { commandForCaller } from "./permissions.ts";
-import { configureSession, installDrainer, reattachSession, spawnSession, startTurn, supersededError } from "./session.ts";
+import {
+	clearSuperseded,
+	configureSession,
+	installDrainer,
+	markSuperseded,
+	reattachSession,
+	spawnSession,
+	startTurn,
+	supersededError,
+	supersededPointerText,
+} from "./session.ts";
 import type { DelegateTransport } from "./transport.ts";
 import type { DelegateRuntime } from "./runtime.ts";
 import { createWorktree, releaseWorktree } from "./worktree.ts";
@@ -129,6 +139,32 @@ export async function delegate(rt: DelegateRuntime, req: DelegateRequest): Promi
  * caller that started immediately already has the id in its tool result — repeating it as a message is
  * noise in the conversation, and six delegations meant six duplicated lines.
  */
+/** The mirror of `resolveQueuedRestart`: a restart that will never start must hand the conversation back. */
+function abandonQueuedRestart(rt: DelegateRuntime, task: QueuedTask): void {
+	if (!task.parentSessionId) {
+		return;
+	}
+	const parent = rt.sessions.get(task.parentSessionId);
+	if (parent?.supersededBy?.queueId === task.queueId) {
+		clearSuperseded(rt, parent);
+	}
+}
+
+/**
+ * A queued restart resolves the moment its session exists: the parent's pointer named this queue entry, and
+ * without the rewrite it goes on refusing with "queue entry q-7", sending the caller to something that stopped
+ * existing when it started.
+ */
+function resolveQueuedRestart(rt: DelegateRuntime, task: QueuedTask, sessionId: string): void {
+	if (!task.parentSessionId) {
+		return;
+	}
+	const parent = rt.sessions.get(task.parentSessionId);
+	if (parent?.supersededBy?.queueId === task.queueId) {
+		markSuperseded(rt, parent, { sessionId });
+	}
+}
+
 async function startNow(
 	rt: DelegateRuntime,
 	task: QueuedTask,
@@ -165,6 +201,7 @@ async function startNow(
 
 		started.queueId = task.queueId;
 		started.parentSessionId = task.parentSessionId;
+		resolveQueuedRestart(rt, task, started.sessionId);
 		started.worktreePath = task.worktreePath;
 		started.worktreeBranch = task.worktreeBranch;
 		started.worktreeId = task.worktreeId;
@@ -258,12 +295,16 @@ export async function drainQueue(rt: DelegateRuntime): Promise<void> {
 				// A descriptor removed from disk after its task was queued: the agent was promised a
 				// session, so say this one is not coming rather than leaving it in the FIFO forever.
 				release();
+				abandonQueuedRestart(rt, task);
 				rt.sendAgentMessage(`The queued task ${task.queueId} cannot start: ${found.error}`);
 				continue;
 			}
 			void startNow(rt, task, release, found.driver).then((res) => {
 				if (!res.ok) {
-					// The agent was promised a session id for this task: say it is not coming.
+					// The agent was promised a session id for this task: say it is not coming. And if that task
+					// was a restart, its parent keeps pointing at an entry that will never start unless this says
+					// otherwise — the conversation is its own again.
+					abandonQueuedRestart(rt, task);
 					rt.sendAgentMessage(`The queued task ${task.queueId} failed to start: ${res.error}. Delegate it again with "delegate_task".`);
 				}
 				void drainQueue(rt);
@@ -290,6 +331,28 @@ installDrainer(drainQueue);
  * answer says nothing about the second.
  */
 const midTurn = (meta: SessionMeta) => meta.status === "running" || meta.status === "stalled";
+
+/**
+ * Whether this conversation still belongs to the id it was addressed by. A restart mints a new id and leaves
+ * this record where it was, so the pointer is what says the conversation moved on; the in-flight set says the
+ * same thing one moment earlier, while the restart is still spawning what its pointer will name. Either way
+ * the sibling works in this session's worktree, and reattaching would run two live agents of it in one
+ * checkout — which is why a follow-up is refused rather than queued behind the restart.
+ */
+function conversationTakenElsewhere(rt: DelegateRuntime, meta: SessionMeta): { code: string; error: string } | undefined {
+	if (meta.supersededBy) {
+		return { code: "SUPERSEDED", error: supersededError(meta) };
+	}
+	if (rt.restarting.has(meta.sessionId)) {
+		return {
+			code: "RESTARTING",
+			error:
+				`a delegate_restart of this session is in flight, and the session it starts will own this conversation. ` +
+				`Wait for it, or delegate_cancel first; nothing was prompted here.`,
+		};
+	}
+	return undefined;
+}
 
 /**
  * Continue a session with another prompt, on its live connection if there is one.
@@ -325,11 +388,9 @@ export async function followUp(
 		}
 		return { ok: false, code: "BUSY", error: "the session is still working; wait for it or delegate_cancel first" };
 	}
-	// A restarted conversation is not this one any more. `delegate_restart` mints a new id and leaves this
-	// record where it was, so the pointer is the only thing saying its conversation moved on — and the sibling
-	// works in this session's worktree, so reattaching would run two live agents of it in one checkout.
-	if (meta.supersededBy) {
-		return { ok: false, code: "SUPERSEDED", error: supersededError(meta) };
+	const taken = conversationTakenElsewhere(rt, meta);
+	if (taken) {
+		return { ok: false, ...taken };
 	}
 
 	// A follow-up turn occupies capacity exactly the way an initial one does, so it asks for the slot the
@@ -403,7 +464,12 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	const queueIndex = rt.queue.findIndex((t) => t.queueId === targetId);
 	if (queueIndex >= 0) {
 		const [queued] = rt.queue.splice(queueIndex, 1);
-		if (queued.worktreePath) {
+		// A cancelled restart must not leave its parent pointing at an entry that will never start: the
+		// conversation it was going to take over is still its own, and the refusal would be a lie.
+		abandonQueuedRestart(rt, queued);
+		// Only a folder this task provisioned itself goes back. A restart reuses its parent's worktree, which
+		// the parent's conversation still lives in, and this path has no safety check to lose.
+		if (queued.worktreePath && !queued.parentSessionId) {
 			// Provisioned for a task that will never run: give the folder back.
 			const { removeOrcaWorktree } = await import("../orca-client.ts");
 			void removeOrcaWorktree(queued.worktreeId || `path:${queued.worktreePath}`).catch(() => {});
@@ -442,7 +508,9 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 	rt.updateStatusUI();
 	void drainQueue(rt);
 
-	if (meta.worktreePath && meta.worktreeStatus === "active") {
+	// A superseded record's worktree belongs to the session that took its conversation, which may be working
+	// in that folder right now; the safety check in `releaseWorktree` catches uncommitted work, not that.
+	if (meta.worktreePath && meta.worktreeStatus === "active" && !meta.supersededBy) {
 		void releaseWorktree(rt, meta).catch((err) => rt.logError(`worktree release failed for ${meta.sessionId}: ${extractCliError(err)}`));
 	}
 	return "session";
@@ -455,6 +523,12 @@ export async function cancelSession(rt: DelegateRuntime, targetId: string): Prom
 export async function onPrClosed(rt: DelegateRuntime, prNumber: number, state: string): Promise<void> {
 	for (const [id, meta] of rt.sessions.entries()) {
 		if (!meta.worktreePath || meta.worktreeStatus !== "active") {
+			continue;
+		}
+		if (meta.supersededBy) {
+			// The folder belongs to the restarted sibling now, and that sibling may be live: a settled record
+			// whose conversation moved on is not evidence that its worktree is dead wood.
+			rt.logWarn(`Skipping worktree cleanup for superseded session ${id} (${supersededPointerText(meta)}) on PR #${prNumber} closed event`);
 			continue;
 		}
 		if (meta.status === "running" || meta.status === "stalled") {

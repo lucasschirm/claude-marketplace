@@ -21,6 +21,7 @@
 // Q9: a process that dies while awaiting permission leaves no request (and no auto-reject) behind
 // Q10: a dequeued start that fails tells the agent, frees its slot, and the next task starts
 // Q11: a burst of parallel delegate_restart calls holds the limit (the restart loop from the incident)
+// Q4b: a message that lands during a restart's own spawn window is refused, not reattached beside it
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import ext from "../extensions/delegate-task.ts";
 import assert from "node:assert";
@@ -29,6 +30,11 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { must } from "./helpers/must.ts";
+
+// Module constants: biome counts a literal recompiled per call as debt, and these guard one scenario.
+const RESTART_IN_FLIGHT_RE = /in flight/;
+const RESTARTED_AS_REPORT_RE = /restarted as [a-z][a-z0-9-]+/;
+const RESTARTED_AS_RE = /^Restarted as session /;
 
 export default function testRunner(pi: ExtensionAPI): void {
 	const registeredTools = new Map<string, any>();
@@ -274,6 +280,37 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 			assert.ok(superseded.isError, "a restarted session must not take follow-ups");
 			assert.ok(text(superseded).includes(startedId(restarted)), `the refusal must name where the conversation went: ${text(superseded)}`);
 			assert.ok(text(superseded).includes("workspace"), `the refusal must say why: ${text(superseded)}`);
+			// Restarting the dead id again is the same hazard wearing a different hat: it would mint a second
+			// sibling in the worktree the first successor is using, and overwrite where the conversation went.
+			const restartedTwice = await call("delegate_restart", { session_id: q4Id, prompt: "again" });
+			assert.ok(restartedTwice.isError, "an already-restarted session must not restart again");
+			assert.ok(text(restartedTwice).includes(startedId(restarted)), text(restartedTwice));
+			console.log("✓ Q4: restart pointer refuses the old id, and refuses restarting it again");
+
+			// ---------- Q4b: the window before the pointer can be written ----------
+			// A restart can only mark the old record once the new session exists, and spawning, handshaking and
+			// prompting take longer than a caller waits. A message landing in that window must be refused by the
+			// in-flight claim, or it reattaches the conversation beside the sibling being started.
+			console.log("Q4b: a message that lands during a restart's own spawn window...");
+			// The window has to outlast the message's own `begin()`, not just the restart's: a slow spawn here is
+			// what keeps the raced call inside it, so the refusal can only come from the in-flight claim.
+			fakeEnv({ FAKE_DELAY_MS: "500", FAKE_NEW_DELAY_MS: "3000" });
+			const q4b = await call("delegate_task", { prompt: "raced restart", model: "swe-2-high", mode: "dangerous" });
+			const q4bId = startedId(q4b);
+			created.push(q4bId);
+			await waitFor("the first turn to finish", () => agentMessages.some((m) => m.startsWith(`The session ${q4bId} is done.`)), 20_000);
+			// Cancelled first, the way a restart of an idle session needs it: the record must be settled and its
+			// process gone, or the restart refuses before it ever opens the window this scenario is about.
+			await call("delegate_cancel", { session_id: q4bId });
+			const restarting = call("delegate_restart", { session_id: q4bId, prompt: "again, raced" });
+			await new Promise((done) => setTimeout(done, 150));
+			const raced = await call("delegate_message", { session_id: q4bId, message: "sent during the restart" });
+			const restartResult = await restarting;
+			assert.ok(raced.isError, `a message arriving mid-restart must be refused, got: ${text(raced)}`);
+			assert.match(text(raced), RESTART_IN_FLIGHT_RE, `the refusal should name the restart in flight: ${text(raced)}`);
+			assert.match(text(restartResult), RESTARTED_AS_RE, text(restartResult));
+			created.push(startedId(restartResult));
+			console.log("✓ Q4b: the restart window is closed from both sides");
 			console.log("✓ Q4: auto -> smart, unknown mode refused, restart mode override applied");
 
 			// ---------- Q5: unimplemented client methods are answered with an error ----------
@@ -458,7 +495,19 @@ exec node "${path.join(here, "fake-acp-server.mjs")}" "$@"
 				created.push(startedId({ content: [{ text: m }] }));
 			const q11PeakValue = q11Peak();
 			assert.ok(q11PeakValue <= 2, `peak ${q11PeakValue}`);
-			console.log(`✓ Q11: 2 restarted, 2 queued, peak ${q11PeakValue}, all 4 finished`);
+			// The two that queued could only name a queue entry, and those entries are sessions by now. A parent
+			// still pointing at `q-3` sends every later message to something that stopped existing when it
+			// started — and the report line is where the pointer shows without having to be refused for it.
+			const parentReports = await Promise.all(
+				restartQueued.map(async (queuedRestart) =>
+					text(await call("delegate_status", { session_id: String(queuedRestart.details.parentSessionId) })),
+				),
+			);
+			for (const parentReport of parentReports) {
+				assert.match(parentReport, RESTARTED_AS_REPORT_RE, `a queued restart must resolve to the session it started: ${parentReport}`);
+				assert.ok(!parentReport.includes("queue entry"), `the pointer still names a queue entry that started: ${parentReport}`);
+			}
+			console.log(`✓ Q11: 2 restarted, 2 queued, peak ${q11PeakValue}, all 4 finished, queue pointers resolved`);
 
 			// ---------- Q12: a turn that did not finish must not be reported as finished ----------
 			console.log("Q12: an agent that stops at its token limit...");

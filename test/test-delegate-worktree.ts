@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { makeStub } from "./helpers/delegate-stub.ts";
 import { createWorktree, releaseWorktree } from "../extensions/lib/delegate/worktree.ts";
+import { onPrClosed } from "../extensions/lib/delegate/queue.ts";
 import { metaFor } from "./helpers/delegate-stub.ts";
 
 /** A committed repo on `feature`, with an origin so "pushed" has a meaning. */
@@ -96,6 +97,40 @@ test("a failed checkout says why, instead of returning a path that does not exis
 		stub.restoreHome();
 		fs.rmSync(repo, { recursive: true, force: true });
 		fs.rmSync(path.join(repo, "..", `not-a-repo-${process.pid}`), { recursive: true, force: true });
+	}
+});
+
+test("a closed PR does not release a worktree a restarted session is working in", async () => {
+	// `delegate_restart` reuses the worktree, so one folder can be named by two records: the settled one whose
+	// conversation moved on, and the session that took it. Releasing "settled sessions with an active worktree"
+	// would cut that folder out from under a live agent, and the safety check inside looks at uncommitted work,
+	// not at who owns the folder.
+	const stub = makeStub();
+	const repo = makeRepo();
+	withoutOrca(stub.rt);
+	try {
+		const made = await createWorktree(stub.rt, repo);
+		const shared = {
+			status: "completed" as const,
+			worktreePath: made.worktreePath,
+			worktreeBranch: made.worktreeBranch,
+			worktreeStatus: "active" as const,
+			detectedPrNumber: 42,
+		};
+		const superseded = metaFor("old-1", { ...shared, supersededBy: { sessionId: "new-1" } });
+		const successor = metaFor("new-1", shared);
+		stub.rt.sessions.set("old-1", superseded);
+		stub.rt.sessions.set("new-1", successor);
+
+		await onPrClosed(stub.rt, 42, "closed");
+
+		assert.strictEqual(superseded.worktreeStatus, "active", "a record whose conversation moved on owns nothing to release");
+		const told = stub.sent.join("\n");
+		assert.ok(!told.includes("old-1"), `the superseded session was still treated as dead wood: ${told}`);
+		assert.ok(told.includes("new-1"), `the session that does own the folder should have been handled: ${told}`);
+	} finally {
+		stub.restoreHome();
+		fs.rmSync(repo, { recursive: true, force: true });
 	}
 });
 

@@ -156,6 +156,24 @@ test("that workspace survives the record on disk, and a planted one does not", (
 	assert.strictEqual(normalizeMeta(metaFor("conv-1", { agent: "agy", worktreePath: "~/inside-a-string" }))?.worktreePath, undefined);
 });
 
+test("the restart pointer survives the record on disk, and garbage does not", () => {
+	// The refusal that keeps a follow-up off a restarted conversation has to outlive pi, because a restart is
+	// exactly when the sibling starts working in the shared worktree. A reader that dropped the field would
+	// re-open the old id in silence, and only after a crash — where nothing else says what happened.
+	const restarted = JSON.parse(JSON.stringify(metaFor("conv-1", { agent: "agy", supersededBy: { sessionId: "brave-walrus" } })));
+	assert.deepStrictEqual(normalizeMeta(restarted)?.supersededBy, { sessionId: "brave-walrus", queueId: undefined });
+	// A restart that queued has no session id to name yet, and that pointer has to survive too: it is the
+	// only thing telling a follow-up the conversation is on its way somewhere.
+	const queued = JSON.parse(JSON.stringify(metaFor("conv-1", { agent: "agy", supersededBy: { queueId: "q-9" } })));
+	assert.deepStrictEqual(normalizeMeta(queued)?.supersededBy, { sessionId: undefined, queueId: "q-9" });
+	// And the record may have been written by another build, or damaged: a pointer that names nothing is no
+	// pointer, and a string is not an object that names something.
+	for (const junk of ["brave-walrus", 7, ["brave-walrus"], {}, { sessionId: 7 }, { sessionId: "" }, null]) {
+		const planted = JSON.parse(JSON.stringify(metaFor("conv-1", { agent: "agy", supersededBy: junk })));
+		assert.strictEqual(normalizeMeta(planted)?.supersededBy, undefined, `${JSON.stringify(junk)} is not a pointer`);
+	}
+});
+
 test("Devin is prompted with no handshake, because asking it would be a method not found", async () => {
 	assert.strictEqual(devinDriver.resumeHandshake, undefined);
 	assert.strictEqual(agyDriver.resumeHandshake !== undefined, true);

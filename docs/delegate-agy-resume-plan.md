@@ -130,6 +130,11 @@ await and answers `BUSY`, telling the caller to send it again.
 | a restart that lands mid-reattach stops the prompt and disposes the child | same |
 | a spawn failure names the missing workspace, not only the command | `test/test-delegate-transport.ts` |
 | the real `delegate_restart` leaves the pointer, and the real `delegate_message` reads it | `test/test-delegate-queue.ts` (Q4) |
+| restarting an already-restarted id refuses, naming the successor and not a second sibling | same (Q4) |
+| a message that lands during the restart's own spawn window is refused, not reattached beside it | same (Q4b) |
+| a queued restart's pointer resolves to the session it started, and shows in the report | same (Q11) |
+| the pointer survives `normalizeMeta`; a string, a number, an array and `{}` do not become one | `test/test-delegate-resume.ts` |
+| a closed PR does not release a worktree a restarted sibling is working in | `test/test-delegate-worktree.ts` |
 | the driver still claims what the adapter still offers (`loadSession`, `session/resume`, its params) | `test/test-delegate-agy.ts` |
 
 `test/fake-acp-server.mjs` gained the store (`FAKE_STORE_DIR`, `FAKE_RESUME_NOTES`) rather than the test
@@ -150,11 +155,37 @@ sequentially (restart, then message the old id, which stayed resumable by design
 pointer rather than a narrower comment.
 
 `SessionMeta.supersededBy` is written by `markSuperseded` when a restart starts (`{sessionId}`) or queues
-(`{queueId}`), persisted and re-read by `normalizeMeta`, and terminal: nothing clears it. `followUp` refuses
-it before taking a slot; `reattachOnce` refuses it again after the handshake, in case the restart landed
-mid-spawn; both say where the conversation went. The cost is that the old id stops being a way back into the
-conversation — which is what "restart" promises — while its transcript stays readable and its sibling holds
-the continuation.
+(`{queueId}`), persisted and re-read by `normalizeMeta`, and terminal — except for a restart that is still
+only queued: if that entry is cancelled, or fails to start, `abandonQueuedRestart` hands the conversation
+back, because nothing may dead-end it for something that never happened. Once a successor session exists the
+pointer is permanent.
+
+### §7.1 The three things that had to be true for the pointer to mean anything (round 6)
+
+Writing the pointer was the first draft of the fix. Round 6 found it was not enough, in three ways that each
+survived the tests written alongside it:
+
+* **It was written too late.** `markSuperseded` ran after `await delegate()` — that is, after the kill window,
+  the spawn, the handshake, the config round trips and the first prompt. For all of that, the old id was fully
+  addressable, and a `delegate_message` landing in the window passed every check and reattached the
+  conversation beside the sibling. The pointer cannot be the marker for a window that opens before it can
+  exist, so `rt.restarting` holds the id **from the moment the restart tool is entered, before its first
+  await** — including `begin()`, which is what the first version of the fix still left open, and what the new
+  queue scenario caught. In flight is process-local by definition: after a pi restart nothing is pending, so
+  it is a `Set` in the runtime and never a record on disk, where a crashed restart would have dead-ended a
+  conversation for ever. The same rule works the other way: a restart refuses while a reattach is in flight.
+* **Restart ignored it.** `delegate_restart` of an already-superseded id minted yet another sibling into the
+  same worktree and overwrote the pointer, losing the link. It now refuses and names where the conversation
+  went; the successor is the only way on.
+* **The worktree had changed hands and nobody knew.** A restart reuses the folder, so a *settled* superseded
+  record still names a directory a live agent is editing. `delegate_clean_worktree` (both `session_id` and
+  `all_settled`), `onPrClosed` and `cancelSession` all treat "settled, worktree active" as dead wood, and the
+  safety check inside `releaseWorktree` looks at uncommitted work, not at ownership. Each now skips a
+  superseded record; cancelling the *queued* restart no longer removes the reused folder either, since that
+  folder was provisioned for the parent and never came back.
+
+The pointer is also rendered now — in the `delegate_status` overview line and the session report — because
+otherwise the only way to learn where a conversation went is to send it a message and be refused.
 
 ## 8. Out of scope
 
